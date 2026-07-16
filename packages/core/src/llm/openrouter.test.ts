@@ -85,6 +85,49 @@ describe("OpenRouterClient.chat", () => {
     expect(result.toolCalls[0]?.function.name).toBe("get_page");
     expect(result.usage.promptTokens).toBe(10);
     expect(result.usage.estimatedCostUsd).toBeGreaterThan(0);
+    expect(result.usage.costSource).toBe("estimate");
+  });
+
+  it("prefers OpenRouter native usage.cost", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          model: "test-model",
+          choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, cost: 0.0042 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const result = await client.chat({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(result.usage.estimatedCostUsd).toBe(0.0042);
+    expect(result.usage.costSource).toBe("openrouter");
+  });
+
+  it("lists models from /models", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      expect(String(input)).toContain("/models");
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "x-ai/grok-4.5",
+              name: "Grok 4.5",
+              context_length: 256000,
+              pricing: { prompt: "0.000001", completion: "0.000003" },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    };
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const models = await client.listModels();
+    expect(models[0]?.id).toBe("x-ai/grok-4.5");
+    expect(models[0]?.promptPrice).toBe(0.000001);
   });
 
   it("throws LlmError on non-OK", async () => {

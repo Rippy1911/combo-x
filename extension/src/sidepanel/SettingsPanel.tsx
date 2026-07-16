@@ -1,7 +1,6 @@
 import {
   AGENT_TOOLS,
   DEFAULT_SKIP_DIRS,
-  MODEL_PRESETS,
   grantAndIndex,
   githubRestTemplate,
   normalizeModelId,
@@ -19,6 +18,7 @@ import {
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { mcpConnectorFromSanitized } from "./connectorHelpers";
+import { ModelPicker } from "./ModelPicker";
 import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const GH_TOKEN_LABEL = "github_token";
@@ -417,21 +417,9 @@ export function SettingsPanel({
             placeholder="Extra instructions for this agent…"
           />
           <label className="hint">Orchestrator model</label>
-          <select value={draftOrch} onChange={(e) => setDraftOrch(e.target.value)}>
-            {MODEL_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+          <ModelPicker value={draftOrch} apiKey={apiKey} onChange={setDraftOrch} />
           <label className="hint">Worker model</label>
-          <select value={draftWorker} onChange={(e) => setDraftWorker(e.target.value)}>
-            {MODEL_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+          <ModelPicker value={draftWorker} apiKey={apiKey} onChange={setDraftWorker} />
           <label className="hint">Budget mode</label>
           <select
             value={draftBudget}
@@ -742,32 +730,22 @@ export function SettingsPanel({
         placeholder="sk-or-v1-…"
       />
       <label className="hint">Orchestrator model (global default)</label>
-      <select value={model} onChange={(e) => setModel(e.target.value)}>
-        {MODEL_PRESETS.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label} — {p.id}
-          </option>
-        ))}
-      </select>
-      <input
-        className="mono"
-        value={customModel}
-        onChange={(e) => setCustomModel(e.target.value)}
-        placeholder="custom orchestrator model id"
+      <ModelPicker
+        value={model}
+        apiKey={apiKey}
+        onChange={(id) => {
+          setModel(id);
+          setCustomModel(id);
+        }}
       />
       <label className="hint">Worker model</label>
-      <select value={workerModel} onChange={(e) => setWorkerModel(e.target.value)}>
-        {MODEL_PRESETS.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.label} — {p.id}
-          </option>
-        ))}
-      </select>
-      <input
-        className="mono"
-        value={customWorkerModel}
-        onChange={(e) => setCustomWorkerModel(e.target.value)}
-        placeholder="custom worker model id"
+      <ModelPicker
+        value={workerModel}
+        apiKey={apiKey}
+        onChange={(id) => {
+          setWorkerModel(id);
+          setCustomWorkerModel(id);
+        }}
       />
       <label className="hint">GitHub token (vault label github_token)</label>
       <input

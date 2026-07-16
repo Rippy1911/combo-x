@@ -525,12 +525,22 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "remember",
-      description: "Save a fact or note into local persistent memory.",
+      description:
+        "Save a durable agent memory. scope=global (all agents) or scope=agent (this profile). Memories are always prepended to the next user turn (not mid-stream).",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
+          scope: {
+            type: "string",
+            enum: ["global", "agent"],
+            description: "global = shared; agent = bound to agentId (defaults to active agent)",
+          },
+          agentId: {
+            type: "string",
+            description: "Required for scope=agent when no active agent is set",
+          },
         },
         required: ["text"],
         additionalProperties: false,
@@ -542,12 +552,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "save_memory",
       description:
-        "Alias of remember — persist a fact into local memory (injected into the next user turn's system context, not mid-stream).",
+        "Alias of remember — persist agent memory (global or per-agent). Always prepended on the next user turn, never mid-stream.",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
+          scope: { type: "string", enum: ["global", "agent"] },
+          agentId: { type: "string" },
         },
         required: ["text"],
         additionalProperties: false,
@@ -558,7 +570,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "recall",
-      description: "Search local memory for relevant notes.",
+      description: "Search local memory (global + active agent) for relevant notes.",
       parameters: {
         type: "object",
         properties: {

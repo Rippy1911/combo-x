@@ -56,9 +56,29 @@ export interface LlmUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  /** Rough USD estimate using OpenRouter-style cents; overridden if provider returns cost. */
+  /** USD — prefers OpenRouter `usage.cost` when present; else local estimate. */
   estimatedCostUsd: number;
+  /** Where estimatedCostUsd came from. */
+  costSource?: "openrouter" | "estimate";
 }
+
+export interface OpenRouterModelInfo {
+  id: string;
+  name: string;
+  contextLength?: number;
+  /** USD per token (OpenRouter pricing.prompt). */
+  promptPrice?: number;
+  /** USD per token (OpenRouter pricing.completion). */
+  completionPrice?: number;
+}
+
+type RawUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  /** OpenRouter native generation cost in USD. */
+  cost?: number;
+};
 
 export interface ChatResult {
   content: string | null;
@@ -123,18 +143,67 @@ export class OpenRouterClient {
     };
   }
 
-  private estimate(usage: { prompt_tokens?: number; completion_tokens?: number }): LlmUsage {
+  private estimate(usage: RawUsage): LlmUsage {
     const promptTokens = usage.prompt_tokens ?? 0;
     const completionTokens = usage.completion_tokens ?? 0;
+    const totalTokens = usage.total_tokens ?? promptTokens + completionTokens;
+    if (typeof usage.cost === "number" && Number.isFinite(usage.cost)) {
+      return {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        estimatedCostUsd: usage.cost,
+        costSource: "openrouter",
+      };
+    }
     const estimatedCostUsd =
       (promptTokens / 1_000_000) * this.promptUsdPerMTok +
       (completionTokens / 1_000_000) * this.completionUsdPerMTok;
     return {
       promptTokens,
       completionTokens,
-      totalTokens: promptTokens + completionTokens,
+      totalTokens,
       estimatedCostUsd,
+      costSource: "estimate",
     };
+  }
+
+  /** List models from OpenRouter (for searchable picker). */
+  async listModels(): Promise<OpenRouterModelInfo[]> {
+    const res = await this.fetchImpl(`${this.baseUrl}/models`, {
+      method: "GET",
+      headers: this.headers(),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new LlmError(text || `HTTP ${res.status}`, res.status);
+    let json: {
+      data?: Array<{
+        id?: string;
+        name?: string;
+        context_length?: number;
+        pricing?: { prompt?: string; completion?: string };
+      }>;
+    };
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new LlmError("malformed models JSON");
+    }
+    const out: OpenRouterModelInfo[] = [];
+    for (const row of json.data ?? []) {
+      if (!row.id) continue;
+      const promptPrice = row.pricing?.prompt != null ? Number(row.pricing.prompt) : undefined;
+      const completionPrice =
+        row.pricing?.completion != null ? Number(row.pricing.completion) : undefined;
+      out.push({
+        id: row.id,
+        name: row.name ?? row.id,
+        contextLength: row.context_length,
+        promptPrice: Number.isFinite(promptPrice) ? promptPrice : undefined,
+        completionPrice: Number.isFinite(completionPrice) ? completionPrice : undefined,
+      });
+    }
+    return out.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   async chat(input: {
@@ -171,7 +240,7 @@ export class OpenRouterClient {
           tool_calls?: ToolCall[];
         };
       }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      usage?: RawUsage;
     };
     try {
       json = JSON.parse(text);
@@ -206,6 +275,7 @@ export class OpenRouterClient {
       model: input.model,
       messages: input.messages,
       stream: true,
+      stream_options: { include_usage: true },
     };
     if (input.tools?.length) body.tools = input.tools;
     if (input.temperature !== undefined) body.temperature = input.temperature;
@@ -260,7 +330,7 @@ export class OpenRouterClient {
                 }>;
               };
             }>;
-            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            usage?: RawUsage;
             model?: string;
           };
           try {
@@ -324,6 +394,7 @@ export class OpenRouterClient {
       model: input.model,
       messages: input.messages,
       stream: true,
+      stream_options: { include_usage: true },
     };
     if (input.temperature !== undefined) body.temperature = input.temperature;
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
@@ -359,7 +430,7 @@ export class OpenRouterClient {
           if (!data || data === "[DONE]") continue;
           let json: {
             choices?: Array<{ delta?: { content?: string } }>;
-            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            usage?: RawUsage;
           };
           try {
             json = JSON.parse(data);

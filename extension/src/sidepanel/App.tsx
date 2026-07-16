@@ -9,7 +9,6 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
-  MODEL_PRESETS,
   MemoryStore,
   OpenRouterClient,
   RagStore,
@@ -65,6 +64,8 @@ import { UsagePanel } from "./UsagePanel";
 import { TasksPanel } from "./TasksPanel";
 import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
 import { PageExtensionsPanel } from "./PageExtensionsPanel";
+import { ModelPicker } from "./ModelPicker";
+import { TabBar } from "./TabBar";
 import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const KEY_LABEL = "openrouter_api_key";
@@ -89,8 +90,12 @@ type TabId =
   | "tools"
   | "mcp";
 
-const PRIMARY_TABS: TabId[] = ["chat", "sessions", "views", "activity", "usage"];
-const MORE_TABS: Array<{ id: TabId; label: string }> = [
+const ALL_TABS: Array<{ id: TabId; label: string }> = [
+  { id: "chat", label: "Chat" },
+  { id: "sessions", label: "Sessions" },
+  { id: "views", label: "Views" },
+  { id: "activity", label: "Activity" },
+  { id: "usage", label: "Usage" },
   { id: "tasks", label: "Tasks" },
   { id: "pageext", label: "Page ext" },
   { id: "settings", label: "Settings" },
@@ -135,6 +140,12 @@ const ZERO: LlmUsage = {
   totalTokens: 0,
   estimatedCostUsd: 0,
 };
+
+function formatUsageLine(u: LlmUsage): string {
+  const cost = formatUsd(u.estimatedCostUsd);
+  const src = u.costSource === "openrouter" ? "OR" : u.costSource === "estimate" ? "~" : "";
+  return `in ${u.promptTokens.toLocaleString()} · out ${u.completionTokens.toLocaleString()} (${cost}${src ? ` ${src}` : ""})`;
+}
 
 function formatUsd(n: number): string {
   if (n < 0.01) return `$${n.toFixed(4)}`;
@@ -790,11 +801,16 @@ export function App() {
       const onEvent = (event: AgentEvent) => {
         if (event.type === "status" && event.message) setStatus(event.message);
         if (event.type === "usage" && event.usage) {
+          const costSource =
+            event.usage.costSource === "openrouter" || turnUsage.costSource === "openrouter"
+              ? ("openrouter" as const)
+              : event.usage.costSource ?? turnUsage.costSource;
           turnUsage = {
             promptTokens: turnUsage.promptTokens + event.usage.promptTokens,
             completionTokens: turnUsage.completionTokens + event.usage.completionTokens,
             totalTokens: turnUsage.totalTokens + event.usage.totalTokens,
             estimatedCostUsd: turnUsage.estimatedCostUsd + event.usage.estimatedCostUsd,
+            costSource,
           };
           setLastTurnUsage(turnUsage);
           setSessionUsage((u) => ({
@@ -802,6 +818,10 @@ export function App() {
             completionTokens: u.completionTokens + event.usage!.completionTokens,
             totalTokens: u.totalTokens + event.usage!.totalTokens,
             estimatedCostUsd: u.estimatedCostUsd + event.usage!.estimatedCostUsd,
+            costSource:
+              event.usage!.costSource === "openrouter" || u.costSource === "openrouter"
+                ? "openrouter"
+                : event.usage!.costSource ?? u.costSource,
           }));
         }
         if (event.type === "tool_approval" && event.resolve) {
@@ -1062,13 +1082,7 @@ export function App() {
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-or-v1-…"
               />
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {MODEL_PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
+              <ModelPicker value={model} apiKey={apiKey} onChange={setModel} />
             </>
           ) : null}
           <div className="row">
@@ -1097,58 +1111,28 @@ export function App() {
         <div className="brand">
           Combo<span>-X</span>
         </div>
-        <div className="meta" title="Session token totals">
-          {formatUsd(sessionUsage.estimatedCostUsd)} · {sessionUsage.totalTokens.toLocaleString()} tok
+        <div
+          className="meta"
+          title="Session context in / out + cost (OR = OpenRouter native cost, ~ = estimate)"
+        >
+          {formatUsageLine(sessionUsage)}
         </div>
       </header>
 
-      <nav className="tabs">
-        {(
-          [
-            ["chat", "Chat"],
-            ["sessions", "Sessions"],
-            ["views", "Views"],
-            ["activity", "Activity"],
-            ["usage", "Usage"],
-          ] as const
-        )
-          .filter(([id]) => PRIMARY_TABS.includes(id))
-          .map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              className={tab === id ? "tab active" : "tab"}
-              onClick={() => {
-                setTab(id);
-                if (id === "sessions") void refreshSessions();
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        <select
-          className="tab-more"
-          aria-label="More tabs"
-          value={MORE_TABS.some((t) => t.id === tab) ? tab : ""}
-          onChange={(e) => {
-            const id = e.target.value as TabId;
-            if (!id) return;
-            setTab(id);
-            if (id === "vault") void refreshVaultLabels();
-            if (id === "settings" || id === "mcp") {
-              void connectorStore.list().then((list) => setConnectorCount(list.length));
-              void agentProfiles.list().then(setAgentList);
-            }
-          }}
-        >
-          <option value="">More…</option>
-          {MORE_TABS.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-      </nav>
+      <TabBar
+        tabs={ALL_TABS}
+        active={tab}
+        onSelect={(id) => {
+          const next = id as TabId;
+          setTab(next);
+          if (next === "sessions") void refreshSessions();
+          if (next === "vault") void refreshVaultLabels();
+          if (next === "settings" || next === "mcp") {
+            void connectorStore.list().then((list) => setConnectorCount(list.length));
+            void agentProfiles.list().then(setAgentList);
+          }
+        }}
+      />
 
       {tab === "chat" ? (
         <>
@@ -1321,14 +1305,14 @@ export function App() {
                       ) : null}
                     </div>
                     {t.usage && t.role === "assistant" ? (
-                      <div className="turn-usage">
-                        {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
+                      <div className="turn-usage" title="Prompt (in) / completion (out) tokens + cost">
+                        {formatUsageLine(t.usage)}
                       </div>
                     ) : null}
                   </div>
                   {inspectTurnId === t.id && t.runContext ? (
                     <pre className="context-inspect">
-                      {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (injected once per turn, not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
+                      {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
                     </pre>
                   ) : null}
                 </div>
@@ -1401,21 +1385,16 @@ export function App() {
                   </option>
                 ))}
               </select>
-              <select
+              <ModelPicker
                 className="grow"
-                value={MODEL_PRESETS.some((p) => p.id === model) ? model : "__custom__"}
-                onChange={(e) => {
-                  if (e.target.value === "__custom__") return;
-                  setModel(e.target.value);
-                  void vault.putByLabel(MODEL_LABEL, e.target.value);
+                value={model}
+                apiKey={apiKey}
+                title="Search and select any OpenRouter model"
+                onChange={(id) => {
+                  setModel(id);
+                  void vault.putByLabel(MODEL_LABEL, id);
                 }}
-              >
-                {MODEL_PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
+              />
               <button type="button" onClick={() => void newChat()}>
                 New
               </button>
@@ -1513,21 +1492,6 @@ export function App() {
               </button>
               <button
                 type="button"
-                disabled={running || !input.trim()}
-                title="Save current input as a durable memory (injected on next turn)"
-                onClick={() => {
-                  void (async () => {
-                    const text = input.trim();
-                    if (!text) return;
-                    await memory.remember({ text, tags: ["manual"], kind: "note" });
-                    setStatus("Memory saved — will inject on the next send");
-                  })();
-                }}
-              >
-                Save memory
-              </button>
-              <button
-                type="button"
                 className="primary"
                 disabled={running || (!input.trim() && pendingAttachments.length === 0)}
                 onClick={() => void send()}
@@ -1537,9 +1501,9 @@ export function App() {
               <button type="button" className="danger" disabled={!running} onClick={stop}>
                 STOP
               </button>
-              <span className="hint" style={{ marginLeft: "auto" }}>
+              <span className="hint" style={{ marginLeft: "auto" }} title="Last turn context in/out">
                 {lastTurnUsage
-                  ? `last: ${lastTurnUsage.totalTokens} tok`
+                  ? `last: ${formatUsageLine(lastTurnUsage)}`
                   : model === workerModel
                     ? `${enabledTools.size} tools`
                     : `orch≠worker`}

@@ -39,6 +39,7 @@ export type {
   ContentPart,
   ChatResult,
   LlmUsage,
+  OpenRouterModelInfo,
   ToolCall,
   ToolDefinition,
   OpenRouterOptions,
@@ -57,7 +58,7 @@ export {
 export type { AttachmentKind, ParseResult } from "./attachments/parse.js";
 
 export { MemoryStore, rankMemories } from "./memory/store.js";
-export type { MemoryEntry, MemoryKind } from "./memory/store.js";
+export type { MemoryEntry, MemoryKind, MemoryScope } from "./memory/store.js";
 
 export {
   AGENT_TOOLS,

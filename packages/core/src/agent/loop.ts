@@ -389,7 +389,7 @@ export class AgentLoop {
     let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
     if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
     // Memories loaded once per user turn (not re-fetched during streaming deltas).
-    const memBlock = await this.formatMemoryInject();
+    const memBlock = await this.formatMemoryInject(options.agentId);
     const messages: ChatMessage[] = [
       { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
       ...leanHistory(options.history ?? []),
@@ -682,13 +682,16 @@ export class AgentLoop {
     });
   }
 
-  /** First-call inject from the same MemoryStore `remember` writes (GAP-MEM-1). */
-  private async formatMemoryInject(): Promise<string> {
+  /** First-call inject: always prepend global + active-agent memories (not mid-stream). */
+  private async formatMemoryInject(agentId?: string): Promise<string> {
     try {
-      const top = await this.memory.list(8);
+      const top = await this.memory.listForInject({ agentId, limit: 24 });
       if (!top.length) return "";
-      const lines = top.map((m, i) => `${i + 1}. ${m.text.slice(0, 400)}`);
-      return `USER MEMORIES (local; prefer these over inventing facts):\n${lines.join("\n")}`;
+      const lines = top.map((m, i) => {
+        const tag = m.scope === "agent" ? "agent" : "global";
+        return `${i + 1}. [${tag}] ${m.text.slice(0, 400)}`;
+      });
+      return `AGENT MEMORIES (local; always prepended each turn; prefer these over inventing facts):\n${lines.join("\n")}`;
     } catch {
       return "";
     }
@@ -886,15 +889,47 @@ export class AgentLoop {
       } else if (name === "remember" || name === "save_memory") {
         const text = String(args.text ?? args.fact ?? "");
         const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
-        const entry = await this.memory.remember({ text, tags, kind: "note" });
-        result = { ok: true, saved: true, id: entry.id };
+        const scopeRaw = String(args.scope ?? "global").toLowerCase();
+        const scope = scopeRaw === "agent" ? ("agent" as const) : ("global" as const);
+        const agentIdArg =
+          typeof args.agentId === "string" && args.agentId.trim()
+            ? args.agentId.trim()
+            : runCtx?.agentId;
+        try {
+          const entry = await this.memory.remember({
+            text,
+            tags,
+            kind: "note",
+            scope,
+            agentId: scope === "agent" ? agentIdArg : undefined,
+          });
+          result = {
+            ok: true,
+            saved: true,
+            id: entry.id,
+            scope: entry.scope,
+            agentId: entry.agentId ?? null,
+          };
+        } catch (err) {
+          result = {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
       } else if (name === "recall") {
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : 5;
-        result = { hits: await this.memory.recall(query, limit) };
+        result = {
+          hits: await this.memory.recall(query, limit, { agentId: runCtx?.agentId }),
+        };
       } else if (name === "memory_list") {
         const limit = typeof args.limit === "number" ? args.limit : 20;
-        result = { memories: await this.memory.list(limit) };
+        result = {
+          memories: await this.memory.listForInject({
+            agentId: runCtx?.agentId,
+            limit,
+          }),
+        };
       } else if (name === "export_csv") {
         const filename = String(args.filename ?? "export.csv");
         const rows = Array.isArray(args.rows) ? (args.rows as string[][]) : [];

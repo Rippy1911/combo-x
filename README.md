@@ -2,7 +2,7 @@
 
 Local-first **browser agent** Chrome extension (MV3).
 
-**Current: v1.3.0** — browser preview, turn edit, last-session restore, stream/full badges + context inspect, `save_memory`, page-ext bridge tokens, nav overflow.
+**Current: v1.3.1** — OpenRouter native cost + searchable model picker; in/out token summary; agent `save_memory` (global/agent, always prepended); responsive drag-reorder tabs.
 
 **Architecture:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — mermaid diagrams for loop, tools, sub-agents, memories, usage.
 
