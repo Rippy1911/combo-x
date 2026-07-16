@@ -149,6 +149,81 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       // M6: do not duplicate combo-media unlock — ux_critique/open_preview are ALWAYS_ON
       toolHints: [],
     },
+    {
+      name: "combo-tasks",
+      description: "Plan work with the conversation / global task board",
+      body: `TASKS PLAYBOOK
+- list_tasks to see open work (session + global)
+- create_task with a clear title; update_task status as you progress
+- Prefer one task per discrete deliverable; keep titles short
+- Tools are always-on — no pack unlock needed`,
+      tags: [...nowTag, "tasks", "planning"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-memory",
+      description: "Durable notes, bookmarks, reminders, and session search",
+      body: `MEMORY PLAYBOOK
+- remember / save_memory for facts that should survive turns (scope global|agent)
+- recall / memory_list before inventing user preferences
+- search_sessions for prior chats; save_bookmark / set_reminder / create_report for artifacts
+- Tools are always-on — no pack unlock needed`,
+      tags: [...nowTag, "memory", "notes"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-subagent",
+      description: "Delegate focused sub-goals to an isolated worker agent",
+      body: `SUBAGENT PLAYBOOK
+- spawn_subagent with a narrow goal; parent only receives the summary
+- list_agents / create_agent / update_agent for reusable profiles (when canSelfEdit)
+- Depth is capped at 1 — do not nest further
+- Tools are always-on when in the tool ceiling`,
+      tags: [...nowTag, "agents", "delegate"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-vault-setup",
+      description: "First-run vault: passphrase, OpenRouter key, optional GitHub token",
+      body: `VAULT SETUP PLAYBOOK
+1) User sets a passphrase in Settings (UI) — never ask them to paste it in chat
+2) Save openrouter_api_key + openrouter_model via Settings → Vault / API keys
+3) Optional: github_token for the GitHub REST connector template
+4) Lock vault when done; secrets stay AES-GCM encrypted locally
+5) Do not echo secret values in tool args or replies`,
+      tags: [...nowTag, "vault", "onboarding"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-pdf-attach",
+      description: "Use chat attachments (PDF/CSV/XLSX/images) with parse_data",
+      body: `ATTACHMENTS PLAYBOOK
+- User attaches files via the paperclip; images are vision-attached on send
+- list_attachments / read_attachment for text extracts (unlock via skill_read combo-rag if locked)
+- parse_data (always-on worker) for structured rows from messy text
+- Prefer save_view / export_csv after parse when the user wants a table`,
+      tags: [...nowTag, "attachments", "pdf", "sheets"],
+      scope: "global",
+      // Avoid double-unlocking TOOL_PACKS.rag — point users at combo-rag for attach tools
+      toolHints: [],
+    },
+    {
+      name: "combo-openapi-call",
+      description: "Call APIs using a saved OpenAPI-aware REST connector",
+      body: `OPENAPI PLAYBOOK
+1) User saves a REST connector (baseUrl + vault secret refs) in Settings → Connectors
+2) Prefer rest_request with paths/methods that match the OpenAPI operations the user described
+3) Never invent hosts; never echo secret values
+4) For MCP servers use mcp_list_tools → mcp_call instead
+5) skill_read this skill unlocks rest/mcp tools (same pack as combo-rest)`,
+      tags: [...nowTag, "openapi", "rest", "api"],
+      scope: "global",
+      toolHints: [...TOOL_PACKS.rest],
+    },
   ];
 }
 
