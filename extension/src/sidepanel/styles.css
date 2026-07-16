@@ -91,6 +91,18 @@ body {
   border: 1px solid var(--border);
 }
 
+.chat-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.chat-main-split .messages {
+  flex: 1 1 52%;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -108,8 +120,270 @@ body {
   border: 1px solid var(--border);
   font-size: 13px;
   line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.bubble-plain {
+  white-space: pre-wrap;
+}
+
+.linkish {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-family: var(--mono);
+  width: auto;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* GFM markdown in assistant bubbles */
+.md {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md h1,
+.md h2,
+.md h3 {
+  margin: 0.75em 0 0.35em;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.md h1 {
+  font-size: 1.2em;
+}
+.md h2 {
+  font-size: 1.1em;
+}
+.md h3 {
+  font-size: 1.02em;
+}
+
+.md p,
+.md ul,
+.md ol {
+  margin: 0.4em 0;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.25em;
+}
+
+.md code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: color-mix(in srgb, var(--bg) 70%, #000);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 75%, #000);
+  margin: 0.5em 0;
+}
+
+.md pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+  font-size: 11px;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.md th {
+  background: color-mix(in srgb, var(--accent-dim) 40%, var(--bg));
+  font-weight: 600;
+}
+
+.md tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+}
+
+.md blockquote {
+  margin: 0.5em 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--accent-dim);
+  color: var(--muted);
+}
+
+.md-cursor {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.preview-drawer {
+  flex: 0 0 48%;
+  max-width: 48%;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  min-height: 0;
+}
+
+.preview-table-wrap {
+  overflow: auto;
+}
+
+.preview-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.preview-table th,
+.preview-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.preview-table th {
+  background: color-mix(in srgb, var(--accent-dim) 40%, var(--bg));
+  position: sticky;
+  top: 0;
+}
+
+.preview-pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.preview-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.views-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.views-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 6px 0 10px;
+}
+
+.views-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.data-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.data-table-toolbar {
+  flex-wrap: wrap;
+}
+
+.th-sort {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  width: auto;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chart-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.chart-svg {
+  width: 100%;
+  max-height: 140px;
+  color: var(--accent);
+  margin-top: 6px;
 }
 
 .bubble.user {
@@ -281,6 +555,46 @@ code {
   font-size: 11px;
 }
 
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent-dim) 35%, var(--bg));
+  color: var(--text);
+  max-width: 100%;
+}
+
+.attach-chip.done {
+  opacity: 0.85;
+}
+
+.attach-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  width: auto;
+}
+
+.attach-x:hover {
+  color: var(--danger);
+}
+
 .chips {
   display: flex;
   flex-direction: column;
@@ -304,6 +618,17 @@ code {
 .chip-denied,
 .chip-error {
   border-color: var(--danger);
+}
+
+.chip-preview {
+  width: auto;
+  margin: 0 8px 6px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--mono);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
 }
 
 .chip-head {

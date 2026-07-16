@@ -1,6 +1,8 @@
 import {
   AGENT_TOOLS,
   AgentLoop,
+  ArtifactStore,
+  AttachmentStore,
   DEFAULT_MODEL,
   DEFAULT_WORKER_MODEL,
   MODEL_PRESETS,
@@ -9,12 +11,17 @@ import {
   RagStore,
   SessionStore,
   Vault,
+  ViewStore,
   getProtocolVersion,
   grantAndIndex,
+  leanHistory,
   normalizeModelId,
+  parseAttachment,
   reindexSaved,
+  stripImageParts,
   type AgentEvent,
   type ApprovalMode,
+  type AttachmentRecord,
   type ChatMessage,
   type ChatSession,
   type LlmUsage,
@@ -26,7 +33,15 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { MarkdownView } from "./MarkdownView";
+import {
+  PreviewDrawer,
+  buildPreviewFromAttachment,
+  buildPreviewFromMarkdown,
+  type PreviewPayload,
+} from "./PreviewDrawer";
 import { ToolChip, type ToolChipData } from "./ToolChip";
+import { ViewsPanel } from "./ViewsPanel";
 
 const KEY_LABEL = "openrouter_api_key";
 const MODEL_LABEL = "openrouter_model";
@@ -37,12 +52,13 @@ const GH_TOKEN_LABEL = "github_token";
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
 
-type TabId = "chat" | "sessions" | "settings" | "vault" | "tools" | "mcp";
+type TabId = "chat" | "sessions" | "views" | "settings" | "vault" | "tools" | "mcp";
 
 type UiTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: Array<{ id: string; name: string; kind: string }>;
   tools?: ToolChipData[];
   usage?: LlmUsage;
 };
@@ -69,7 +85,10 @@ function loadEnabledTools(): Set<string> {
     if (
       !saved.includes("parse_data") ||
       !saved.includes("get_interactive") ||
-      !saved.includes("rag_search")
+      !saved.includes("rag_search") ||
+      !saved.includes("list_attachments") ||
+      !saved.includes("save_view") ||
+      !saved.includes("memory_list")
     ) {
       return new Set(ALL_TOOL_NAMES);
     }
@@ -90,6 +109,10 @@ export function App() {
   const memory = useMemo(() => new MemoryStore(), []);
   const sessions = useMemo(() => new SessionStore(), []);
   const rag = useMemo(() => new RagStore(), []);
+  const attachments = useMemo(() => new AttachmentStore(), []);
+  const views = useMemo(() => new ViewStore(), []);
+  const artifacts = useMemo(() => new ArtifactStore(), []);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const profiles = useMemo<ProfileStore>(
     () => ({
       get: async (name) => {
@@ -137,6 +160,11 @@ export function App() {
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
   const [sessionUsage, setSessionUsage] = useState<LlmUsage>(ZERO);
   const [lastTurnUsage, setLastTurnUsage] = useState<LlmUsage | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<AttachmentRecord[]>([]);
+  const [attachBusy, setAttachBusy] = useState(false);
+  const [attachMsg, setAttachMsg] = useState("");
+  const [preview, setPreview] = useState<PreviewPayload | null>(null);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ChatMessage[]>([]);
@@ -352,11 +380,66 @@ export function App() {
     setCurrentSession(s);
     setTurns([]);
     historyRef.current = [];
+    setPendingAttachments([]);
+    setAttachMsg("");
     setSessionUsage(ZERO);
     setLastTurnUsage(null);
     setTab("chat");
     await refreshSessions();
   }, [refreshSessions, sessions]);
+
+  const addFiles = useCallback(
+    async (fileList: FileList | File[]) => {
+      const files = [...fileList];
+      if (!files.length) return;
+      setAttachBusy(true);
+      setAttachMsg(`Parsing ${files.length} file(s)…`);
+      let session = currentSession;
+      if (!session) {
+        session = await sessions.create("New chat");
+        setCurrentSession(session);
+      }
+      const added: AttachmentRecord[] = [];
+      const errors: string[] = [];
+      for (const file of files) {
+        const parsed = await parseAttachment(file, file.name, file.type);
+        if (parsed.error && !parsed.text && !parsed.dataUrl) {
+          errors.push(`${file.name}: ${parsed.error}`);
+          continue;
+        }
+        const row: AttachmentRecord = {
+          id: crypto.randomUUID(),
+          sessionId: session.id,
+          name: file.name,
+          mime: parsed.mime,
+          kind: parsed.kind,
+          size: file.size,
+          text: parsed.text,
+          dataUrl: parsed.dataUrl,
+          meta: parsed.meta,
+          truncated: parsed.truncated,
+          error: parsed.error,
+          createdAt: Date.now(),
+        };
+        await attachments.put(row);
+        added.push(row);
+      }
+      setPendingAttachments((prev) => [...prev, ...added]);
+      setAttachMsg(
+        errors.length
+          ? `Added ${added.length}; errors: ${errors.join("; ")}`
+          : `Ready: ${added.map((a) => a.name).join(", ")}`,
+      );
+      setAttachBusy(false);
+      setEnabledTools((prev) => {
+        const next = new Set(prev);
+        next.add("list_attachments");
+        next.add("read_attachment");
+        return next;
+      });
+    },
+    [attachments, currentSession, sessions],
+  );
 
   const loadSession = useCallback(async (id: string) => {
     const s = await sessions.get(id);
@@ -396,7 +479,8 @@ export function App() {
   const send = useCallback(
     async (overrideText?: string) => {
       const text = (overrideText ?? input).trim();
-      if (!text || running) return;
+      const pending = pendingAttachments;
+      if ((!text && pending.length === 0) || running) return;
       if (!vault.isUnlocked()) return setStatus("Unlock vault first");
       const key = apiKey || (await vault.getByLabel(KEY_LABEL));
       if (!key) {
@@ -404,19 +488,33 @@ export function App() {
         return setStatus("Missing OpenRouter key");
       }
 
+      const displayText =
+        text ||
+        (pending.length
+          ? `Analyze ${pending.length} attachment(s): ${pending.map((p) => p.name).join(", ")}`
+          : "");
+
       let session = currentSession;
       if (!session) {
-        session = await sessions.create(text.slice(0, 60));
+        session = await sessions.create(displayText.slice(0, 60) || "Attachments");
         setCurrentSession(session);
       }
 
       if (!overrideText) setInput("");
-      const userTurn: UiTurn = { id: crypto.randomUUID(), role: "user", content: text };
+      const pendingIds = pending.map((p) => p.id);
+      setPendingAttachments([]);
+      const userTurn: UiTurn = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: displayText,
+        attachments: pending.map((p) => ({ id: p.id, name: p.name, kind: p.kind })),
+      };
       const assistantId = crypto.randomUUID();
       let nextTurns = [...turns, userTurn, { id: assistantId, role: "assistant" as const, content: "" }];
       setTurns(nextTurns);
       setRunning(true);
-      setStatus("Working…");
+      setStreamingId(assistantId);
+      setStatus(pendingIds.length ? `Working with ${pendingIds.length} file(s)…` : "Working…");
       setLastTurnUsage(null);
 
       const controller = new AbortController();
@@ -484,12 +582,13 @@ export function App() {
           });
           flushTools();
         }
-        if (event.type === "assistant_delta" && event.message) {
+        if (event.type === "assistant_delta" && event.message != null) {
           setTurns((prev) =>
             prev.map((t) => (t.id === assistantId ? { ...t, content: event.message ?? "" } : t)),
           );
         }
         if (event.type === "error" && event.message) setStatus(event.message);
+        if (event.type === "done") setStreamingId(null);
       };
 
       try {
@@ -499,7 +598,7 @@ export function App() {
         const result = await agent.run({
           model: normalizeModelId(model),
           workerModel: normalizeModelId(workerModel),
-          userMessage: text,
+          userMessage: text || displayText,
           history: historyRef.current,
           signal: controller.signal,
           enabledTools: [...enabledTools],
@@ -507,6 +606,9 @@ export function App() {
           approvalModel: normalizeModelId(workerModel),
           maxSteps: 32,
           rag,
+          attachments,
+          views,
+          pendingAttachmentIds: pendingIds,
           connectors: {
             ideaforge:
               ifEmail && ifPass ? { email: ifEmail, password: ifPass } : null,
@@ -514,7 +616,9 @@ export function App() {
           },
           onEvent,
         });
-        historyRef.current = result.messages.filter((m) => m.role !== "system");
+        historyRef.current = leanHistory(
+          stripImageParts(result.messages.filter((m) => m.role !== "system")),
+        );
         nextTurns = nextTurns.map((t) =>
           t.id === assistantId
             ? {
@@ -551,12 +655,15 @@ export function App() {
         setStatus("Error");
       } finally {
         setRunning(false);
+        setStreamingId(null);
         setPendingApproval(null);
         abortRef.current = null;
       }
     },
     [
       apiKey,
+      attachments,
+      views,
       bridge,
       currentSession,
       enabledTools,
@@ -566,8 +673,10 @@ export function App() {
       input,
       memory,
       model,
+      pendingAttachments,
       workerModel,
       persistSession,
+      profiles,
       rag,
       running,
       sessionUsage,
@@ -667,6 +776,7 @@ export function App() {
           [
             ["chat", "Chat"],
             ["sessions", "Sessions"],
+            ["views", "Views"],
             ["settings", "Settings"],
             ["vault", "Vault"],
             ["tools", "Tools"],
@@ -690,58 +800,113 @@ export function App() {
 
       {tab === "chat" ? (
         <>
-          <div className="messages">
-            {turns.length === 0 ? (
-              <div className="bubble system">
-                Hi — I’m Combo-X. I can open tabs (<code>open_tab</code>), scrape tables, export CSV,
-                and keep sessions. Approval mode: <strong>{approvalMode}</strong>.
-              </div>
-            ) : null}
-            {turns.map((t) => (
-              <div key={t.id} className={`bubble ${t.role}`}>
-                <div>{t.content}</div>
-                {t.tools && t.tools.length > 0 ? (
-                  <div className="chips">
-                    {t.tools.map((tool) => (
-                      <ToolChip key={tool.id} tool={tool} />
-                    ))}
-                  </div>
-                ) : null}
-                {t.usage && t.role === "assistant" ? (
-                  <div className="turn-usage">
-                    {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
-                  </div>
-                ) : null}
-              </div>
-            ))}
-            {pendingApproval ? (
-              <ApprovalBanner
-                tool={pendingApproval.tool}
-                args={pendingApproval.args}
-                onAllow={() => {
-                  pendingApproval.resolve(true);
-                  setPendingApproval(null);
-                }}
-                onDeny={() => {
-                  pendingApproval.resolve(false);
-                  setPendingApproval(null);
-                }}
-                onAutoAll={() => {
-                  setApprovalMode("auto_all");
-                  approvalModeRef.current = "auto_all";
-                  pendingApproval.resolve(true);
-                  setPendingApproval(null);
-                }}
-                onAutoSmart={() => {
-                  setApprovalMode("auto_llm");
-                  approvalModeRef.current = "auto_llm";
-                  pendingApproval.resolve(true);
-                  setPendingApproval(null);
-                }}
-              />
-            ) : null}
-            {status && running ? <div className="bubble system">{status}</div> : null}
-            <div ref={bottomRef} />
+          <div className={`chat-main${preview ? " chat-main-split" : ""}`}>
+            <div className="messages">
+              {turns.length === 0 ? (
+                <div className="bubble system">
+                  Hi — I’m Combo-X. I can open tabs (<code>open_tab</code>), scrape tables, export CSV,
+                  and keep sessions. Approval mode: <strong>{approvalMode}</strong>.
+                </div>
+              ) : null}
+              {turns.map((t) => (
+                <div key={t.id} className={`bubble ${t.role}`}>
+                  {t.role === "assistant" ? (
+                    <MarkdownView content={t.content} streaming={streamingId === t.id} />
+                  ) : (
+                    <div className="bubble-plain">{t.content}</div>
+                  )}
+                  {t.role === "assistant" && t.content.includes("|") ? (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        const p = buildPreviewFromMarkdown(t.content);
+                        if (p) setPreview(p);
+                      }}
+                    >
+                      Open tables / preview
+                    </button>
+                  ) : null}
+                  {t.attachments && t.attachments.length > 0 ? (
+                    <div className="attach-chips">
+                      {t.attachments.map((a) => (
+                        <span key={a.id} className="attach-chip done">
+                          {a.kind}: {a.name}
+                          <button
+                            type="button"
+                            className="attach-x"
+                            onClick={() =>
+                              void (async () => {
+                                const row = await attachments.get(a.id);
+                                if (!row) return;
+                                setPreview(
+                                  buildPreviewFromAttachment({
+                                    name: row.name,
+                                    kind: row.kind,
+                                    text: row.text,
+                                    dataUrl: row.dataUrl,
+                                  }),
+                                );
+                              })()
+                            }
+                          >
+                            ↗
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {t.tools && t.tools.length > 0 ? (
+                    <div className="chips">
+                      {t.tools.map((tool) => (
+                        <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
+                      ))}
+                    </div>
+                  ) : null}
+                  {t.usage && t.role === "assistant" ? (
+                    <div className="turn-usage">
+                      {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {pendingApproval ? (
+                <ApprovalBanner
+                  tool={pendingApproval.tool}
+                  args={pendingApproval.args}
+                  onAllow={() => {
+                    pendingApproval.resolve(true);
+                    setPendingApproval(null);
+                  }}
+                  onDeny={() => {
+                    pendingApproval.resolve(false);
+                    setPendingApproval(null);
+                  }}
+                  onAutoAll={() => {
+                    setApprovalMode("auto_all");
+                    approvalModeRef.current = "auto_all";
+                    pendingApproval.resolve(true);
+                    setPendingApproval(null);
+                  }}
+                  onAutoSmart={() => {
+                    setApprovalMode("auto_llm");
+                    approvalModeRef.current = "auto_llm";
+                    pendingApproval.resolve(true);
+                    setPendingApproval(null);
+                  }}
+                />
+              ) : null}
+              {status && running ? <div className="bubble system">{status}</div> : null}
+              <div ref={bottomRef} />
+            </div>
+            <PreviewDrawer
+              preview={preview}
+              onClose={() => setPreview(null)}
+              onExport={(filename, text, mime) =>
+                void bridge.downloadText(filename, text, mime)
+              }
+              onGoViews={() => setTab("views")}
+            />
           </div>
           <div className="composer">
             <div className="row">
@@ -764,22 +929,93 @@ export function App() {
                 New
               </button>
             </div>
+            {pendingAttachments.length > 0 ? (
+              <div className="attach-chips">
+                {pendingAttachments.map((a) => (
+                  <span key={a.id} className="attach-chip">
+                    {a.kind}: {a.name}
+                    <button
+                      type="button"
+                      className="attach-x"
+                      aria-label={`Preview ${a.name}`}
+                      title="Preview"
+                      onClick={() =>
+                        setPreview(
+                          buildPreviewFromAttachment({
+                            name: a.name,
+                            kind: a.kind,
+                            text: a.text,
+                            dataUrl: a.dataUrl,
+                          }),
+                        )
+                      }
+                    >
+                      ↗
+                    </button>
+                    <button
+                      type="button"
+                      className="attach-x"
+                      aria-label={`Remove ${a.name}`}
+                      onClick={() =>
+                        setPendingAttachments((prev) => prev.filter((p) => p.id !== a.id))
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {attachMsg ? <p className="hint wrap">{attachMsg}</p> : null}
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask… or “continue” after a step limit"
+              placeholder="Ask… attach PDF/CSV/images, or “continue” after a step limit"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
                   void send();
                 }
               }}
+              onPaste={(e) => {
+                const files = [...(e.clipboardData?.files ?? [])];
+                if (files.length) {
+                  e.preventDefault();
+                  void addFiles(files);
+                }
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (e.dataTransfer?.files?.length) void addFiles(e.dataTransfer.files);
+              }}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.csv,.tsv,.txt,.md,.json,.xlsx,.xls,image/*,text/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files?.length) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
             />
             <div className="row">
               <button
                 type="button"
+                disabled={running || attachBusy}
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach PDF, CSV, XLSX, txt, images"
+              >
+                {attachBusy ? "…" : "Attach"}
+              </button>
+              <button
+                type="button"
                 className="primary"
-                disabled={running || !input.trim()}
+                disabled={running || (!input.trim() && pendingAttachments.length === 0)}
                 onClick={() => void send()}
               >
                 Send
@@ -839,6 +1075,22 @@ export function App() {
             ))}
           </ul>
         </div>
+      ) : null}
+
+      {tab === "views" ? (
+        <ViewsPanel
+          vault={vault}
+          views={views}
+          sessions={sessions}
+          attachments={attachments}
+          rag={rag}
+          memory={memory}
+          artifacts={artifacts}
+          vaultUnlocked={vault.isUnlocked()}
+          ideaforgeConfigured={Boolean(ideaforgeEmail)}
+          githubConfigured={Boolean(githubToken)}
+          onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
+        />
       ) : null}
 
       {tab === "settings" ? (

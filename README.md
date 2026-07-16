@@ -2,16 +2,19 @@
 
 Local-first **browser agent** Chrome extension. Built to beat the Combo Phase A/B scaffold (Composer 2.5 / GLM): packages that never wired into UI, stub agents, no tool calling.
 
-**Current: v0.4** — agent loop + scrape toolkit + **local folder RAG** + IdeaForge/GitHub read connectors. Details: [`docs/LOCAL_RAG.md`](./docs/LOCAL_RAG.md), [`docs/BEAT_COMBO.md`](./docs/BEAT_COMBO.md).
+**Current: v0.8** — first-turn **USER MEMORIES** inject (same store as `remember`) + **lean history** (no raw tool rows to the LLM) + Views/attachments/stream from v0.7. Docs: [`docs/VIEWS.md`](./docs/VIEWS.md), [`docs/ATTACHMENTS.md`](./docs/ATTACHMENTS.md), [`docs/LOCAL_RAG.md`](./docs/LOCAL_RAG.md).
 
 | Capability | Status |
 |---|---|
 | Tool-calling agent + DOM scrape/nav | ✅ |
-| Dual models (orchestrator + `parse_data` worker) | ✅ |
-| Encrypted vault + sessions + approvals | ✅ |
-| **Local device RAG** (Grant folder → IndexedDB index) | ✅ `rag_search` / `rag_read_file` |
-| **IdeaForge + GitHub** live read tools | ✅ vault creds in Settings |
-| Supabase MCP / multi-device sync | deferred |
+| **Memory inject + lean history** | ✅ |
+| **Views tab** (tables, charts, collections, inspector) | ✅ |
+| **Streaming assistant text** (SSE) | ✅ |
+| **Markdown / GFM tables** in chat | ✅ |
+| **Preview drawer** (tables, CSV, files, tool results) | ✅ → Open in Views |
+| Dual models + vault + sessions + approvals | ✅ |
+| Local folder RAG + attachments + IdeaForge/GitHub | ✅ |
+| MCP remote control of Combo chat | deferred (lower prio) |
 
 ## Install
 
@@ -29,7 +32,7 @@ Load in Chrome:
 3. Side panel → passphrase + OpenRouter key
 4. **Settings** → IdeaForge email/password and/or GitHub PAT → Save
 5. **Setup** tab (or setup page) → **Grant folder + index**
-6. Chat: *“Use rag_search for X in this repo”* or *“ideaforge_search …”*
+6. Chat: Attach a PDF/CSV/image → ask about it; or *“rag_search …”* / *“ideaforge_search …”*
 
 ## Architecture
 

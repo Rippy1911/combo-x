@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenRouterClient } from "../llm/openrouter.js";
+import { ViewStore } from "../local/views.js";
 import { MemoryStore } from "../memory/store.js";
+import { SessionStore } from "../sessions/store.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -13,28 +15,34 @@ function mockLlm(
   onChat?: (model: string) => void,
 ) {
   let i = 0;
+  const next = async (opts: { model: string; onDelta?: (s: string) => void }) => {
+    onChat?.(opts.model);
+    const step = sequence[i] ?? sequence[sequence.length - 1]!;
+    i += 1;
+    const content = step.content;
+    if (content && opts.onDelta) opts.onDelta(content);
+    return {
+      content,
+      toolCalls: (step.toolCalls ?? []).map((t) => ({
+        id: t.id,
+        type: "function" as const,
+        function: { name: t.name, arguments: t.args },
+      })),
+      model: step.model ?? opts.model,
+      usage: {
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+        estimatedCostUsd: 0.0001,
+      },
+      finishReason: step.toolCalls?.length ? "tool_calls" : "stop",
+    };
+  };
   return {
-    chat: vi.fn(async (opts: { model: string }) => {
-      onChat?.(opts.model);
-      const step = sequence[i] ?? sequence[sequence.length - 1]!;
-      i += 1;
-      return {
-        content: step.content,
-        toolCalls: (step.toolCalls ?? []).map((t) => ({
-          id: t.id,
-          type: "function" as const,
-          function: { name: t.name, arguments: t.args },
-        })),
-        model: step.model ?? opts.model,
-        usage: {
-          promptTokens: 1,
-          completionTokens: 1,
-          totalTokens: 2,
-          estimatedCostUsd: 0.0001,
-        },
-        finishReason: step.toolCalls?.length ? "tool_calls" : "stop",
-      };
-    }),
+    chat: vi.fn(async (opts: { model: string }) => next(opts)),
+    chatStreaming: vi.fn(async (opts: { model: string; onDelta?: (s: string) => void }) =>
+      next(opts),
+    ),
   } as unknown as OpenRouterClient;
 }
 
@@ -288,6 +296,223 @@ describe("AgentLoop", () => {
     await agent.run({ model: "orch", userMessage: "save and get", approvalMode: "auto_all" });
     expect(store.get("foodwell")?.username).toBe("u");
     expect(store.get("foodwell")?.selector).toBe(".card");
+  });
+
+  it("injects memories into system prompt (T-MEM-1)", async () => {
+    const memory = new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` });
+    await memory.remember({ text: "Anita prefers morning calls", tags: ["anita"] });
+    let seenSystem = "";
+    const llm = mockLlm([{ content: "Noted preferences." }]);
+    const origChat = llm.chatStreaming as ReturnType<typeof vi.fn>;
+    origChat.mockImplementationOnce(async (opts: { messages: Array<{ role: string; content: unknown }> }) => {
+      const sys = opts.messages.find((m) => m.role === "system");
+      seenSystem = String(sys?.content ?? "");
+      return {
+        content: "Noted preferences.",
+        toolCalls: [],
+        model: "mock",
+        usage: {
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 2,
+          estimatedCostUsd: 0.0001,
+        },
+        finishReason: "stop",
+      };
+    });
+    const agent = new AgentLoop(llm, stubBrowser(), memory);
+    await agent.run({ model: "mock", userMessage: "hi" });
+    expect(seenSystem).toMatch(/USER MEMORIES/);
+    expect(seenSystem).toMatch(/Anita prefers morning calls/);
+  });
+
+  it("leans history so LLM never sees tool roles (T-LEAN-1)", async () => {
+    const history = [
+      { role: "user" as const, content: "go" },
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          {
+            id: "1",
+            type: "function" as const,
+            function: { name: "get_page", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool" as const,
+        tool_call_id: "1",
+        name: "get_page",
+        content: '{"title":"X"}',
+      },
+      { role: "assistant" as const, content: "Page is X." },
+    ];
+    let roles: string[] = [];
+    const llm = mockLlm([{ content: "ok" }]);
+    (llm.chatStreaming as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (opts: { messages: Array<{ role: string }> }) => {
+        roles = opts.messages.map((m) => m.role);
+        return {
+          content: "ok",
+          toolCalls: [],
+          model: "mock",
+          usage: {
+            promptTokens: 1,
+            completionTokens: 1,
+            totalTokens: 2,
+            estimatedCostUsd: 0.0001,
+          },
+          finishReason: "stop",
+        };
+      },
+    );
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({ model: "mock", userMessage: "continue", history });
+    expect(roles).not.toContain("tool");
+    expect(roles.filter((r) => r === "user").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("ask deny blocks navigate (T-Approve-1)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://evil.example" }),
+          },
+        ],
+      },
+      { content: "Skipped navigation." },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "go",
+      approvalMode: "ask",
+      onEvent: (e) => {
+        if (e.type === "tool_approval") e.resolve?.(false);
+      },
+    });
+    expect(browser.navigate).not.toHaveBeenCalled();
+  });
+
+  it("hitStepLimit when maxSteps=1 (T-Approve-2)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "get_page", args: "{}" }],
+      },
+      { content: "should not reach" },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "mock",
+      userMessage: "page",
+      maxSteps: 1,
+    });
+    expect(result.hitStepLimit).toBe(true);
+    expect(result.steps).toBe(1);
+  });
+
+  it("search_sessions tool (T-Session-2)", async () => {
+    const sessions = new SessionStore(`sess_loop_${crypto.randomUUID()}`);
+    const s = await sessions.create("Workout plan");
+    s.messages.push({
+      id: crypto.randomUUID(),
+      role: "user",
+      content: "aironcoach deadlift program",
+      createdAt: new Date().toISOString(),
+    });
+    await sessions.save(s);
+
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "search_sessions",
+            args: JSON.stringify({ query: "aironcoach" }),
+          },
+        ],
+      },
+      { content: "Found prior workout chat." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      sessions,
+    );
+    const result = await agent.run({ model: "mock", userMessage: "search" });
+    expect(result.finalText).toMatch(/workout/i);
+  });
+
+  it("save_view list_views get_view (T-View-2)", async () => {
+    const views = new ViewStore(`views_loop_${crypto.randomUUID()}`);
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "save_view",
+            args: JSON.stringify({
+              name: "Catalog A",
+              rows: [
+                ["sku", "price"],
+                ["X", "9"],
+              ],
+            }),
+          },
+        ],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "list_views", args: "{}" }],
+      },
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "3",
+            name: "get_view",
+            args: JSON.stringify({ name: "Catalog A" }),
+          },
+        ],
+      },
+      { content: "View Catalog A ready." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "mock",
+      userMessage: "save table",
+      views,
+    });
+    expect(result.finalText).toMatch(/Catalog A/);
+    const listed = await views.list();
+    expect(listed.some((v) => v.name === "Catalog A")).toBe(true);
+    expect((await views.get("Catalog A"))?.rows?.[1]?.[0]).toBe("X");
   });
 
   it("login fills credentials from a saved profile", async () => {

@@ -15,14 +15,32 @@ export {
 export { Vault, VaultLockedError, VaultSealedError, VAULT_KDF_ITERATIONS } from "./vault/vault.js";
 
 export { OpenRouterClient, LlmError, parseSse } from "./llm/openrouter.js";
+export {
+  messageContentAsText,
+  stripImageParts,
+} from "./llm/openrouter.js";
 export type {
   ChatMessage,
+  ChatContent,
+  ContentPart,
   ChatResult,
   LlmUsage,
   ToolCall,
   ToolDefinition,
   OpenRouterOptions,
 } from "./llm/openrouter.js";
+
+export { AttachmentStore } from "./attachments/store.js";
+export type { AttachmentRecord } from "./attachments/store.js";
+export {
+  parseAttachment,
+  detectKind,
+  formatAttachmentInventory,
+  setPdfWorkerSrc,
+  ATTACH_MAX_BYTES,
+  ATTACH_INLINE_PREVIEW,
+} from "./attachments/parse.js";
+export type { AttachmentKind, ParseResult } from "./attachments/parse.js";
 
 export { MemoryStore, rankMemories } from "./memory/store.js";
 export type { MemoryEntry, MemoryKind } from "./memory/store.js";
@@ -46,6 +64,7 @@ export type {
   SiteProfile,
   ProfileStore,
 } from "./agent/loop.js";
+export { leanHistory } from "./agent/leanHistory.js";
 
 export { RagStore } from "./rag/store.js";
 export type { RagChunkRow, RagMeta, IndexedFile } from "./rag/store.js";
@@ -82,3 +101,26 @@ export {
   buildReportHtml,
 } from "./local/artifacts.js";
 export type { Bookmark, Reminder, ReportArtifact } from "./local/artifacts.js";
+
+export {
+  ViewStore,
+  redactSensitiveFields,
+  siteProfileLabelName,
+} from "./local/views.js";
+export type { SavedView, ViewChartSpec, ViewSource } from "./local/views.js";
+
+export {
+  sortTableRows,
+  filterTableRows,
+  detectNumericColumns,
+  buildBarSeries,
+  tableToJson,
+} from "./local/table.js";
+export type { BarSeriesPoint } from "./local/table.js";
+
+export {
+  INSPECTABLE_DBS,
+  listObjectStores,
+  inspectStore,
+} from "./local/idbInspect.js";
+export type { InspectRow } from "./local/idbInspect.js";

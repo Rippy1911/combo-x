@@ -3,12 +3,38 @@
  * Combo Phase B had stream/chat only — no tools. That blocked a real agent.
  */
 
+/** OpenAI/OpenRouter multimodal content parts (text + image_url). */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
+export type ChatContent = string | ContentPart[] | null;
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: ChatContent;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+}
+
+/** Flatten message content for history persistence / UI. */
+export function messageContentAsText(content: ChatContent): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : "[image]"))
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Drop heavy image parts from history (keep text inventory). */
+export function stripImageParts(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    const text = messageContentAsText(m.content);
+    return { ...m, content: text };
+  });
 }
 
 export interface ToolCall {
@@ -160,6 +186,129 @@ export class OpenRouterClient {
       model: json.model ?? input.model,
       usage: this.estimate(json.usage ?? {}),
       finishReason: choice?.finish_reason ?? null,
+    };
+  }
+
+  /**
+   * Streaming chat with optional tools (OpenAI-compatible SSE).
+   * Calls onDelta with accumulated assistant text as tokens arrive.
+   */
+  async chatStreaming(input: {
+    model: string;
+    messages: ChatMessage[];
+    tools?: ToolDefinition[];
+    temperature?: number;
+    maxTokens?: number;
+    signal?: AbortSignal;
+    onDelta?: (accumulated: string) => void;
+  }): Promise<ChatResult> {
+    const body: Record<string, unknown> = {
+      model: input.model,
+      messages: input.messages,
+      stream: true,
+    };
+    if (input.tools?.length) body.tools = input.tools;
+    if (input.temperature !== undefined) body.temperature = input.temperature;
+    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+
+    const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(body),
+      signal: input.signal,
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new LlmError(errText || `HTTP ${res.status}`, res.status);
+    }
+    if (!res.body) throw new LlmError("missing response body");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+    let finishReason: string | null = null;
+    let usage = emptyUsage();
+    const toolAcc = new Map<
+      number,
+      { id: string; name: string; arguments: string }
+    >();
+
+    try {
+      for (;;) {
+        if (input.signal?.aborted) break;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let json: {
+            choices?: Array<{
+              finish_reason?: string | null;
+              delta?: {
+                content?: string | null;
+                tool_calls?: Array<{
+                  index?: number;
+                  id?: string;
+                  type?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
+              };
+            }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            model?: string;
+          };
+          try {
+            json = JSON.parse(data);
+          } catch {
+            continue;
+          }
+          if (json.usage) usage = this.estimate(json.usage);
+          const choice = json.choices?.[0];
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+          const delta = choice?.delta;
+          if (delta?.content) {
+            content += delta.content;
+            input.onDelta?.(content);
+          }
+          for (const tc of delta?.tool_calls ?? []) {
+            const idx = tc.index ?? 0;
+            const cur = toolAcc.get(idx) ?? { id: "", name: "", arguments: "" };
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.name = tc.function.name;
+            if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+            toolAcc.set(idx, cur);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const toolCalls: ToolCall[] = [...toolAcc.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, t]) => ({
+        id: t.id || `call_${crypto.randomUUID()}`,
+        type: "function" as const,
+        function: { name: t.name, arguments: t.arguments || "{}" },
+      }))
+      .filter((t) => t.function.name);
+
+    if (!finishReason) {
+      finishReason = toolCalls.length ? "tool_calls" : "stop";
+    }
+
+    return {
+      content: content || null,
+      toolCalls,
+      model: input.model,
+      usage,
+      finishReason,
     };
   }
 

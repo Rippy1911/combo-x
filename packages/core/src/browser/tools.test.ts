@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { SENSITIVE_TOOLS } from "../protocol/messages.js";
 import { parseToolArguments, toolArgsToContentRequest, AGENT_TOOLS } from "./tools.js";
 
 describe("tool helpers", () => {
-  it("exposes scrape + parse tool names", () => {
+  it("exposes scrape + parse + view tool names", () => {
     const names = AGENT_TOOLS.map((t) => t.function.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -20,10 +21,43 @@ describe("tool helpers", () => {
         "parse_data",
         "scrape_tables",
         "export_csv",
+        "list_attachments",
+        "read_attachment",
+        "save_view",
+        "list_views",
+        "get_view",
         "remember",
         "recall",
+        "memory_list",
+        "login",
+        "scrape_catalog",
+        "save_site_profile",
+        "get_site_profile",
       ]),
     );
+  });
+
+  it("SENSITIVE_TOOLS covers mutate/nav/login tools (T-Sensitive-1)", () => {
+    const names = new Set(AGENT_TOOLS.map((t) => t.function.name));
+    const mustBeSensitive = [
+      "click",
+      "type_text",
+      "click_index",
+      "type_index",
+      "navigate",
+      "open_tab",
+      "go_back",
+      "close_tab",
+      "login",
+      "scrape_catalog",
+    ];
+    for (const n of mustBeSensitive) {
+      expect(SENSITIVE_TOOLS.has(n), `${n} should be sensitive`).toBe(true);
+      expect(names.has(n), `${n} should be registered`).toBe(true);
+    }
+    for (const n of SENSITIVE_TOOLS) {
+      expect(names.has(n), `SENSITIVE orphan: ${n}`).toBe(true);
+    }
   });
 
   it("maps tool args to content requests", () => {

@@ -1,7 +1,21 @@
 import { githubGetFile, githubSearchCode, type GitHubConfig } from "../connectors/github.js";
 import { ideaforgeSearch, type IdeaForgeConfig } from "../connectors/ideaforge.js";
 import { ArtifactStore, buildReportHtml } from "../local/artifacts.js";
-import type { ChatMessage, ChatResult, LlmUsage, OpenRouterClient, ToolCall } from "../llm/openrouter.js";
+import type { AttachmentStore } from "../attachments/store.js";
+import {
+  ATTACH_INLINE_PREVIEW,
+  formatAttachmentInventory,
+} from "../attachments/parse.js";
+import type { ViewChartSpec, ViewStore } from "../local/views.js";
+import { leanHistory } from "./leanHistory.js";
+import type {
+  ChatMessage,
+  ChatResult,
+  ContentPart,
+  LlmUsage,
+  OpenRouterClient,
+  ToolCall,
+} from "../llm/openrouter.js";
 import type { MemoryStore } from "../memory/store.js";
 import { DEFAULT_WORKER_MODEL } from "../models.js";
 import { SENSITIVE_TOOLS } from "../protocol/messages.js";
@@ -88,6 +102,12 @@ export interface AgentRunOptions {
   rag?: RagStore;
   /** Live read-only connectors */
   connectors?: ConnectorBundle;
+  /** Chat attachments (PDF/CSV/images/…) */
+  attachments?: AttachmentStore;
+  /** Attachment ids included with this user turn */
+  pendingAttachmentIds?: string[];
+  /** Named Views (Views tab / save_view) */
+  views?: ViewStore;
 }
 
 export interface AgentRunResult {
@@ -102,13 +122,18 @@ export interface AgentRunResult {
 const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and close_tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
-For catalogs/scrapes: scroll + query_all or scrape_tables, then parse_data (cheap worker LLM) to structure rows, then export_csv.
-For a WHOLE catalog in one call: scrape_catalog (paginates all pages, calls the worker per page, dedupes, returns rows) — then export_csv.
+For catalogs/scrapes: scroll + query_all or scrape_tables, then parse_data (cheap worker LLM) to structure rows, then export_csv or save_view (durable table in Views tab).
+For a WHOLE catalog in one call: scrape_catalog (paginates all pages, calls the worker per page, dedupes, returns rows) — then export_csv or save_view.
+Use list_views / get_view to reopen saved tables.
 Login + recipe reuse without re-entering: save_site_profile once (name, loginUrl, username, password, selectors, selector, nextSelector|nextText, intent) — then login {profile} and scrape_catalog {profile} reuse it. Use get_site_profile to recall a recipe.
 For codebase questions: rag_search / rag_read_file against the granted local folder; ideaforge_search for portfolio knowledge; github_search_code / github_get_file when a GitHub token is configured.
+For uploaded chat files (PDF/CSV/XLSX/txt/images): list_attachments / read_attachment. Images may be attached as vision parts on the user turn.
+Durable notes: remember / recall / memory_list — top memories are also injected into the system prompt each run.
 Rules:
 - Prefer get_interactive or query_all over dumping huge get_page text into your own context.
 - Prefer rag_search over inventing file contents.
+- Prefer read_attachment over inventing uploaded file contents.
+- Prefer USER MEMORIES / recall over inventing user facts.
 - After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
 - Be concise in the final answer.`;
@@ -182,10 +207,13 @@ export class AgentLoop {
     const approvalMode = options.approvalMode ?? "ask";
     const workerModel = options.workerModel ?? DEFAULT_WORKER_MODEL;
     const emit = options.onEvent ?? (() => undefined);
+    const userContent = await this.buildUserContent(options);
+    const systemBase = options.systemPrompt ?? DEFAULT_SYSTEM;
+    const memBlock = await this.formatMemoryInject();
     const messages: ChatMessage[] = [
-      { role: "system", content: options.systemPrompt ?? DEFAULT_SYSTEM },
-      ...(options.history ?? []),
-      { role: "user", content: options.userMessage },
+      { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
+      ...leanHistory(options.history ?? []),
+      { role: "user", content: userContent },
     ];
 
     let usage = ZERO;
@@ -210,12 +238,26 @@ export class AgentLoop {
 
       let result: ChatResult;
       try {
-        result = await this.llm.chat({
-          model: options.model,
-          messages,
-          tools: tools.length > 0 ? tools : undefined,
-          temperature: 0.2,
-        });
+        // Prefer streaming so the UI sees tokens; fall back to non-stream chat for mocks/old clients.
+        if (typeof this.llm.chatStreaming === "function") {
+          result = await this.llm.chatStreaming({
+            model: options.model,
+            messages,
+            tools: tools.length > 0 ? tools : undefined,
+            temperature: 0.2,
+            signal: options.signal,
+            onDelta: (accumulated) => {
+              emit({ type: "assistant_delta", message: accumulated });
+            },
+          });
+        } else {
+          result = await this.llm.chat({
+            model: options.model,
+            messages,
+            tools: tools.length > 0 ? tools : undefined,
+            temperature: 0.2,
+          });
+        }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         emit({ type: "error", message: msg });
@@ -286,6 +328,8 @@ export class AgentLoop {
           },
           options.rag,
           options.connectors,
+          options.attachments,
+          options.views,
         );
         messages.push({
           role: "tool",
@@ -363,6 +407,76 @@ export class AgentLoop {
     });
   }
 
+  /** First-call inject from the same MemoryStore `remember` writes (GAP-MEM-1). */
+  private async formatMemoryInject(): Promise<string> {
+    try {
+      const top = await this.memory.list(8);
+      if (!top.length) return "";
+      const lines = top.map((m, i) => `${i + 1}. ${m.text.slice(0, 400)}`);
+      return `USER MEMORIES (local; prefer these over inventing facts):\n${lines.join("\n")}`;
+    } catch {
+      return "";
+    }
+  }
+
+  private async buildUserContent(
+    options: AgentRunOptions,
+  ): Promise<string | ContentPart[]> {
+    const ids = options.pendingAttachmentIds ?? [];
+    const store = options.attachments;
+    if (!store || ids.length === 0) return options.userMessage;
+
+    const rows = [];
+    for (const id of ids) {
+      const row = await store.get(id);
+      if (row) rows.push(row);
+    }
+    if (!rows.length) return options.userMessage;
+
+    const inventory = formatAttachmentInventory(
+      rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        kind: r.kind,
+        chars: r.text?.length || undefined,
+        truncated: r.truncated,
+      })),
+    );
+
+    const previews: string[] = [];
+    for (const r of rows) {
+      if (r.kind === "image" || !r.text) continue;
+      const slice = r.text.slice(0, ATTACH_INLINE_PREVIEW);
+      previews.push(
+        `--- ${r.name} (id=${r.id}) preview ---\n${slice}${
+          r.text.length > ATTACH_INLINE_PREVIEW || r.truncated
+            ? "\n…(truncated; use read_attachment for more)"
+            : ""
+        }`,
+      );
+    }
+
+    const textBlock = [
+      options.userMessage.trim() || "Please analyze the attached files.",
+      "",
+      inventory,
+      previews.length ? `\n${previews.join("\n\n")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const parts: ContentPart[] = [{ type: "text", text: textBlock }];
+    for (const r of rows) {
+      if (r.kind === "image" && r.dataUrl) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: r.dataUrl, detail: "auto" },
+        });
+      }
+    }
+    return parts.length > 1 ? parts : textBlock;
+  }
+
   private async executeTool(
     call: ToolCall,
     args: Record<string, unknown>,
@@ -371,6 +485,8 @@ export class AgentLoop {
     onUsage: (u: LlmUsage) => void,
     rag?: RagStore,
     connectors?: ConnectorBundle,
+    attachments?: AttachmentStore,
+    views?: ViewStore,
   ): Promise<unknown> {
     const name = call.function.name;
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
@@ -477,6 +593,36 @@ export class AgentLoop {
             typeof args.ref === "string" ? args.ref : undefined,
           );
         }
+      } else if (name === "list_attachments") {
+        if (!attachments) result = { ok: false, error: "attachment store unavailable" };
+        else {
+          const sessionId = typeof args.sessionId === "string" ? args.sessionId : undefined;
+          const rows = await attachments.list(sessionId);
+          result = {
+            ok: true,
+            attachments: rows.map((r) => ({
+              id: r.id,
+              name: r.name,
+              kind: r.kind,
+              mime: r.mime,
+              size: r.size,
+              chars: r.text?.length ?? 0,
+              truncated: r.truncated,
+              error: r.error ?? null,
+              createdAt: r.createdAt,
+            })),
+          };
+        }
+      } else if (name === "read_attachment") {
+        if (!attachments) result = { ok: false, error: "attachment store unavailable" };
+        else {
+          const id = String(args.id ?? args.name ?? "");
+          const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
+          const file = await attachments.read(id, maxChars);
+          result = file
+            ? { ok: true, ...file }
+            : { ok: false, error: `attachment not found: ${id}` };
+        }
       } else if (name === "remember") {
         const text = String(args.text ?? "");
         const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
@@ -486,6 +632,9 @@ export class AgentLoop {
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : 5;
         result = { hits: await this.memory.recall(query, limit) };
+      } else if (name === "memory_list") {
+        const limit = typeof args.limit === "number" ? args.limit : 20;
+        result = { memories: await this.memory.list(limit) };
       } else if (name === "export_csv") {
         const filename = String(args.filename ?? "export.csv");
         const rows = Array.isArray(args.rows) ? (args.rows as string[][]) : [];
@@ -532,6 +681,65 @@ export class AgentLoop {
               preview: s.messages.find((m) => m.role === "user")?.content?.slice(0, 160),
             })),
           };
+        }
+      } else if (name === "save_view") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const nameArg = String(args.name ?? "Untitled view");
+          const rawRows = Array.isArray(args.rows) ? args.rows : undefined;
+          const rows = rawRows?.map((r) =>
+            Array.isArray(r) ? r.map(String) : [String(r)],
+          );
+          const saved = await views.save({
+            name: nameArg,
+            source: "snapshot",
+            rows,
+            columns: Array.isArray(args.columns) ? args.columns.map(String) : undefined,
+            filter: typeof args.filter === "string" ? args.filter : undefined,
+            note: typeof args.note === "string" ? args.note : undefined,
+            chart:
+              args.chart && typeof args.chart === "object"
+                ? (args.chart as ViewChartSpec)
+                : undefined,
+          });
+          result = {
+            ok: true,
+            id: saved.id,
+            name: saved.name,
+            rowCount: saved.rows?.length ?? 0,
+          };
+        }
+      } else if (name === "list_views") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const list = await views.list();
+          result = {
+            ok: true,
+            views: list.map((v) => ({
+              id: v.id,
+              name: v.name,
+              source: v.source,
+              rowCount: v.rows?.length ?? 0,
+              updatedAt: v.updatedAt,
+            })),
+          };
+        }
+      } else if (name === "get_view") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const id = String(args.id ?? args.name ?? "");
+          const v = await views.get(id);
+          result = v
+            ? {
+                ok: true,
+                id: v.id,
+                name: v.name,
+                source: v.source,
+                note: v.note,
+                rows: v.rows?.slice(0, 200),
+                truncated: (v.rows?.length ?? 0) > 200,
+              }
+            : { ok: false, error: `view not found: ${id}` };
         }
       } else if (name === "save_site_profile") {
         result = await this.saveSiteProfile(args);

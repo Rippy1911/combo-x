@@ -28,6 +28,10 @@ Source of truth for the challenge: `../combo` on `feat/v0.1-phase-b` (2026-07-16
 - CRXJS + pnpm workspace layout
 - OpenRouter SSE parsing ideas
 
+## Chat attachments (v0.5)
+
+See [`docs/ATTACHMENTS.md`](./ATTACHMENTS.md) — Attach/drop/paste PDF·CSV·XLSX·txt·images; `list_attachments` / `read_attachment`; vision parts for images.
+
 ## Local RAG + connectors (v0.4)
 
 See [`docs/LOCAL_RAG.md`](./LOCAL_RAG.md) — directory grant + index + `rag_*` tools; IdeaForge/GitHub live with vault creds.

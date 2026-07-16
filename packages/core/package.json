@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "pdfjs-dist": "^4.10.38",
+    "xlsx": "^0.18.5",
     "zod": "^3.24.2"
   }
 }

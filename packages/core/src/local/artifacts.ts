@@ -117,6 +117,12 @@ export class ArtifactStore {
     await idbReq(this.store("reports", "readwrite").put(row));
     return row;
   }
+
+  async listReports(): Promise<ReportArtifact[]> {
+    await this.getDb();
+    const rows = await idbReq<ReportArtifact[]>(this.store("reports", "readonly").getAll());
+    return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
 }
 
 export function buildReportHtml(title: string, bodyHtml: string): string {

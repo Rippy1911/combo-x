@@ -1,6 +1,6 @@
 {
   "name": "@combo-x/extension",
-  "version": "0.4.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,9 @@
     "@combo-x/core": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {

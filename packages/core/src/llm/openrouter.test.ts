@@ -21,6 +21,34 @@ describe("parseSse", () => {
   });
 });
 
+describe("OpenRouterClient.chatStreaming", () => {
+  it("accumulates content deltas and tool_calls", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"Hi "}}]}\n',
+      'data: {"choices":[{"delta":{"content":"there"}}]}\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"get_page","arguments":""}}]}}]}\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n',
+      "data: [DONE]\n",
+    ].join("");
+    const fetchImpl: typeof fetch = async () =>
+      new Response(sse, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const deltas: string[] = [];
+    const result = await client.chatStreaming({
+      model: "m",
+      messages: [{ role: "user", content: "x" }],
+      onDelta: (s) => deltas.push(s),
+    });
+    expect(deltas.at(-1)).toBe("Hi there");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.function.name).toBe("get_page");
+    expect(result.toolCalls[0]?.function.arguments).toBe("{}");
+  });
+});
+
 describe("OpenRouterClient.chat", () => {
   it("parses tool calls from a non-stream response", async () => {
     const fetchImpl: typeof fetch = async () =>

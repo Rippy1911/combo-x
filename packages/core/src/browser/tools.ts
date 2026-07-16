@@ -389,6 +389,38 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "list_attachments",
+      description:
+        "List files the user uploaded in chat (PDF, CSV, XLSX, txt, images). Prefer read_attachment for full text.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "Optional session filter" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_attachment",
+      description:
+        "Read extracted text from an uploaded chat attachment by id or filename. Images are vision-attached on upload; this returns a short note for images.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Attachment id (preferred)" },
+          name: { type: "string", description: "Filename if id unknown" },
+          maxChars: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "export_csv",
       description: "Download rows as CSV (after scrape / parse_data).",
       parameters: {
@@ -401,6 +433,61 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           },
         },
         required: ["filename", "rows"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_view",
+      description:
+        "Save a named table view (rows snapshot) to the Views tab for later reopen / export / charts. Prefer after scrape_catalog or parse_data.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          rows: {
+            type: "array",
+            items: { type: "array", items: { type: "string" } },
+            description: "Header row first, then data rows",
+          },
+          columns: { type: "array", items: { type: "string" } },
+          filter: { type: "string" },
+          note: { type: "string" },
+          chart: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["bar", "line"] },
+              valueColumn: { type: "number" },
+              labelColumn: { type: "number" },
+            },
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_views",
+      description: "List saved Views (name, id, row counts).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_view",
+      description: "Load a saved view by id or name (returns row snapshot, capped).",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+        },
         additionalProperties: false,
       },
     },
@@ -498,6 +585,21 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           limit: { type: "number" },
         },
         required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory_list",
+      description:
+        "List recent durable local memories (same store as remember/recall / first-turn inject). Use after writes to refresh.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number" },
+        },
         additionalProperties: false,
       },
     },
