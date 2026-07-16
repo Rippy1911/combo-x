@@ -1,9 +1,9 @@
 # Combo-X Architecture
 
-**Version:** 1.1.0 (`feat/v0.9-budget-activity-rag`)  
+**Version:** 1.2.0 (`feat/v0.9-budget-activity-rag`)  
 **Stack:** Chrome MV3 extension · React side panel · `@combo-x/core` (shared logic) · OpenRouter tool-calling · IndexedDB local-first stores
 
-Combo-X is a **local-first browser agent**: the orchestrator LLM plans steps, calls tools, and the extension executes DOM/media/API work on the user's machine. BYOK OpenRouter. v1.1 adds agentic control, sub-agents, usage charts, and task tracking.
+Combo-X is a **local-first browser agent**: the orchestrator LLM plans steps, calls tools, and the extension executes DOM/media/API work on the user's machine. BYOK OpenRouter. v1.2 adds page extensions (MAIN userscripts + isolated store); v1.1 added agentic control, sub-agents, usage charts, and task tracking.
 
 ---
 
@@ -362,7 +362,7 @@ flowchart TB
 
 - Tools: `create_task`, `update_task`, `list_tasks`
 - UI: **Tasks** tab (`TasksPanel.tsx`)
-- Status: `open` | `in_progress` | `blocked` | `done`
+- Status: `todo` | `doing` | `done` | `blocked`
 
 ---
 

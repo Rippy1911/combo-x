@@ -53,7 +53,7 @@ export interface AgentProfile {
 |-------|------|---------|---------|
 | `maxSteps` | `number?` | `32` (budget still caps via `resolveMaxSteps`) | Per-agent orchestrator turn cap |
 | `canDelegate` | `boolean?` | `true` on new profiles | Allow `spawn_subagent` — see [`docs/SUBAGENTS.md`](./SUBAGENTS.md) |
-| `canSelfEdit` | `boolean?` | `true` on new profiles | Allow `update_agent` / `create_agent` / `list_agents` |
+| `canSelfEdit` | `boolean?` | `true` on new profiles | Intended to gate `update_agent` / `create_agent` (meta tools added on create; **execute-time strip still TODO**) |
 | `nestingDepth` | `number?` | `1` | Max child depth (enforced: parent depth 0 → child 1 only) |
 
 Resolved via `resolveAgentProfile()` in `packages/core/src/agents/profiles.ts`. `App.tsx` passes `maxSteps` from the active profile into `agent.run()`.

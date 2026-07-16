@@ -150,6 +150,17 @@ Protocol: [`docs/SUBAGENTS.md`](./SUBAGENTS.md). Profile fields: [`docs/AGENTS.m
 
 Usage charts are UI-driven (`UsagePanel` ← `UsageStore`), not a separate tool.
 
+### Page extensions (v1.2 — shipped)
+
+| Tool | Use when |
+|------|----------|
+| `create_page_extension` / `update_page_extension` | Draft MAIN-world userscripts |
+| `approve_page_extension` | **User-only** (agent call rejected) |
+| `inject_page_extension` / `set_page_extension_bridge` | Always ask (even under `auto_all`) |
+| `page_ext_data_*` / `list_page_extension_audit` | Read isolated data / audit |
+
+See [`docs/PAGE_EXTENSIONS.md`](./PAGE_EXTENSIONS.md). Sensitive: approve, revoke, inject, bridge, data_clear, create/update.
+
 ---
 
 ## Worker vs orchestrator tools

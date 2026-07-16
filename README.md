@@ -54,13 +54,11 @@ Load in Chrome:
 4. **Settings** → Budget (default), Agents, Connectors (REST/MCP), Device RAG
 5. Chat: attach PDF → scrape with `scrape_pdps` / progressive table
 
-## v1.1 roadmap
+## Next (known gaps — see verification)
 
-- **Sub-agents** — `spawn_subagent` with isolated child history, results-only return, depth 1 ([`docs/SUBAGENTS.md`](./docs/SUBAGENTS.md))
-- **Usage telemetry** — durable `UsageStore` + charts (v1.0: per-session totals in `SessionStore`)
-- **Task tracking** — global `TaskStore` linked to sessions, views, and sub-agent runs
-- **Auto-tooling** — worker LLM filters `AGENT_TOOLS` per turn; optional auto-agent profile creation
-- **Agent profile fields** — `maxSteps`, `canDelegate`, `canSelfEdit` on `AgentProfile`
+- Page-ext **bridge capability token** (forgeable `scriptId` today — harden before password-manager use cases)
+- Honor `runAt` / tighten match patterns / optional auto-inject flag
+- `canSelfEdit` execute-time catalog filtering
 
 ## Monorepo layout
 

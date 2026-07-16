@@ -59,6 +59,8 @@ export const TOOL_GROUPS = {
     "search_sessions",
   ],
   Connectors: ["rest_request", "mcp_list_tools", "mcp_call"],
+  Agentic: ["create_agent", "update_agent", "list_agents", "spawn_subagent"],
+  Meta: ["create_task", "update_task", "list_tasks"],
   PageExt: [
     "create_page_extension",
     "update_page_extension",
@@ -83,5 +85,7 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Media",
   "Memory",
   "Connectors",
+  "Agentic",
+  "Meta",
   "PageExt",
 ];

@@ -51,28 +51,7 @@ Parent must have `canDelegate: true` on its profile (v1.1 field — see [`docs/A
 
 ## `spawn_subagent` tool (v1.1)
 
-Planned schema (to be added to `AGENT_TOOLS`):
-
-```typescript
-{
-  name: "spawn_subagent",
-  description: "Run a focused sub-task in an isolated agent loop. Returns summary only.",
-  parameters: {
-    type: "object",
-    properties: {
-      goal: { type: "string", description: "Clear sub-goal for the child" },
-      agentId: { type: "string", description: "Optional AgentProfile id" },
-      tools: {
-        type: "array",
-        items: { type: "string" },
-        description: "Tool allowlist override; default = parent enabledTools",
-      },
-      maxSteps: { type: "number", description: "Child step cap" },
-    },
-    required: ["goal"],
-  },
-}
-```
+Shipped in `AGENT_TOOLS` (`packages/core/src/browser/tools.ts`). Child step-limit or abort → envelope `ok: false` with `error: "hit_step_limit" | "aborted"`.
 
 ### Spawn flow
 
@@ -94,12 +73,7 @@ sequenceDiagram
   Parent->>Parent: tool message JSON envelope only
 ```
 
-Implementation sketch (v1.1):
-
-- `AgentLoop.executeTool()` branch for `spawn_subagent`
-- New `SubAgentRunner` or recursive `AgentLoop.run()` with `parentDepth` + `isolated: true`
-- Child `onEvent` mirrored to UI sub-chip store (not parent `historyRef`)
-- Child abort propagates from parent `AbortSignal`
+Implementation: recursive `AgentLoop.run()` with `nestingDepth`; UI via `onSubagent` → `SubagentStrip`.
 
 ---
 

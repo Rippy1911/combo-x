@@ -5,6 +5,19 @@ import {
   type PageExtension,
 } from "@combo-x/core";
 
+function bridgeAllowed(
+  ext: PageExtension,
+  pageUrl: string | undefined,
+): { ok: true } | { ok: false; error: string } {
+  if (ext.approval !== "approved") return { ok: false, error: "extension not approved" };
+  if (!ext.enabled) return { ok: false, error: "extension disabled" };
+  if (!pageUrl || !urlMatches(pageUrl, ext.match)) {
+    return { ok: false, error: "url does not match extension patterns" };
+  }
+  if (!ext.bridge) return { ok: false, error: "no bridge configured" };
+  return { ok: true };
+}
+
 const store = new PageExtensionStore();
 
 function payloadBytes(value: unknown): number {
@@ -94,8 +107,10 @@ export async function handlePageExtBridge(msg: {
 }> {
   const ext = await store.get(msg.scriptId);
   if (!ext) return { ok: false, error: "unknown extension", reqId: msg.reqId };
-  const bridge = ext.bridge;
-  const max = bridge?.maxPayloadBytes ?? 64_000;
+  const gate = bridgeAllowed(ext, msg.pageUrl);
+  if (!gate.ok) return { ok: false, error: gate.error, reqId: msg.reqId };
+  const bridge = ext.bridge!;
+  const max = bridge.maxPayloadBytes ?? 64_000;
 
   if (msg.kind === "log") {
     await store.audit({
@@ -107,10 +122,6 @@ export async function handlePageExtBridge(msg: {
       detail: { channel: "__log", msg: (msg.payload as { msg?: string })?.msg },
     });
     return { ok: true, reqId: msg.reqId };
-  }
-
-  if (!bridge) {
-    return { ok: false, error: "no bridge configured", reqId: msg.reqId };
   }
 
   if (msg.kind === "export") {

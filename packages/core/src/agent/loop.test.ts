@@ -762,6 +762,67 @@ describe("AgentLoop", () => {
     filterSpy.mockRestore();
   });
 
+  it("empty enabledTools attaches zero tools (T-V12-empty-allowlist)", async () => {
+    const llm = mockLlm([{ content: "no tools" }]);
+    const filterSpy = vi.spyOn(AGENT_TOOLS, "filter");
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "hi",
+      enabledTools: [],
+      maxSteps: 1,
+    });
+    // Filter yields []; loop omits tools key when length===0 (not the old bug of restoring ALL).
+    expect(filterSpy.mock.results[0]?.value).toEqual([]);
+    const stream = llm.chatStreaming as ReturnType<typeof vi.fn>;
+    const call = stream.mock.calls[0]?.[0] as { tools?: unknown[] };
+    expect(call?.tools).toBeUndefined();
+    filterSpy.mockRestore();
+  });
+
+  it("approve_page_extension is rejected for agent (user-only)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "approve_page_extension",
+            args: JSON.stringify({ id: "x" }),
+          },
+        ],
+      },
+      { content: "done" },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const pageExtensions = new (await import("../pageExtensions/store.js")).PageExtensionStore(
+      `pe_${crypto.randomUUID()}`,
+    );
+    const toolResults: unknown[] = [];
+    await agent.run({
+      model: "mock",
+      userMessage: "approve",
+      approvalMode: "ask",
+      pageExtensions,
+      onEvent: (e) => {
+        if (e.type === "tool_approval" && e.resolve) e.resolve(true);
+        if (e.type === "tool_result" && e.tool === "approve_page_extension") {
+          toolResults.push(e.result);
+        }
+      },
+    });
+    expect(toolResults[0]).toMatchObject({ ok: false });
+    expect(String((toolResults[0] as { error?: string }).error)).toMatch(/user-only/i);
+  });
+
   it("spawn_subagent blocks at nesting depth 1 (T-V11-nesting)", async () => {
     const llm = mockLlm([
       {

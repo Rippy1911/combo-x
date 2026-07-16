@@ -35,6 +35,10 @@ flowchart TB
 | No Combo sessions/vault/views | Separate DB `combo_x_page_ext` |
 | No programmatic Combo control | Content script ignores non-bridge envelopes; SW never maps bridge → RuntimeMessage tools |
 | Data out only via agent bridge | `bridge` null by default; `set_page_extension_bridge` required |
+| Approve is human-only | Agent `approve_page_extension` returns error; UI Approve sets `approvedBy: user` |
+| Bridge ops require live match | SW rejects unless approved + enabled + `urlMatches(pageUrl)` |
+
+**Known gap (P0 remaining):** bridge messages trust caller-supplied `scriptId` without a per-injection capability token. Same-origin page JS that learns an id can forge storage/export until a token is added. Do **not** store passwords in page-ext storage — use Combo Vault + `login`.
 
 ## Lifecycle
 

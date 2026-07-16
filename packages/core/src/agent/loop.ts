@@ -388,15 +388,16 @@ export class AgentLoop {
     let finalText = "";
     const pageTemplates = new PageTemplateCache();
 
+    // undefined/null → all tools; [] → zero tools (Disable-all must not silently restore full set).
     const enabledToolNames =
-      options.enabledTools && options.enabledTools.length > 0
+      options.enabledTools != null
         ? options.enabledTools
         : AGENT_TOOLS.map((t) => t.function.name);
 
     // Full tool schemas are re-sent on every LLM call (OpenAI protocol).
     // Token savings come from a smaller allowlist (pickToolsForGoal / agent profile), not stripping mid-run.
     const tools =
-      options.enabledTools && options.enabledTools.length > 0
+      options.enabledTools != null
         ? AGENT_TOOLS.filter((t) => options.enabledTools!.includes(t.function.name))
         : AGENT_TOOLS;
 
@@ -589,9 +590,19 @@ export class AgentLoop {
     onUsage: (u: LlmUsage) => void,
   ): Promise<boolean> {
     if (!SENSITIVE_TOOLS.has(call.function.name)) return true;
-    if (mode === "auto_all") return true;
+    // Page-extension lifecycle that installs MAIN-world JS must never auto-approve.
+    const alwaysAskUser = new Set([
+      "approve_page_extension",
+      "set_page_extension_bridge",
+      "inject_page_extension",
+    ]);
+    if (alwaysAskUser.has(call.function.name)) {
+      /* fall through to ask / UI gate even under auto_all */
+    } else if (mode === "auto_all") {
+      return true;
+    }
 
-    if (mode === "auto_llm") {
+    if (mode === "auto_llm" && !alwaysAskUser.has(call.function.name)) {
       try {
         const verdict = await this.llm.chat({
           model: approvalModel,
@@ -1508,11 +1519,16 @@ export class AgentLoop {
       });
 
       return {
-        ok: !childResult.aborted,
+        ok: !childResult.aborted && !childResult.hitStepLimit,
         summary: childResult.finalText,
         steps: childResult.steps,
         usage: childResult.usage,
         subagentId,
+        error: childResult.hitStepLimit
+          ? "hit_step_limit"
+          : childResult.aborted
+            ? "aborted"
+            : undefined,
         artifacts: [] as unknown[],
       };
     } catch (error) {
@@ -1622,8 +1638,12 @@ export class AgentLoop {
         return { ok: true, extension: row };
       }
       if (name === "approve_page_extension") {
-        const row = await store.approve(String(args.id ?? ""), "agent", sessionId);
-        return { ok: true, id: row.id, approval: row.approval, sourceHash: row.sourceHash };
+        // Human-only: MAIN-world JS install must be confirmed in Page ext UI (actor=user).
+        return {
+          ok: false,
+          error:
+            "approve_page_extension is user-only — open the Page ext tab and click Approve (shows source hash).",
+        };
       }
       if (name === "revoke_page_extension") {
         const row = await store.revoke(String(args.id ?? ""), "agent", sessionId);
