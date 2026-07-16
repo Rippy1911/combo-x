@@ -19,9 +19,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       description: "List links on the active page (text + href).",
       parameters: {
         type: "object",
-        properties: {
-          limit: { type: "number", description: "Max links (default 30)" },
-        },
+        properties: { limit: { type: "number" } },
         additionalProperties: false,
       },
     },
@@ -49,7 +47,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         properties: {
           selector: { type: "string" },
           text: { type: "string" },
-          submit: { type: "boolean", description: "Press Enter after typing" },
+          submit: { type: "boolean" },
         },
         required: ["selector", "text"],
         additionalProperties: false,
@@ -65,9 +63,25 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         type: "object",
         properties: {
           selector: { type: "string" },
-          attribute: { type: "string", description: "Optional attribute name (e.g. href)" },
+          attribute: { type: "string" },
         },
         required: ["selector"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "scrape_tables",
+      description:
+        "Extract HTML tables from the page as row arrays (great for product/EAN lists). Optional CSS selector.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "Table selector, default all tables" },
+          limit: { type: "number" },
+        },
         additionalProperties: false,
       },
     },
@@ -78,6 +92,121 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       name: "list_tabs",
       description: "List open browser tabs (id, title, url).",
       parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_tab",
+      description:
+        "Open a URL in a new tab and focus it. Use this to go to allegro.pl, foodwell, etc.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "https URL" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "activate_tab",
+      description: "Focus an existing tab by id from list_tabs.",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        required: ["tabId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "export_csv",
+      description:
+        "Turn a 2D array of rows into a downloadable CSV (filename + rows). Use after scrape_tables or extract.",
+      parameters: {
+        type: "object",
+        properties: {
+          filename: { type: "string" },
+          rows: {
+            type: "array",
+            items: { type: "array", items: { type: "string" } },
+          },
+        },
+        required: ["filename", "rows"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_bookmark",
+      description: "Save a bookmark (url + title + optional note) locally.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          title: { type: "string" },
+          note: { type: "string" },
+        },
+        required: ["url", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_reminder",
+      description: "Create a local reminder (fires via chrome notification when due, if permitted).",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          atIso: { type: "string", description: "ISO datetime" },
+        },
+        required: ["text", "atIso"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_report",
+      description:
+        "Create a local HTML report page (title + markdown-ish body). Returns a blob URL the user can open/download.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          bodyHtml: { type: "string" },
+        },
+        required: ["title", "bodyHtml"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_sessions",
+      description: "Search past chat sessions by keyword.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -144,6 +273,12 @@ export function toolArgsToContentRequest(
         selector: args.selector,
         attribute: typeof args.attribute === "string" ? args.attribute : undefined,
       };
+    case "scrape_tables":
+      return {
+        op: "scrape_tables",
+        selector: typeof args.selector === "string" ? args.selector : undefined,
+        limit: typeof args.limit === "number" ? args.limit : 20,
+      };
     default:
       return null;
   }
@@ -160,4 +295,18 @@ export function parseToolArguments(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+export function rowsToCsv(rows: string[][]): string {
+  return rows
+    .map((row) =>
+      row
+        .map((cell) => {
+          const s = String(cell ?? "");
+          if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+          return s;
+        })
+        .join(","),
+    )
+    .join("\n");
 }

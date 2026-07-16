@@ -14,5 +14,10 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        setup: path.resolve(__dirname, "setup/index.html"),
+      },
+    },
   },
 });

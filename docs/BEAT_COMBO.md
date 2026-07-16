@@ -15,12 +15,12 @@ Source of truth for the challenge: `../combo` on `feat/v0.1-phase-b` (2026-07-16
 
 ## What Combo-X ships instead
 
-1. **AgentLoop** — OpenAI-compatible tool calling against OpenRouter; max steps; abort signal.
-2. **8 tools** — `get_page`, `get_links`, `click`, `type_text`, `extract`, `list_tabs`, `remember`, `recall`.
-3. **Content handlers** — unit-tested DOM ops used by the real content script.
-4. **Side panel** — onboarding (passphrase + key), chat, live tool traces, session cost meter, STOP.
-5. **MemoryStore** — IndexedDB + keyword ranking (lightweight day-1; pgvector later if needed).
-6. **20 unit tests + build + e2e artifact checks** — all green locally.
+1. **AgentLoop** — tool calling; default **32** steps; abort; approval modes (`ask` / `auto_llm` / `auto_all`).
+2. **16 tools** — page DOM + `open_tab` / `activate_tab` + `scrape_tables` / `export_csv` + bookmarks / reminders / HTML reports + `search_sessions` + memory.
+3. **UI** — expandable tool chips, allow-box for sensitive actions, Sessions tab, token/cost meter, Setup ingest page.
+4. **Content handlers** — unit-tested DOM ops; SW reinjects content scripts after navigation.
+5. **MemoryStore + SessionStore** — IndexedDB; searchable past chats.
+6. **24 unit tests + build** — green locally. Sync/scale = plan only (`docs/SYNC_AND_SCALE.md`).
 
 ## Reused (not reinvented)
 
@@ -30,9 +30,7 @@ Source of truth for the challenge: `../combo` on `feat/v0.1-phase-b` (2026-07-16
 
 ## Intentionally deferred (honest)
 
+- Encrypted multi-device blob sync (vault yes today; sessions plaintext local — see SYNC_AND_SCALE)
+- Live IdeaForge / Supabase read MCP (setup page queues intents only)
 - Folder RAG via File System Access API
-- Bidirectional MCP
-- WASM sandbox / pentest toolkit
 - Firefox port
-
-Those were Combo Phases C–D. Combo-X wins by shipping a **usable agent** first.

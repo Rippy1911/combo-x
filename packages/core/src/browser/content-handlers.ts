@@ -68,6 +68,25 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         });
         return { ok: true, data: { values } };
       }
+      case "scrape_tables": {
+        const sel = request.selector?.trim() || "table";
+        const limit = request.limit ?? 20;
+        const tables = Array.from(doc.querySelectorAll(sel))
+          .filter((n) => n.tagName === "TABLE" || n.querySelector("table"))
+          .slice(0, limit)
+          .map((node, index) => {
+            const table = node.tagName === "TABLE" ? node : node.querySelector("table");
+            if (!table) return null;
+            const rows = Array.from(table.querySelectorAll("tr")).map((tr) =>
+              Array.from(tr.querySelectorAll("th,td")).map((c) =>
+                (c.textContent ?? "").trim().replace(/\s+/g, " "),
+              ),
+            );
+            return { index, rowCount: rows.length, rows: rows.slice(0, 500) };
+          })
+          .filter(Boolean);
+        return { ok: true, data: { tables, count: tables.length } };
+      }
       default:
         return { ok: false, error: "unknown op" };
     }

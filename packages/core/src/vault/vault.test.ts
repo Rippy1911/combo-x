@@ -35,4 +35,13 @@ describe("Vault", () => {
   it("throws VaultSealedError when unlocking uninitialized vault", async () => {
     await expect(vault.unlock("anything")).rejects.toBeInstanceOf(VaultSealedError);
   });
+
+  it("putByLabel upserts without duplicating labels", async () => {
+    await vault.setPassphrase("x");
+    await vault.putByLabel("openrouter_model", "bad-model");
+    await vault.putByLabel("openrouter_model", "x-ai/grok-4.5");
+    await expect(vault.getByLabel("openrouter_model")).resolves.toBe("x-ai/grok-4.5");
+    const labels = await vault.listLabels();
+    expect(labels.filter((l) => l === "openrouter_model")).toHaveLength(1);
+  });
 });

@@ -66,6 +66,31 @@ body {
   color: var(--muted);
 }
 
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  overflow-x: auto;
+}
+
+.tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tab.active {
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -115,10 +140,13 @@ body {
   background: var(--bg-elev);
 }
 
-.composer textarea {
+.composer textarea,
+.panel input,
+.panel select,
+.onboarding input,
+.onboarding select,
+.composer select {
   width: 100%;
-  min-height: 64px;
-  resize: vertical;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg);
@@ -127,10 +155,26 @@ body {
   font: inherit;
 }
 
+.composer textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.grow {
+  flex: 1;
+}
+
+.mono,
+input.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .row {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 button {
@@ -161,38 +205,181 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.onboarding {
-  padding: 20px 16px;
+.onboarding,
+.panel {
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
-.onboarding h1 {
+.onboarding h1,
+.panel h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 20px;
   letter-spacing: -0.03em;
 }
 
-.onboarding p {
+.panel h3 {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.onboarding p,
+.panel > p {
   margin: 0;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
 }
 
-.onboarding input {
-  width: 100%;
-  padding: 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-}
-
 .hint {
   font-size: 11px;
   color: var(--muted);
   font-family: var(--mono);
+}
+
+.hint.wrap {
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.list li {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.tool-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.tool-row input {
+  margin-top: 3px;
+  width: auto;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 80%, #000);
+  overflow: hidden;
+}
+
+.chip-running {
+  border-color: #e6b800;
+}
+.chip-done {
+  border-color: var(--accent-dim);
+}
+.chip-denied,
+.chip-error {
+  border-color: var(--danger);
+}
+
+.chip-head {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.chip-name {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.chip-status {
+  color: var(--muted);
+}
+
+.chip-caret {
+  margin-left: auto;
+}
+
+.chip-preview,
+.chip-body {
+  margin: 0;
+  padding: 0 8px 8px;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.approval {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-dim) 40%, var(--bg));
+  border-radius: 12px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-title {
+  font-weight: 700;
+}
+.approval-args {
+  margin: 0;
+  font-size: 10px;
+  font-family: var(--mono);
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.turn-usage {
+  margin-top: 6px;
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+button.linkish {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 0;
 }

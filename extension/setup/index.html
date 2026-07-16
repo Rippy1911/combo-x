@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Combo-X setup</title>
+    <link rel="stylesheet" href="./setup.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Combo-X setup</h1>
+      <p class="sub">
+        Pick the tools and read-only data sources the agent may use, then send this config to the
+        side panel. Nothing leaves this browser — the payload is written to
+        <code>chrome.storage.local</code> and applied when the panel next focuses.
+      </p>
+
+      <section>
+        <h2>Approval mode</h2>
+        <select id="approval">
+          <option value="ask">Ask each sensitive action</option>
+          <option value="auto_llm">Auto — LLM judges intent (recommended)</option>
+          <option value="auto_all">Auto-approve all this session</option>
+        </select>
+        <p class="hint">Sensitive tools: click, type_text, open_tab, activate_tab.</p>
+      </section>
+
+      <section>
+        <h2>Tool access</h2>
+        <div class="row">
+          <button type="button" id="all-on">Enable all</button>
+          <button type="button" id="all-off">Disable all</button>
+        </div>
+        <ul id="tools" class="tools"></ul>
+      </section>
+
+      <section>
+        <h2>RAG on a repo (local folder hint)</h2>
+        <input id="rag" type="text" placeholder="e.g. ~/projects/aironcoach" />
+        <p class="hint">
+          The agent can’t read your filesystem from a browser extension yet — this is a hint that
+          unlocks once the native companion / MCP client ships. Stored now so it’s ready.
+        </p>
+      </section>
+
+      <section>
+        <h2>Read-only connectors</h2>
+        <ul id="connectors" class="tools">
+          <li>
+            <label>
+              <input type="checkbox" value="ideaforge:read" /> IdeaForge — read (projects, tasks,
+              docs)
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" value="supabase:read" /> Supabase — read (tables you allow)
+            </label>
+          </li>
+          <li>
+            <label>
+              <input type="checkbox" value="github:read" /> GitHub — read (repos, issues, PRs)
+            </label>
+          </li>
+        </ul>
+        <p class="hint">
+          These are <strong>intents only</strong> until the MCP client lands. The agent will see
+          them as available read-only targets and ask you to connect a token when it first needs one.
+        </p>
+      </section>
+
+      <div class="row">
+        <button type="button" id="send" class="primary">Send to Combo-X</button>
+        <button type="button" id="close">Close</button>
+      </div>
+      <p id="msg" class="hint"></p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

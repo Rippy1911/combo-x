@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenRouterClient } from "../llm/openrouter.js";
 import { MemoryStore } from "../memory/store.js";
+import type { BrowserBridge } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
 function mockLlm(sequence: Array<{ content: string | null; toolCalls?: Array<{ id: string; name: string; args: string }> }>) {
@@ -29,6 +30,20 @@ function mockLlm(sequence: Array<{ content: string | null; toolCalls?: Array<{ i
   } as unknown as OpenRouterClient;
 }
 
+function stubBrowser(overrides: Partial<BrowserBridge> = {}): BrowserBridge {
+  return {
+    runContent: vi.fn(async () => ({
+      ok: true,
+      data: { title: "Example", url: "https://example.com", text: "Hello" },
+    })),
+    listTabs: vi.fn(async () => []),
+    openTab: vi.fn(async (url: string) => ({ id: 1, url })),
+    activateTab: vi.fn(async () => ({ ok: true })),
+    downloadText: vi.fn(async () => ({ ok: true })),
+    ...overrides,
+  };
+}
+
 describe("AgentLoop", () => {
   it("runs get_page then answers", async () => {
     const llm = mockLlm([
@@ -39,14 +54,7 @@ describe("AgentLoop", () => {
       { content: "The page title is Example." },
     ]);
 
-    const browser = {
-      runContent: vi.fn(async () => ({
-        ok: true,
-        data: { title: "Example", url: "https://example.com", text: "Hello" },
-      })),
-      listTabs: vi.fn(async () => []),
-    };
-
+    const browser = stubBrowser();
     const memory = new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` });
     const agent = new AgentLoop(llm, browser, memory);
     const events: string[] = [];
@@ -58,6 +66,7 @@ describe("AgentLoop", () => {
 
     expect(result.finalText).toContain("Example");
     expect(result.aborted).toBe(false);
+    expect(result.hitStepLimit).toBe(false);
     expect(result.steps).toBe(2);
     expect(browser.runContent).toHaveBeenCalled();
     expect(events).toContain("tool_start");
@@ -75,10 +84,7 @@ describe("AgentLoop", () => {
     controller.abort();
     const agent = new AgentLoop(
       llm,
-      {
-        runContent: async () => ({ ok: true, data: {} }),
-        listTabs: async () => [],
-      },
+      stubBrowser(),
       new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
     );
     const result = await agent.run({
@@ -108,14 +114,39 @@ describe("AgentLoop", () => {
       { content: "Noted: Anita prefers morning calls." },
     ]);
     const memory = new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` });
-    const agent = new AgentLoop(
-      llm,
-      { runContent: async () => ({ ok: true }), listTabs: async () => [] },
-      memory,
-    );
+    const agent = new AgentLoop(llm, stubBrowser(), memory);
     const result = await agent.run({ model: "mock", userMessage: "save and recall" });
     expect(result.finalText).toMatch(/Anita/);
     const hits = await memory.recall("Anita");
     expect(hits.length).toBeGreaterThan(0);
+  });
+
+  it("can open_tab via bridge", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "open_tab",
+            args: JSON.stringify({ url: "https://allegro.pl" }),
+          },
+        ],
+      },
+      { content: "Opened Allegro." },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "mock",
+      userMessage: "open allegro",
+      approvalMode: "auto_all",
+    });
+    expect(result.finalText).toMatch(/Allegro/i);
+    expect(browser.openTab).toHaveBeenCalledWith("https://allegro.pl", true);
   });
 });
