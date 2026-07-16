@@ -42,7 +42,29 @@ export type {
   AgentRunResult,
   BrowserBridge,
   ApprovalMode,
+  ConnectorBundle,
+  SiteProfile,
+  ProfileStore,
 } from "./agent/loop.js";
+
+export { RagStore } from "./rag/store.js";
+export type { RagChunkRow, RagMeta, IndexedFile } from "./rag/store.js";
+export {
+  grantAndIndex,
+  reindexSaved,
+  indexDirectory,
+  pickDirectory,
+  ensureDirPermission,
+  shouldIndexFile,
+} from "./rag/folder.js";
+export type { IndexProgress } from "./rag/folder.js";
+export { chunkText, RAG_DEFAULT_CHUNK_SIZE } from "./rag/chunk.js";
+export { hybridScore, mockVector, tokenize } from "./rag/embed.js";
+
+export { ideaforgeSearch, clearIdeaForgeTokenCache } from "./connectors/ideaforge.js";
+export type { IdeaForgeConfig, IdeaForgeSearchHit } from "./connectors/ideaforge.js";
+export { githubSearchCode, githubGetFile } from "./connectors/github.js";
+export type { GitHubConfig, GitHubCodeHit } from "./connectors/github.js";
 
 export {
   DEFAULT_MODEL,

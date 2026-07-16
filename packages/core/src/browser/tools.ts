@@ -296,6 +296,99 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "rag_search",
+      description:
+        "Search the locally granted repo folder index (device RAG). Returns path + scored snippets. Prefer this for codebase questions when a folder is granted.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rag_read_file",
+      description: "Read a file path from the local RAG index (relative path from grant root).",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          maxChars: { type: "number" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rag_status",
+      description: "Local RAG index status (folder name, file/chunk counts, last indexed).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ideaforge_search",
+      description:
+        "Read-only search IdeaForge knowledge (Notes / ProjectDocuments) via admin session. Requires IdeaForge credentials in Settings.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "github_search_code",
+      description:
+        "Read-only GitHub code search (needs github_token in vault). Optional repo owner/name filter.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          repo: { type: "string", description: "owner/name" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "github_get_file",
+      description: "Read a file from GitHub (owner/name + path). Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: "string" },
+          path: { type: "string" },
+          ref: { type: "string" },
+        },
+        required: ["repo", "path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "export_csv",
       description: "Download rows as CSV (after scrape / parse_data).",
       parameters: {
@@ -405,6 +498,89 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           limit: { type: "number" },
         },
         required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_site_profile",
+      description:
+        "Save a site login + scrape recipe to the encrypted vault as site_profile:<name>. Set up once, then login/scrape_catalog reuse it without re-entering. Example: {name:'foodwell', loginUrl, username, password, usernameSelector, passwordSelector, submitSelector, selector, nextSelector|nextText, intent}.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          loginUrl: { type: "string" },
+          username: { type: "string" },
+          password: { type: "string" },
+          usernameSelector: { type: "string" },
+          passwordSelector: { type: "string" },
+          submitSelector: { type: "string" },
+          selector: { type: "string", description: "CSS for product cards/rows" },
+          nextSelector: { type: "string", description: "CSS for the next-page button" },
+          nextText: { type: "string", description: "Text to find+click for next page (alt to nextSelector)" },
+          intent: { type: "string", description: "parse_data intent for one page's items" },
+          schemaHint: { type: "string" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_site_profile",
+      description: "Read a saved site profile (login + scrape recipe) from the vault.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "login",
+      description:
+        "Log into a site using a saved profile (by name) or inline selectors. Fills username+password and clicks submit. Approval-gated.",
+      parameters: {
+        type: "object",
+        properties: {
+          profile: { type: "string", description: "Saved profile name" },
+          loginUrl: { type: "string" },
+          username: { type: "string" },
+          password: { type: "string" },
+          usernameSelector: { type: "string" },
+          passwordSelector: { type: "string" },
+          submitSelector: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "scrape_catalog",
+      description:
+        "Paginate a whole catalog in ONE call: per page query_all(selector) → parse_data(intent) (cheap worker) → accumulate rows → click nextSelector/find nextText → repeat. Dedupes rows. Returns {rows, pages, count}. Use a saved profile for defaults or pass args directly.",
+      parameters: {
+        type: "object",
+        properties: {
+          profile: { type: "string", description: "Saved profile name for defaults" },
+          selector: { type: "string", description: "CSS for one product card/row" },
+          intent: { type: "string", description: "parse_data intent per page" },
+          nextSelector: { type: "string" },
+          nextText: { type: "string" },
+          schemaHint: { type: "string" },
+          maxPages: { type: "number", description: "Cap (1-100, default 20)" },
+        },
+        required: ["selector", "intent"],
         additionalProperties: false,
       },
     },

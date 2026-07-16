@@ -196,25 +196,19 @@ function doScroll(
       ? target
       : (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement;
 
-  try {
-    if (direction === "top") {
-      if (target instanceof HTMLElement) target.scrollTop = 0;
-      else view?.scrollTo?.(0, 0);
-    } else if (direction === "bottom") {
-      if (target instanceof HTMLElement) target.scrollTop = target.scrollHeight;
-      else view?.scrollTo?.(0, scrollEl?.scrollHeight ?? 0);
-    } else if (direction === "percent") {
+  // Prefer scrollTop (works in jsdom + browsers); avoid window.scrollTo noise in tests.
+  const el = target instanceof HTMLElement ? target : scrollEl;
+  const viewport = view?.innerHeight ?? 600;
+  if (el) {
+    if (direction === "top") el.scrollTop = 0;
+    else if (direction === "bottom") el.scrollTop = el.scrollHeight;
+    else if (direction === "percent") {
       const p = Math.min(100, Math.max(0, percent ?? 50)) / 100;
-      const max = (scrollEl?.scrollHeight ?? 0) - (view?.innerHeight ?? 0);
-      view?.scrollTo?.(0, max * p);
+      el.scrollTop = Math.max(0, el.scrollHeight - viewport) * p;
     } else {
-      const delta =
-        direction === "down" ? (view?.innerHeight ?? 600) * 0.8 : -(view?.innerHeight ?? 600) * 0.8;
-      if (target instanceof HTMLElement) target.scrollBy?.(0, delta);
-      else view?.scrollBy?.(0, delta);
+      const delta = direction === "down" ? viewport * 0.8 : -viewport * 0.8;
+      el.scrollTop = Math.max(0, el.scrollTop + delta);
     }
-  } catch {
-    /* jsdom lacks scrollTo — still report ok for unit tests */
   }
   return { ok: true, data: { scrolled: direction, percent: percent ?? null } };
 }

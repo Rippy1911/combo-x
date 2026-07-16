@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenRouterClient } from "../llm/openrouter.js";
 import { MemoryStore } from "../memory/store.js";
-import type { BrowserBridge } from "./loop.js";
+import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
 function mockLlm(
@@ -198,5 +198,134 @@ describe("AgentLoop", () => {
       approvalMode: "auto_all",
     });
     expect(browser.navigate).toHaveBeenCalledWith("https://allegro.pl");
+  });
+
+  function memProfiles(): { store: Map<string, SiteProfile>; profiles: ProfileStore } {
+    const store = new Map<string, SiteProfile>();
+    const profiles: ProfileStore = {
+      get: async (n) => store.get(n) ?? null,
+      save: async (p) => {
+        store.set(p.name, p);
+      },
+    };
+    return { store, profiles };
+  }
+
+  it("scrape_catalog paginates and returns rows", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "scrape_catalog",
+            args: JSON.stringify({ selector: ".card", intent: "extract name+ean", maxPages: 1 }),
+          },
+        ],
+      },
+      {
+        content: JSON.stringify({
+          rows: [
+            { name: "A", ean: "590" },
+            { name: "B", ean: "123" },
+          ],
+        }),
+      },
+      { content: "Scraped 2 products." },
+    ]);
+    const browser = stubBrowser({
+      runContent: vi.fn(async () => ({
+        ok: true,
+        data: { values: ["Item A EAN 590", "Item B EAN 123"] },
+      })),
+    });
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "orch",
+      workerModel: "worker",
+      userMessage: "scrape",
+      approvalMode: "auto_all",
+    });
+    expect(result.finalText).toMatch(/2 products/);
+  });
+
+  it("save_site_profile + get_site_profile round-trip via ProfileStore", async () => {
+    const { store, profiles } = memProfiles();
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "save_site_profile",
+            args: JSON.stringify({
+              name: "foodwell",
+              username: "u",
+              password: "p",
+              selector: ".card",
+              intent: "extract eans",
+            }),
+          },
+        ],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "get_site_profile", args: JSON.stringify({ name: "foodwell" }) }],
+      },
+      { content: "Profile ready." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      undefined,
+      profiles,
+    );
+    await agent.run({ model: "orch", userMessage: "save and get", approvalMode: "auto_all" });
+    expect(store.get("foodwell")?.username).toBe("u");
+    expect(store.get("foodwell")?.selector).toBe(".card");
+  });
+
+  it("login fills credentials from a saved profile", async () => {
+    const { store, profiles } = memProfiles();
+    store.set("foodwell", {
+      name: "foodwell",
+      loginUrl: "https://b2b.foodwell.pl/login",
+      username: "u",
+      password: "p",
+      usernameSelector: "#user",
+      passwordSelector: "#pass",
+      submitSelector: "#submit",
+    });
+    const ops: string[] = [];
+    const browser = stubBrowser({
+      runContent: vi.fn(async (req) => {
+        ops.push(req.op);
+        return { ok: true, data: {} };
+      }),
+      navigate: vi.fn(async (url: string) => ({ ok: true, url })),
+    });
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "login", args: JSON.stringify({ profile: "foodwell" }) }],
+      },
+      { content: "Logged in." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      undefined,
+      profiles,
+    );
+    await agent.run({ model: "orch", userMessage: "login", approvalMode: "auto_all" });
+    expect(browser.navigate).toHaveBeenCalledWith("https://b2b.foodwell.pl/login");
+    expect(ops.filter((c) => c === "type_text").length).toBe(2);
+    expect(ops).toContain("click");
   });
 });

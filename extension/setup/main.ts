@@ -1,3 +1,5 @@
+import { RagStore, grantAndIndex, reindexSaved } from "@combo-x/core";
+
 const TOOL_NAMES = [
   "get_page",
   "get_links",
@@ -19,6 +21,12 @@ const TOOL_NAMES = [
   "activate_tab",
   "close_tab",
   "parse_data",
+  "rag_search",
+  "rag_read_file",
+  "rag_status",
+  "ideaforge_search",
+  "github_search_code",
+  "github_get_file",
   "export_csv",
   "save_bookmark",
   "set_reminder",
@@ -29,33 +37,14 @@ const TOOL_NAMES = [
 ];
 
 const TOOL_BLURB: Record<string, string> = {
-  get_page: "Read active tab (title, url, text).",
-  get_links: "List links on the page.",
-  get_interactive: "Indexed clickable/inputs snapshot.",
-  click_index: "Click by interactive index.",
-  type_index: "Type by interactive index.",
-  click: "Click an element (CSS selector).",
-  type_text: "Type into an input (CSS selector).",
-  extract: "Extract text/attribute from elements.",
-  query_all: "Batch CSS extract for cards/lists.",
-  scrape_tables: "Scrape <table> rows into rows[][].",
-  scroll: "Scroll page or container.",
-  wait: "Wait up to 10s.",
-  find_text: "Find visible text (+ optional scroll).",
-  navigate: "Navigate current tab to URL.",
-  go_back: "History back.",
-  remember: "Save a note to local memory.",
-  recall: "Search local memory.",
-  list_tabs: "List open tabs.",
-  open_tab: "Open a URL in a new tab.",
-  activate_tab: "Switch to a tab by id.",
-  close_tab: "Close a tab by id.",
+  rag_search: "Search granted local folder index.",
+  rag_read_file: "Read a path from the local RAG index.",
+  rag_status: "Folder grant + index stats.",
+  ideaforge_search: "Search IdeaForge knowledge (vault creds).",
+  github_search_code: "GitHub code search (PAT).",
+  github_get_file: "Read a GitHub file (PAT).",
   parse_data: "Cheap worker LLM structured extract.",
-  export_csv: "Download rows as CSV.",
-  save_bookmark: "Save a bookmark.",
-  set_reminder: "Set a reminder (ISO time).",
-  create_report: "Build + download an HTML report.",
-  search_sessions: "Search past chat sessions.",
+  get_interactive: "Indexed clickable/inputs snapshot.",
 };
 
 type SetupPayload = {
@@ -65,6 +54,8 @@ type SetupPayload = {
   ragPathHint: string | null;
   connectors: string[];
 };
+
+const rag = new RagStore();
 
 function readState(): SetupPayload {
   const tools = [...document.querySelectorAll<HTMLInputElement>("#tools input")]
@@ -79,6 +70,21 @@ function readState(): SetupPayload {
     .filter((c) => c.checked)
     .map((c) => c.value);
   return { type: "combo-x-setup", tools, approvalMode: approval, ragPathHint, connectors };
+}
+
+async function refreshRagStatus() {
+  const el = document.getElementById("rag-status")!;
+  const meta = await rag.getMeta();
+  const handle = await rag.getHandle();
+  if (!handle && !meta?.chunkCount) {
+    el.textContent = "No folder granted yet.";
+    return;
+  }
+  el.textContent = `${meta?.folderName || handle?.folderName || "folder"} — ${meta?.fileCount ?? 0} files / ${meta?.chunkCount ?? 0} chunks${
+    meta?.indexedAt ? ` · ${new Date(meta.indexedAt).toLocaleString()}` : ""
+  }`;
+  const ragInput = document.getElementById("rag") as HTMLInputElement;
+  if (!ragInput.value && meta?.folderName) ragInput.value = meta.folderName;
 }
 
 function render() {
@@ -112,6 +118,39 @@ function render() {
     }
   });
 
+  document.getElementById("grant")!.addEventListener("click", async () => {
+    const status = document.getElementById("rag-status")!;
+    status.textContent = "Pick a folder…";
+    try {
+      const meta = await grantAndIndex(rag, (p) => {
+        status.textContent = p.message ?? p.phase;
+      });
+      (document.getElementById("rag") as HTMLInputElement).value = meta.folderName;
+      const local = document.querySelector<HTMLInputElement>('#connectors input[value="local_rag"]');
+      if (local) local.checked = true;
+      for (const name of ["rag_search", "rag_read_file", "rag_status"]) {
+        const box = document.querySelector<HTMLInputElement>(`#tools input[value="${name}"]`);
+        if (box) box.checked = true;
+      }
+      await refreshRagStatus();
+    } catch (e) {
+      status.textContent = e instanceof Error ? e.message : String(e);
+    }
+  });
+
+  document.getElementById("reindex")!.addEventListener("click", async () => {
+    const status = document.getElementById("rag-status")!;
+    status.textContent = "Reindexing…";
+    try {
+      await reindexSaved(rag, (p) => {
+        status.textContent = p.message ?? p.phase;
+      });
+      await refreshRagStatus();
+    } catch (e) {
+      status.textContent = e instanceof Error ? e.message : String(e);
+    }
+  });
+
   document.getElementById("send")!.addEventListener("click", async () => {
     const payload = readState();
     const msg = document.getElementById("msg")!;
@@ -124,6 +163,7 @@ function render() {
   });
 
   document.getElementById("close")!.addEventListener("click", () => window.close());
+  void refreshRagStatus();
 }
 
 render();

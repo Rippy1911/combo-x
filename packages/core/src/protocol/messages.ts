@@ -21,6 +21,12 @@ export const BrowserToolNameSchema = z.enum([
   "go_back",
   "close_tab",
   "parse_data",
+  "rag_search",
+  "rag_read_file",
+  "rag_status",
+  "ideaforge_search",
+  "github_search_code",
+  "github_get_file",
   "remember",
   "recall",
   "list_tabs",
@@ -143,7 +149,7 @@ export function getProtocolVersion(): number {
   return PROTOCOL_VERSION;
 }
 
-/** Tools that mutate the page / open URLs — require approval unless auto mode. */
+/** Tools that mutate the page / open URLs / handle credentials — require approval unless auto mode. */
 export const SENSITIVE_TOOLS = new Set([
   "click",
   "type_text",
@@ -154,4 +160,6 @@ export const SENSITIVE_TOOLS = new Set([
   "navigate",
   "go_back",
   "close_tab",
+  "login",
+  "scrape_catalog",
 ]);

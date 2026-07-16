@@ -28,9 +28,12 @@ Source of truth for the challenge: `../combo` on `feat/v0.1-phase-b` (2026-07-16
 - CRXJS + pnpm workspace layout
 - OpenRouter SSE parsing ideas
 
+## Local RAG + connectors (v0.4)
+
+See [`docs/LOCAL_RAG.md`](./LOCAL_RAG.md) — directory grant + index + `rag_*` tools; IdeaForge/GitHub live with vault creds.
+
 ## Intentionally deferred (honest)
 
 - Encrypted multi-device blob sync (vault yes today; sessions plaintext local — see SYNC_AND_SCALE)
-- Live IdeaForge / Supabase read MCP (setup page queues intents only)
-- Folder RAG via File System Access API
+- Supabase read MCP
 - Firefox port

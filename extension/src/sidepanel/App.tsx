@@ -6,16 +6,22 @@ import {
   MODEL_PRESETS,
   MemoryStore,
   OpenRouterClient,
+  RagStore,
   SessionStore,
   Vault,
   getProtocolVersion,
+  grantAndIndex,
   normalizeModelId,
+  reindexSaved,
   type AgentEvent,
   type ApprovalMode,
   type ChatMessage,
   type ChatSession,
   type LlmUsage,
+  type ProfileStore,
+  type RagMeta,
   type SessionMessage,
+  type SiteProfile,
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
@@ -25,6 +31,9 @@ import { ToolChip, type ToolChipData } from "./ToolChip";
 const KEY_LABEL = "openrouter_api_key";
 const MODEL_LABEL = "openrouter_model";
 const WORKER_MODEL_LABEL = "openrouter_worker_model";
+const IF_EMAIL_LABEL = "ideaforge_email";
+const IF_PASS_LABEL = "ideaforge_password";
+const GH_TOKEN_LABEL = "github_token";
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
 
@@ -57,7 +66,11 @@ function loadEnabledTools(): Set<string> {
     if (!raw) return new Set(ALL_TOOL_NAMES);
     const saved = (JSON.parse(raw) as string[]).filter((n) => ALL_TOOL_NAMES.includes(n));
     // v0.3 migrate: enable new scrape/parse tools if older allowlist lacked them
-    if (!saved.includes("parse_data") || !saved.includes("get_interactive")) {
+    if (
+      !saved.includes("parse_data") ||
+      !saved.includes("get_interactive") ||
+      !saved.includes("rag_search")
+    ) {
       return new Set(ALL_TOOL_NAMES);
     }
     return new Set(saved);
@@ -76,6 +89,24 @@ export function App() {
   const vault = useMemo(() => new Vault(), []);
   const memory = useMemo(() => new MemoryStore(), []);
   const sessions = useMemo(() => new SessionStore(), []);
+  const rag = useMemo(() => new RagStore(), []);
+  const profiles = useMemo<ProfileStore>(
+    () => ({
+      get: async (name) => {
+        const raw = await vault.getByLabel(`site_profile:${name}`);
+        if (!raw) return null;
+        try {
+          return JSON.parse(raw) as SiteProfile;
+        } catch {
+          return null;
+        }
+      },
+      save: async (profile) => {
+        await vault.putByLabel(`site_profile:${profile.name}`, JSON.stringify(profile));
+      },
+    }),
+    [vault],
+  );
   const bridge = useMemo(() => createChromeBridge(), []);
 
   const [ready, setReady] = useState(false);
@@ -136,6 +167,12 @@ export function App() {
       return [];
     }
   });
+  const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
+  const [ragMsg, setRagMsg] = useState("");
+  const [ragBusy, setRagBusy] = useState(false);
+  const [ideaforgeEmail, setIdeaforgeEmail] = useState("");
+  const [ideaforgePass, setIdeaforgePass] = useState("");
+  const [githubToken, setGithubToken] = useState("");
 
   const applySetupPayload = useCallback((payload: unknown) => {
     if (!payload || typeof payload !== "object") return false;
@@ -160,6 +197,22 @@ export function App() {
     if (Array.isArray(p.connectors)) {
       setConnectors(p.connectors);
       localStorage.setItem("combo_x_connectors", JSON.stringify(p.connectors));
+      setEnabledTools((prev) => {
+        const next = new Set(prev);
+        if (p.connectors!.includes("ideaforge:read") || p.connectors!.includes("ideaforge_search")) {
+          next.add("ideaforge_search");
+        }
+        if (p.connectors!.includes("github:read") || p.connectors!.includes("github_search_code")) {
+          next.add("github_search_code");
+          next.add("github_get_file");
+        }
+        if (p.ragPathHint || p.connectors!.includes("local_rag")) {
+          next.add("rag_search");
+          next.add("rag_read_file");
+          next.add("rag_status");
+        }
+        return next;
+      });
     }
     setSetupMsg(`Applied setup (${p.tools?.length ?? 0} tools, approval=${p.approvalMode ?? "?"})`);
     return true;
@@ -253,15 +306,19 @@ export function App() {
     const storedWorker = await vault.getByLabel(WORKER_MODEL_LABEL);
     setWorkerModel(storedWorker ? normalizeModelId(storedWorker) : DEFAULT_WORKER_MODEL);
     if (key) setApiKey(key);
+    setIdeaforgeEmail((await vault.getByLabel(IF_EMAIL_LABEL)) ?? "");
+    setIdeaforgePass((await vault.getByLabel(IF_PASS_LABEL)) ?? "");
+    setGithubToken((await vault.getByLabel(GH_TOKEN_LABEL)) ?? "");
     setNeedsOnboarding(!key);
     setLocked(false);
     await refreshVaultLabels();
+    setRagMeta(await rag.getMeta());
     if (!currentSession) {
       const s = await sessions.create("New chat");
       setCurrentSession(s);
     }
     setStatus("Unlocked");
-  }, [currentSession, refreshVaultLabels, sessions, vault]);
+  }, [currentSession, rag, refreshVaultLabels, sessions, vault]);
 
   const unlockExisting = useCallback(async () => {
     const ok = await vault.unlock(passphrase);
@@ -365,7 +422,7 @@ export function App() {
       const controller = new AbortController();
       abortRef.current = controller;
       const llm = new OpenRouterClient({ apiKey: key });
-      const agent = new AgentLoop(llm, bridge, memory, sessions);
+      const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       let turnUsage = ZERO;
       const toolMap = new Map<string, ToolChipData>();
 
@@ -436,6 +493,9 @@ export function App() {
       };
 
       try {
+        const ifEmail = ideaforgeEmail || (await vault.getByLabel(IF_EMAIL_LABEL));
+        const ifPass = ideaforgePass || (await vault.getByLabel(IF_PASS_LABEL));
+        const gh = githubToken || (await vault.getByLabel(GH_TOKEN_LABEL));
         const result = await agent.run({
           model: normalizeModelId(model),
           workerModel: normalizeModelId(workerModel),
@@ -446,6 +506,12 @@ export function App() {
           approvalMode: approvalModeRef.current,
           approvalModel: normalizeModelId(workerModel),
           maxSteps: 32,
+          rag,
+          connectors: {
+            ideaforge:
+              ifEmail && ifPass ? { email: ifEmail, password: ifPass } : null,
+            github: gh ? { token: gh } : null,
+          },
           onEvent,
         });
         historyRef.current = result.messages.filter((m) => m.role !== "system");
@@ -494,11 +560,15 @@ export function App() {
       bridge,
       currentSession,
       enabledTools,
+      githubToken,
+      ideaforgeEmail,
+      ideaforgePass,
       input,
       memory,
       model,
       workerModel,
       persistSession,
+      rag,
       running,
       sessionUsage,
       sessions,
@@ -822,6 +892,27 @@ export function App() {
             onChange={(e) => setCustomWorkerModel(e.target.value)}
             placeholder="custom worker model id"
           />
+          <label className="hint">IdeaForge email (read search)</label>
+          <input
+            type="email"
+            value={ideaforgeEmail}
+            onChange={(e) => setIdeaforgeEmail(e.target.value)}
+            placeholder="admin@…"
+          />
+          <label className="hint">IdeaForge password</label>
+          <input
+            type="password"
+            value={ideaforgePass}
+            onChange={(e) => setIdeaforgePass(e.target.value)}
+            placeholder="vault-encrypted"
+          />
+          <label className="hint">GitHub PAT (code search / file read)</label>
+          <input
+            type="password"
+            value={githubToken}
+            onChange={(e) => setGithubToken(e.target.value)}
+            placeholder="ghp_…"
+          />
           <div className="row">
             <button
               type="button"
@@ -833,9 +924,13 @@ export function App() {
                   if (apiKey.trim()) await vault.putByLabel(KEY_LABEL, apiKey.trim());
                   await vault.putByLabel(MODEL_LABEL, m);
                   await vault.putByLabel(WORKER_MODEL_LABEL, w);
+                  if (ideaforgeEmail.trim()) await vault.putByLabel(IF_EMAIL_LABEL, ideaforgeEmail.trim());
+                  if (ideaforgePass.trim()) await vault.putByLabel(IF_PASS_LABEL, ideaforgePass.trim());
+                  if (githubToken.trim()) await vault.putByLabel(GH_TOKEN_LABEL, githubToken.trim());
                   setModel(m);
                   setWorkerModel(w);
-                  setSettingsMsg(`Saved orch=${m} · worker=${w}`);
+                  setSettingsMsg(`Saved orch=${m} · worker=${w} · connectors`);
+                  await refreshVaultLabels();
                 })()
               }
             >
@@ -922,12 +1017,80 @@ export function App() {
 
       {tab === "mcp" ? (
         <div className="panel">
-          <h2>Setup ingest</h2>
+          <h2>Device RAG + connectors</h2>
           <p className="hint wrap">
-            Open the setup page, tick tools / read-only MCP targets, then click “Send to Combo-X”.
-            Payload type <code>combo-x-setup</code> is stored in extension localStorage +{" "}
-            <code>chrome.storage.local</code> and applied when this panel focuses.
+            Grant a local folder (File System Access). Agent tools: <code>rag_search</code>,{" "}
+            <code>rag_read_file</code>. IdeaForge + GitHub are live when credentials are in Settings.
           </p>
+          <p className="hint wrap">
+            Index:{" "}
+            <code>
+              {ragMeta
+                ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
+                : "(none)"}
+            </code>
+            {ragMeta?.indexedAt ? (
+              <>
+                <br />
+                Last indexed: {new Date(ragMeta.indexedAt).toLocaleString()}
+              </>
+            ) : null}
+          </p>
+          <div className="row">
+            <button
+              type="button"
+              className="primary"
+              disabled={ragBusy || locked}
+              onClick={() =>
+                void (async () => {
+                  setRagBusy(true);
+                  setRagMsg("Pick a folder…");
+                  try {
+                    const meta = await grantAndIndex(rag, (p) => setRagMsg(p.message ?? p.phase));
+                    setRagMeta(meta);
+                    setRagPathHint(meta.folderName);
+                    localStorage.setItem("combo_x_rag_path_hint", meta.folderName);
+                    setEnabledTools((prev) => {
+                      const next = new Set(prev);
+                      next.add("rag_search");
+                      next.add("rag_read_file");
+                      next.add("rag_status");
+                      return next;
+                    });
+                    setRagMsg(`Ready — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
+                  } catch (e) {
+                    setRagMsg(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setRagBusy(false);
+                  }
+                })()
+              }
+            >
+              Grant folder + index
+            </button>
+            <button
+              type="button"
+              disabled={ragBusy || locked}
+              onClick={() =>
+                void (async () => {
+                  setRagBusy(true);
+                  setRagMsg("Reindexing…");
+                  try {
+                    const meta = await reindexSaved(rag, (p) => setRagMsg(p.message ?? p.phase));
+                    setRagMeta(meta);
+                    setRagMsg(`Reindexed — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
+                  } catch (e) {
+                    setRagMsg(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setRagBusy(false);
+                  }
+                })()
+              }
+            >
+              Reindex
+            </button>
+          </div>
+          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
           <button
             type="button"
             className="primary"
@@ -940,15 +1103,15 @@ export function App() {
           </button>
           {setupMsg ? <p className="hint wrap">{setupMsg}</p> : null}
           <p className="hint wrap">
-            RAG path hint: <code>{ragPathHint || "(none)"}</code>
+            Label: <code>{ragPathHint || "(none)"}</code>
             <br />
-            Connectors queued: {connectors.length ? connectors.join(", ") : "(none)"} — IdeaForge /
-            Supabase / GitHub are <strong>read-only intents</strong> until MCP client ships.
+            Setup connectors: {connectors.length ? connectors.join(", ") : "(none)"}
+            <br />
+            IdeaForge: {ideaforgeEmail ? "email set" : "missing"} · GitHub:{" "}
+            {githubToken ? "token set" : "missing"}
           </p>
           <p className="hint wrap">
-            Encrypted multi-device vault sync + conversation scale: planned only — see{" "}
-            <code>docs/SYNC_AND_SCALE.md</code>. Vault secrets are AES-GCM today; sessions/artifacts
-            are still local plaintext IDB.
+            See <code>docs/LOCAL_RAG.md</code>
           </p>
         </div>
       ) : null}
