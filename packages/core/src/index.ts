@@ -77,6 +77,7 @@ export type {
   ConnectorBundle,
   SiteProfile,
   ProfileStore,
+  SubagentEvent,
 } from "./agent/loop.js";
 export { leanHistory } from "./agent/leanHistory.js";
 
@@ -128,12 +129,37 @@ export type { GetSecretFn, RestRequestOptions } from "./connectors/rest.js";
 export { mcpListTools, mcpCall } from "./connectors/mcp.js";
 export { githubRestTemplate } from "./connectors/templates.js";
 
-export { AgentProfileStore } from "./agents/profiles.js";
+export { AgentProfileStore, resolveAgentProfile } from "./agents/profiles.js";
 export type {
   AgentProfile,
+  ResolvedAgentProfile,
   ToolAllowlist,
   ApprovalMode as AgentProfileApprovalMode,
 } from "./agents/profiles.js";
+
+export {
+  TOOL_CATALOG,
+  catalogEntry,
+  catalogForPrompt,
+  filterToolsByNames,
+} from "./tools/catalog.js";
+export type { ToolCatalogEntry, ToolGroup } from "./tools/catalog.js";
+
+export { CORE_TOOL_NAMES, pickToolsForGoal } from "./tools/pickTools.js";
+export type { ToolPickerLlm } from "./tools/pickTools.js";
+
+export { UsageStore, providerFromModel } from "./usage/store.js";
+export type {
+  UsageEvent,
+  UsageKind,
+  UsageListOptions,
+  UsageTotals,
+  UsageAggregateRow,
+  MessageRole,
+} from "./usage/store.js";
+
+export { TaskStore } from "./tasks/store.js";
+export type { Task, TaskStatus, TaskListOptions } from "./tasks/store.js";
 
 export {
   DEFAULT_MODEL,

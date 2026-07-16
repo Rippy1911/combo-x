@@ -3,6 +3,10 @@ import type { OpenRouterClient } from "../llm/openrouter.js";
 import { ViewStore } from "../local/views.js";
 import { MemoryStore } from "../memory/store.js";
 import { SessionStore } from "../sessions/store.js";
+import { AgentProfileStore } from "../agents/profiles.js";
+import { UsageStore } from "../usage/store.js";
+import { AGENT_TOOLS } from "../browser/tools.js";
+import * as pickToolsMod from "../tools/pickTools.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -728,5 +732,139 @@ describe("AgentLoop", () => {
     expect(browser.navigate).toHaveBeenCalledWith("https://b2b.foodwell.pl/login");
     expect(ops.filter((c) => c === "type_text").length).toBe(2);
     expect(ops).toContain("click");
+  });
+
+  it("computes enabled tools once before the step loop (T-V11-tools-once)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "list_tabs", args: "{}" }],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "list_tabs", args: "{}" }],
+      },
+      { content: "done" },
+    ]);
+    const filterSpy = vi.spyOn(AGENT_TOOLS, "filter");
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "tabs",
+      enabledTools: ["list_tabs", "get_page"],
+      maxSteps: 3,
+    });
+    expect(filterSpy).toHaveBeenCalledTimes(1);
+    filterSpy.mockRestore();
+  });
+
+  it("spawn_subagent blocks at nesting depth 1 (T-V11-nesting)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "spawn_subagent",
+            args: JSON.stringify({ goal: "nested task" }),
+          },
+        ],
+      },
+      { content: "Blocked nesting." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const toolResults: unknown[] = [];
+    await agent.run({
+      model: "mock",
+      userMessage: "spawn",
+      nestingDepth: 1,
+      approvalMode: "auto_all",
+      onEvent: (e) => {
+        if (e.type === "tool_result" && e.tool === "spawn_subagent") {
+          toolResults.push(e.result);
+        }
+      },
+    });
+    expect(toolResults[0]).toMatchObject({ ok: false, error: "nesting limit" });
+  });
+
+  it("create_agent auto-picks tools and saves profile (T-V11-create-agent)", async () => {
+    const pickSpy = vi.spyOn(pickToolsMod, "pickToolsForGoal").mockResolvedValue({
+      tools: ["navigate", "page_digest", "scrape_pdps"],
+      rationale: "scrape goal",
+    });
+    const agents = new AgentProfileStore(`agents_loop_${crypto.randomUUID()}`);
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "create_agent",
+            args: JSON.stringify({
+              name: "FoodWell Scraper",
+              goal: "Map EANs from FoodWell catalog",
+            }),
+          },
+        ],
+      },
+      { content: "Agent created." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      workerModel: "worker-model",
+      userMessage: "create agent",
+      agents,
+    });
+    expect(pickSpy).toHaveBeenCalledOnce();
+    const saved = await agents.list();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.name).toBe("FoodWell Scraper");
+    expect(saved[0]?.toolAllowlist).toContain("create_task");
+    expect(saved[0]?.toolAllowlist).toContain("spawn_subagent");
+    pickSpy.mockRestore();
+  });
+
+  it("usageLog append on user, llm, tool, assistant (T-V11-usage)", async () => {
+    const usageLog = new UsageStore(`usage_loop_${crypto.randomUUID()}`);
+    const appendSpy = vi.spyOn(usageLog, "append");
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "list_tabs", args: "{}" }],
+      },
+      { content: "Listed tabs." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "list tabs",
+      sessionId: "sess-1",
+      runId: "run-1",
+      usageLog,
+    });
+    const kinds = appendSpy.mock.calls.map((c) => c[0]?.kind);
+    expect(kinds).toContain("message");
+    expect(kinds.filter((k) => k === "message")).toHaveLength(2);
+    expect(kinds).toContain("llm");
+    expect(kinds).toContain("tool");
+    appendSpy.mockRestore();
   });
 });

@@ -57,6 +57,13 @@ export const BrowserToolNameSchema = z.enum([
   "screenshot_full",
   "start_recording",
   "stop_recording",
+  "create_agent",
+  "update_agent",
+  "list_agents",
+  "spawn_subagent",
+  "create_task",
+  "update_task",
+  "list_tasks",
 ]);
 export type BrowserToolName = z.infer<typeof BrowserToolNameSchema>;
 
@@ -221,4 +228,5 @@ export const SENSITIVE_TOOLS = new Set([
   "mcp_call",
   "start_recording",
   "stop_recording",
+  "spawn_subagent",
 ]);

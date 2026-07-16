@@ -859,6 +859,144 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_agent",
+      description:
+        "Create a reusable agent profile (model, tools, budget). Auto-picks tools from goal when autoPickTools is true.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          goal: { type: "string", description: "Used for auto tool picking" },
+          systemPrompt: { type: "string" },
+          orchestratorModel: { type: "string" },
+          workerModel: { type: "string" },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+          maxSteps: { type: "number" },
+          autoPickTools: { type: "boolean", description: "Default true when goal provided" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_agent",
+      description:
+        "Update an agent profile (partial fields: systemPrompt, models, toolAllowlist, maxSteps, canDelegate, canSelfEdit, budgetMode).",
+      parameters: {
+        type: "object",
+        properties: {
+          agentId: { type: "string" },
+          name: { type: "string" },
+          systemPrompt: { type: "string" },
+          orchestratorModel: { type: "string" },
+          workerModel: { type: "string" },
+          toolAllowlist: { type: "array", items: { type: "string" } },
+          connectorIds: { type: "array", items: { type: "string" } },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+          approvalMode: { type: "string", enum: ["ask", "auto_llm", "auto_all"] },
+          maxSteps: { type: "number" },
+          canDelegate: { type: "boolean" },
+          canSelfEdit: { type: "boolean" },
+          nestingDepth: { type: "number" },
+          ragEnabled: { type: "boolean" },
+        },
+        required: ["agentId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_agents",
+      description: "List saved agent profiles (id, name, models, tool counts).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_subagent",
+      description:
+        "Run a focused sub-task in an isolated agent loop. Returns summary only — not full child messages.",
+      parameters: {
+        type: "object",
+        properties: {
+          goal: { type: "string" },
+          agentId: { type: "string", description: "Optional AgentProfile id" },
+          tools: {
+            type: "array",
+            items: { type: "string" },
+            description: "Tool allowlist override; default = parent tools minus spawn_subagent",
+          },
+          maxSteps: { type: "number" },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+        },
+        required: ["goal"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_task",
+      description: "Create a task on the agent task board (todo/doing/done/blocked).",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          sessionId: { type: "string" },
+          note: { type: "string" },
+          planMarkdown: { type: "string" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+        },
+        required: ["title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_task",
+      description: "Update task status, title, note, or planMarkdown.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+          title: { type: "string" },
+          note: { type: "string" },
+          planMarkdown: { type: "string" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_tasks",
+      description: "List tasks filtered by session, status, or global-only scope.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          globalOnly: { type: "boolean" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export function toolArgsToContentRequest(

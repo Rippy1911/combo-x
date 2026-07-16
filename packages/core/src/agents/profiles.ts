@@ -17,8 +17,35 @@ export interface AgentProfile {
   budgetMode?: AgentBudgetMode;
   approvalMode?: ApprovalMode;
   ragEnabled?: boolean;
+  maxSteps?: number;
+  canDelegate?: boolean;
+  canSelfEdit?: boolean;
+  nestingDepth?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ResolvedAgentProfile extends AgentProfile {
+  maxSteps: number;
+  canDelegate: boolean;
+  canSelfEdit: boolean;
+  nestingDepth: number;
+}
+
+const DEFAULT_MAX_STEPS = 32;
+const DEFAULT_CAN_DELEGATE = true;
+const DEFAULT_CAN_SELF_EDIT = true;
+const DEFAULT_NESTING_DEPTH = 1;
+
+/** Apply profile defaults for runtime agent loop / delegation. */
+export function resolveAgentProfile(profile: AgentProfile): ResolvedAgentProfile {
+  return {
+    ...profile,
+    maxSteps: profile.maxSteps ?? DEFAULT_MAX_STEPS,
+    canDelegate: profile.canDelegate ?? DEFAULT_CAN_DELEGATE,
+    canSelfEdit: profile.canSelfEdit ?? DEFAULT_CAN_SELF_EDIT,
+    nestingDepth: profile.nestingDepth ?? DEFAULT_NESTING_DEPTH,
+  };
 }
 
 interface AgentMeta {

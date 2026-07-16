@@ -21,10 +21,13 @@ import {
   leanHistory,
   normalizeModelId,
   parseAttachment,
+  resolveAgentProfile,
   resultError,
   resultOk,
   summarizeResult,
   stripImageParts,
+  TaskStore,
+  UsageStore,
   type AgentBudgetMode,
   type AgentEvent,
   type AgentProfile,
@@ -37,6 +40,7 @@ import {
   type RagMeta,
   type SessionMessage,
   type SiteProfile,
+  type SubagentEvent,
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
@@ -52,6 +56,9 @@ import { ToolChip, type ToolChipData } from "./ToolChip";
 import { ActivityPanel } from "./ActivityPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { ViewsPanel } from "./ViewsPanel";
+import { UsagePanel } from "./UsagePanel";
+import { TasksPanel } from "./TasksPanel";
+import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
 import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const KEY_LABEL = "openrouter_api_key";
@@ -67,6 +74,8 @@ type TabId =
   | "sessions"
   | "views"
   | "activity"
+  | "usage"
+  | "tasks"
   | "settings"
   | "vault"
   | "tools"
@@ -151,6 +160,8 @@ export function App() {
   const artifacts = useMemo(() => new ArtifactStore(), []);
   const actionLog = useMemo(() => new ActionLogStore(), []);
   const agentProfiles = useMemo(() => new AgentProfileStore(), []);
+  const usageStore = useMemo(() => new UsageStore(), []);
+  const taskStore = useMemo(() => new TaskStore(), []);
   const connectorStore = useMemo(() => new ConnectorStore(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profiles = useMemo<ProfileStore>(
@@ -211,6 +222,8 @@ export function App() {
   const [attachMsg, setAttachMsg] = useState("");
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [subagentRuns, setSubagentRuns] = useState<SubagentRun[]>([]);
+  const [usageSessionFilter, setUsageSessionFilter] = useState<"all" | "session">("all");
 
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ChatMessage[]>([]);
@@ -445,6 +458,7 @@ export function App() {
     setAttachMsg("");
     setSessionUsage(ZERO);
     setLastTurnUsage(null);
+    setSubagentRuns([]);
     setTab("chat");
     await refreshSessions();
   }, [refreshSessions, sessions]);
@@ -575,6 +589,7 @@ export function App() {
       setTurns(nextTurns);
       setRunning(true);
       setStreamingId(assistantId);
+      setSubagentRuns([]);
       setStatus(pendingIds.length ? `Working with ${pendingIds.length} file(s)…` : "Working…");
       setLastTurnUsage(null);
 
@@ -583,10 +598,12 @@ export function App() {
       const llm = new OpenRouterClient({ apiKey: key });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
+      const resolved = activeProfile ? resolveAgentProfile(activeProfile) : null;
       const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
       const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runApproval = activeProfile?.approvalMode ?? approvalModeRef.current;
+      const runMaxSteps = resolved?.maxSteps;
       const runTools =
         activeProfile?.toolAllowlist === "all"
           ? ALL_TOOL_NAMES
@@ -605,6 +622,52 @@ export function App() {
         setTurns((prev) =>
           prev.map((t) => (t.id === assistantId ? { ...t, tools: [...tools] } : t)),
         );
+      };
+
+      const onSubagent = (ev: SubagentEvent) => {
+        setSubagentRuns((prev) => {
+          switch (ev.type) {
+            case "start":
+              return [
+                ...prev,
+                { id: ev.subagentId, goal: ev.goal, status: "running", messages: [] },
+              ];
+            case "delta": {
+              const toolChips =
+                ev.messages
+                  ?.filter((m) => m.role === "tool" || m.role === "assistant")
+                  .map((m) => ({
+                    tool:
+                      m.role === "tool"
+                        ? (m.name ?? "tool")
+                        : m.tool_calls?.[0]?.function.name ?? "step",
+                    status: "done" as const,
+                  })) ?? [];
+              return prev.map((r) =>
+                r.id === ev.subagentId ? { ...r, messages: toolChips } : r,
+              );
+            }
+            case "done":
+              return prev.map((r) =>
+                r.id === ev.subagentId
+                  ? { ...r, status: "done", summary: ev.summary, ok: true }
+                  : r,
+              );
+            case "error":
+              return prev.map((r) =>
+                r.id === ev.subagentId
+                  ? {
+                      ...r,
+                      status: "done",
+                      summary: ev.summary ?? "Sub-agent error",
+                      ok: false,
+                    }
+                  : r,
+              );
+            default:
+              return prev;
+          }
+        });
       };
 
       const onEvent = (event: AgentEvent) => {
@@ -658,6 +721,31 @@ export function App() {
             status: denied ? "denied" : "done",
           });
           flushTools();
+          if (
+            (event.tool === "create_agent" || event.tool === "create_agent_profile") &&
+            resultOk(event.result)
+          ) {
+            void agentProfiles.list().then(setAgentList);
+          }
+          if (event.tool === "spawn_subagent" && resultOk(event.result)) {
+            const envelope = event.result as { summary?: string; ok?: boolean; childRunId?: string };
+            if (envelope.summary) {
+              setSubagentRuns((runs) => {
+                const last = runs[runs.length - 1];
+                if (!last || last.status === "done") return runs;
+                return runs.map((r, i) =>
+                  i === runs.length - 1
+                    ? {
+                        ...r,
+                        status: "done" as const,
+                        summary: envelope.summary,
+                        ok: envelope.ok !== false,
+                      }
+                    : r,
+                );
+              });
+            }
+          }
           void (async () => {
             const page = await getActiveTabMeta();
             await actionLog.append({
@@ -694,12 +782,21 @@ export function App() {
           userMessage: text || displayText,
           history: historyRef.current,
           signal: controller.signal,
+          maxSteps: runMaxSteps,
           systemPrompt: activeProfile?.systemPrompt,
           enabledTools: runTools,
           approvalMode: runApproval,
           getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
           approvalModel: runWorker,
           budgetMode: runBudget,
+          usageLog: usageStore,
+          tasks: taskStore,
+          agents: agentProfiles,
+          sessionId: session.id,
+          runId,
+          agentId: activeAgentId ?? undefined,
+          nestingDepth: 0,
+          onSubagent,
           connectors: {
             store: connectorStore,
             getSecret: (label) => vault.getByLabel(label),
@@ -778,6 +875,8 @@ export function App() {
       running,
       sessionUsage,
       sessions,
+      taskStore,
+      usageStore,
       turns,
       vault,
     ],
@@ -875,6 +974,8 @@ export function App() {
             ["sessions", "Sessions"],
             ["views", "Views"],
             ["activity", "Activity"],
+            ["usage", "Usage"],
+            ["tasks", "Tasks"],
             ["settings", "Settings"],
             ["vault", "Vault"],
             ["tools", "Tools"],
@@ -904,6 +1005,7 @@ export function App() {
         <>
           <div className={`chat-main${preview ? " chat-main-split" : ""}`}>
             <div className="messages">
+              <SubagentStrip runs={subagentRuns} />
               {turns.length === 0 ? (
                 <div className="bubble system">
                   Hi — I’m Combo-X. I can open tabs (<code>open_tab</code>), scrape tables, export CSV,
@@ -1226,6 +1328,20 @@ export function App() {
           actionLog={actionLog}
           onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
         />
+      ) : null}
+
+      {tab === "usage" ? (
+        <UsagePanel
+          usageStore={usageStore}
+          sessionId={currentSession?.id}
+          sessionFilter={usageSessionFilter}
+          onSessionFilterChange={setUsageSessionFilter}
+          onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
+        />
+      ) : null}
+
+      {tab === "tasks" ? (
+        <TasksPanel taskStore={taskStore} currentSessionId={currentSession?.id} />
       ) : null}
 
       {tab === "settings" ? (

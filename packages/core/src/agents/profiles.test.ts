@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentProfileStore } from "./profiles.js";
+import { AgentProfileStore, resolveAgentProfile } from "./profiles.js";
 
 describe("AgentProfileStore", () => {
   it("list get put remove and active meta", async () => {
@@ -27,5 +27,41 @@ describe("AgentProfileStore", () => {
   it("setActiveId rejects missing profile", async () => {
     const store = new AgentProfileStore(`agents_test_${crypto.randomUUID()}`);
     await expect(store.setActiveId("missing")).rejects.toThrow(/not found/);
+  });
+});
+
+describe("resolveAgentProfile", () => {
+  it("applies defaults for optional runtime fields", () => {
+    const resolved = resolveAgentProfile({
+      id: "p1",
+      name: "Default",
+      toolAllowlist: "all",
+      connectorIds: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    expect(resolved.maxSteps).toBe(32);
+    expect(resolved.canDelegate).toBe(true);
+    expect(resolved.canSelfEdit).toBe(true);
+    expect(resolved.nestingDepth).toBe(1);
+  });
+
+  it("preserves explicit overrides", () => {
+    const resolved = resolveAgentProfile({
+      id: "p2",
+      name: "Custom",
+      toolAllowlist: [],
+      connectorIds: [],
+      maxSteps: 8,
+      canDelegate: false,
+      canSelfEdit: false,
+      nestingDepth: 2,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    expect(resolved.maxSteps).toBe(8);
+    expect(resolved.canDelegate).toBe(false);
+    expect(resolved.canSelfEdit).toBe(false);
+    expect(resolved.nestingDepth).toBe(2);
   });
 });

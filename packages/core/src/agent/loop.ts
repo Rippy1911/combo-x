@@ -10,6 +10,16 @@ import type { ConnectorStore } from "../connectors/store.js";
 import { restRequest } from "../connectors/rest.js";
 import { mcpCall, mcpListTools } from "../connectors/mcp.js";
 import {
+  resolveAgentProfile,
+  type AgentProfile,
+  type ResolvedAgentProfile,
+  type AgentProfileStore,
+} from "../agents/profiles.js";
+import type { TaskStore } from "../tasks/store.js";
+import { providerFromModel, type UsageEvent, type UsageStore } from "../usage/store.js";
+import { TOOL_CATALOG } from "../tools/catalog.js";
+import { pickToolsForGoal } from "../tools/pickTools.js";
+import {
   BUDGET_SYSTEM_ADDON,
   preferPageDigest,
   resolveMaxSteps,
@@ -119,6 +129,15 @@ export type ConnectorRuntime = {
 /** @deprecated use ConnectorRuntime */
 export type ConnectorBundle = ConnectorRuntime;
 
+export interface SubagentEvent {
+  type: "start" | "delta" | "done" | "error";
+  subagentId: string;
+  goal: string;
+  summary?: string;
+  messages?: ChatMessage[];
+  usage?: LlmUsage;
+}
+
 export interface AgentRunOptions {
   model: string;
   /** Cheap model for parse_data (and optional approval) */
@@ -149,6 +168,18 @@ export interface AgentRunOptions {
   views?: ViewStore;
   /** Minimize steps/tokens — prefer page_digest + worker parse */
   budgetMode?: AgentBudgetMode;
+  /** Sub-agent nesting depth (0 = root orchestrator). */
+  nestingDepth?: number;
+  /** Agent profile store for create/list/update/spawn. */
+  agents?: AgentProfileStore;
+  /** Task board store. */
+  tasks?: TaskStore;
+  /** Usage telemetry store. */
+  usageLog?: UsageStore;
+  sessionId?: string;
+  runId?: string;
+  agentId?: string;
+  onSubagent?: (e: SubagentEvent) => void;
 }
 
 export interface AgentRunResult {
@@ -234,6 +265,54 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const META_TASK_TOOLS = ["create_task", "list_tasks", "update_task"];
+
+function mergeToolNames(...groups: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const group of groups) {
+    for (const name of group) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+function metaToolsForAgent(canDelegate: boolean, canSelfEdit: boolean): string[] {
+  const meta = [...META_TASK_TOOLS];
+  if (canDelegate) meta.push("spawn_subagent");
+  if (canSelfEdit) meta.push("update_agent", "list_agents", "create_agent");
+  return meta;
+}
+
+interface RunContext {
+  nestingDepth: number;
+  runId: string;
+  sessionId?: string;
+  agentId?: string;
+  agents?: AgentProfileStore;
+  tasks?: TaskStore;
+  usageLog?: UsageStore;
+  resolvedProfile: ResolvedAgentProfile | null;
+  enabledToolNames: string[];
+  onSubagent?: (e: SubagentEvent) => void;
+  model: string;
+  workerModel: string;
+  budgetMode: AgentBudgetMode;
+  signal?: AbortSignal;
+  rag?: RagStore;
+  connectors?: ConnectorRuntime;
+  attachments?: AttachmentStore;
+  views?: ViewStore;
+  approvalMode?: ApprovalMode;
+  getApprovalMode?: () => ApprovalMode;
+  approvalModel?: string;
+  systemPrompt?: string;
+  history?: ChatMessage[];
+}
+
 export class AgentLoop {
   private readonly artifacts = new ArtifactStore();
 
@@ -246,14 +325,45 @@ export class AgentLoop {
   ) {}
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
-    const budgetMode = options.budgetMode ?? "normal";
-    const maxSteps = resolveMaxSteps(budgetMode, options.maxSteps);
+    const nestingDepth = options.nestingDepth ?? 0;
+    const runId = options.runId ?? crypto.randomUUID();
+    let resolvedProfile: ResolvedAgentProfile | null = null;
+    if (options.agentId && options.agents) {
+      const profile = await options.agents.get(options.agentId);
+      if (profile) resolvedProfile = resolveAgentProfile(profile);
+    }
+
+    const budgetMode =
+      options.budgetMode ?? resolvedProfile?.budgetMode ?? "normal";
+    const maxSteps = resolveMaxSteps(
+      budgetMode,
+      options.maxSteps ?? resolvedProfile?.maxSteps,
+    );
     const resolveApprovalMode = (): ApprovalMode =>
-      options.getApprovalMode?.() ?? options.approvalMode ?? "ask";
-    const workerModel = options.workerModel ?? DEFAULT_WORKER_MODEL;
+      options.getApprovalMode?.() ??
+      options.approvalMode ??
+      resolvedProfile?.approvalMode ??
+      "ask";
+    const workerModel =
+      options.workerModel ??
+      resolvedProfile?.workerModel ??
+      DEFAULT_WORKER_MODEL;
+    const orchestratorModel = resolvedProfile?.orchestratorModel ?? options.model;
     const emit = options.onEvent ?? (() => undefined);
+
+    const logUsage = async (input: Omit<UsageEvent, "id" | "at">) => {
+      await options.usageLog?.append({
+        sessionId: options.sessionId,
+        runId,
+        agentId: options.agentId,
+        ...input,
+      });
+    };
+
+    await logUsage({ kind: "message", role: "user" });
+
     const userContent = await this.buildUserContent(options);
-    let systemBase = options.systemPrompt ?? DEFAULT_SYSTEM;
+    let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
     if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
     const memBlock = await this.formatMemoryInject();
     const messages: ChatMessage[] = [
@@ -267,6 +377,44 @@ export class AgentLoop {
     let finalText = "";
     const pageTemplates = new PageTemplateCache();
 
+    const enabledToolNames =
+      options.enabledTools && options.enabledTools.length > 0
+        ? options.enabledTools
+        : AGENT_TOOLS.map((t) => t.function.name);
+
+    // Full tool schemas are re-sent on every LLM call (OpenAI protocol).
+    // Token savings come from a smaller allowlist (pickToolsForGoal / agent profile), not stripping mid-run.
+    const tools =
+      options.enabledTools && options.enabledTools.length > 0
+        ? AGENT_TOOLS.filter((t) => options.enabledTools!.includes(t.function.name))
+        : AGENT_TOOLS;
+
+    const runCtx: RunContext = {
+      nestingDepth,
+      runId,
+      sessionId: options.sessionId,
+      agentId: options.agentId,
+      agents: options.agents,
+      tasks: options.tasks,
+      usageLog: options.usageLog,
+      resolvedProfile,
+      enabledToolNames,
+      onSubagent: options.onSubagent,
+      model: orchestratorModel,
+      workerModel,
+      budgetMode,
+      signal: options.signal,
+      rag: options.rag,
+      connectors: options.connectors,
+      attachments: options.attachments,
+      views: options.views,
+      approvalMode: options.approvalMode ?? resolvedProfile?.approvalMode,
+      getApprovalMode: options.getApprovalMode,
+      approvalModel: options.approvalModel,
+      systemPrompt: options.systemPrompt ?? resolvedProfile?.systemPrompt,
+      history: options.history,
+    };
+
     for (let step = 0; step < maxSteps; step += 1) {
       if (options.signal?.aborted) {
         emit({ type: "done", message: "aborted", usage });
@@ -278,17 +426,12 @@ export class AgentLoop {
         message: `Working… turn ${step + 1} (limit ${maxSteps})`,
       });
 
-      const tools =
-        options.enabledTools && options.enabledTools.length > 0
-          ? AGENT_TOOLS.filter((t) => options.enabledTools!.includes(t.function.name))
-          : AGENT_TOOLS;
-
       let result: ChatResult;
       try {
         // Prefer streaming so the UI sees tokens; fall back to non-stream chat for mocks/old clients.
         if (typeof this.llm.chatStreaming === "function") {
           result = await this.llm.chatStreaming({
-            model: options.model,
+            model: orchestratorModel,
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
@@ -299,7 +442,7 @@ export class AgentLoop {
           });
         } else {
           result = await this.llm.chat({
-            model: options.model,
+            model: orchestratorModel,
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
@@ -313,12 +456,22 @@ export class AgentLoop {
 
       usage = sumUsage(usage, result.usage);
       emit({ type: "usage", usage: result.usage, usageSource: "orchestrator" });
+      await logUsage({
+        kind: "llm",
+        model: orchestratorModel,
+        provider: providerFromModel(orchestratorModel),
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        totalTokens: result.usage.totalTokens,
+        estimatedCostUsd: result.usage.estimatedCostUsd,
+      });
       steps += 1;
 
       if (result.toolCalls.length === 0) {
         finalText = result.content ?? "";
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });
+        await logUsage({ kind: "message", role: "assistant" });
         emit({ type: "done", usage });
         return { messages, finalText, steps, usage, aborted: false, hitStepLimit: false };
       }
@@ -347,6 +500,15 @@ export class AgentLoop {
           options.signal,
           (u) => {
             usage = sumUsage(usage, u);
+            void logUsage({
+              kind: "llm",
+              model: options.approvalModel ?? workerModel,
+              provider: providerFromModel(options.approvalModel ?? workerModel),
+              promptTokens: u.promptTokens,
+              completionTokens: u.completionTokens,
+              totalTokens: u.totalTokens,
+              estimatedCostUsd: u.estimatedCostUsd,
+            });
           },
         );
         const decision = approvalDecisionFor(modeNow, allowed, sensitive);
@@ -385,6 +547,8 @@ export class AgentLoop {
           { approvalMode: modeNow, approvalDecision: decision },
           budgetMode,
           pageTemplates,
+          runCtx,
+          logUsage,
         );
         messages.push({
           role: "tool",
@@ -398,6 +562,7 @@ export class AgentLoop {
     finalText =
       `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + parse_data + export_csv).`;
     messages.push({ role: "assistant", content: finalText });
+    await logUsage({ kind: "message", role: "assistant" });
     emit({ type: "done", message: finalText, usage });
     return { messages, finalText, steps, usage, aborted: false, hitStepLimit: true };
   }
@@ -548,9 +713,24 @@ export class AgentLoop {
     },
     budgetMode: AgentBudgetMode = "normal",
     pageTemplates?: PageTemplateCache,
+    runCtx?: RunContext,
+    logUsage?: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
   ): Promise<unknown> {
     const name = call.function.name;
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
+
+    const workerOnUsage = (u: LlmUsage) => {
+      onUsage(u);
+      void logUsage?.({
+        kind: "llm",
+        model: workerModel,
+        provider: providerFromModel(workerModel),
+        promptTokens: u.promptTokens,
+        completionTokens: u.completionTokens,
+        totalTokens: u.totalTokens,
+        estimatedCostUsd: u.estimatedCostUsd,
+      });
+    };
 
     try {
       let result: unknown;
@@ -569,7 +749,7 @@ export class AgentLoop {
       } else if (name === "close_tab") {
         result = await this.browser.closeTab(Number(args.tabId));
       } else if (name === "parse_data") {
-        result = await this.parseData(args, workerModel, emit, onUsage);
+        result = await this.parseData(args, workerModel, emit, workerOnUsage);
       } else if (name === "rag_status") {
         if (!rag) result = { ok: false, error: "rag store unavailable" };
         else {
@@ -773,7 +953,7 @@ export class AgentLoop {
       } else if (name === "login") {
         result = await this.loginWithProfile(args, emit);
       } else if (name === "scrape_catalog") {
-        result = await this.scrapeCatalog(args, workerModel, emit, onUsage);
+        result = await this.scrapeCatalog(args, workerModel, emit, workerOnUsage);
       } else if (name === "ensure_scrape_table") {
         if (!views) result = { ok: false, error: "view store unavailable" };
         else {
@@ -887,6 +1067,20 @@ export class AgentLoop {
             download: args.download !== false,
             filename: typeof args.filename === "string" ? args.filename : undefined,
           });
+      } else if (name === "create_agent") {
+        result = await this.createAgent(args, runCtx, workerModel);
+      } else if (name === "update_agent") {
+        result = await this.updateAgent(args, runCtx);
+      } else if (name === "list_agents") {
+        result = await this.listAgents(runCtx);
+      } else if (name === "spawn_subagent") {
+        result = await this.spawnSubagent(args, runCtx);
+      } else if (name === "create_task") {
+        result = await this.createTask(args, runCtx);
+      } else if (name === "update_task") {
+        result = await this.updateTask(args, runCtx);
+      } else if (name === "list_tasks") {
+        result = await this.listTasks(args, runCtx);
       } else {
         let toolName = name;
         let toolArgs = args;
@@ -944,6 +1138,7 @@ export class AgentLoop {
         approvalMode: approvalMeta?.approvalMode,
         approvalDecision: approvalMeta?.approvalDecision,
       });
+      await logUsage?.({ kind: "tool", tool: name });
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -957,7 +1152,350 @@ export class AgentLoop {
         approvalMode: approvalMeta?.approvalMode,
         approvalDecision: approvalMeta?.approvalDecision,
       });
+      await logUsage?.({ kind: "tool", tool: name });
       return result;
+    }
+  }
+
+  private async createAgent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+    workerModel: string,
+  ): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const name = String(args.name ?? "");
+    if (!name.trim()) return { ok: false, error: "name required" };
+
+    const goal = strOpt(args.goal);
+    const canDelegate = args.canDelegate !== false;
+    const canSelfEdit = args.canSelfEdit !== false;
+    const pickModel = strOpt(args.workerModel) ?? workerModel;
+
+    let pickedTools: string[] = AGENT_TOOLS.map((t) => t.function.name);
+    const autoPick = args.autoPickTools !== false;
+    if (autoPick && goal) {
+      const picked = await pickToolsForGoal(this.llm, pickModel, goal, TOOL_CATALOG);
+      pickedTools = picked.tools;
+    }
+
+    const toolAllowlist = mergeToolNames(
+      pickedTools,
+      metaToolsForAgent(canDelegate, canSelfEdit),
+    );
+
+    const profile: AgentProfile = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      systemPrompt: strOpt(args.systemPrompt),
+      orchestratorModel: strOpt(args.orchestratorModel),
+      workerModel: strOpt(args.workerModel),
+      toolAllowlist,
+      connectorIds: [],
+      budgetMode:
+        args.budgetMode === "budget" || args.budgetMode === "normal"
+          ? args.budgetMode
+          : undefined,
+      maxSteps: typeof args.maxSteps === "number" ? args.maxSteps : undefined,
+      canDelegate: typeof args.canDelegate === "boolean" ? args.canDelegate : undefined,
+      canSelfEdit: typeof args.canSelfEdit === "boolean" ? args.canSelfEdit : undefined,
+      createdAt: "",
+      updatedAt: "",
+    };
+
+    const saved = await runCtx.agents.put(profile);
+    return { ok: true, agent: resolveAgentProfile(saved) };
+  }
+
+  private async updateAgent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const agentId = String(args.agentId ?? "");
+    if (!agentId) return { ok: false, error: "agentId required" };
+
+    const existing = await runCtx.agents.get(agentId);
+    if (!existing) return { ok: false, error: `agent not found: ${agentId}` };
+
+    const updated: AgentProfile = {
+      ...existing,
+      name: typeof args.name === "string" ? args.name : existing.name,
+      systemPrompt:
+        typeof args.systemPrompt === "string" ? args.systemPrompt : existing.systemPrompt,
+      orchestratorModel:
+        typeof args.orchestratorModel === "string"
+          ? args.orchestratorModel
+          : existing.orchestratorModel,
+      workerModel:
+        typeof args.workerModel === "string" ? args.workerModel : existing.workerModel,
+      toolAllowlist: Array.isArray(args.toolAllowlist)
+        ? args.toolAllowlist.map(String)
+        : existing.toolAllowlist,
+      connectorIds: Array.isArray(args.connectorIds)
+        ? args.connectorIds.map(String)
+        : existing.connectorIds,
+      budgetMode:
+        args.budgetMode === "budget" || args.budgetMode === "normal"
+          ? args.budgetMode
+          : existing.budgetMode,
+      approvalMode:
+        args.approvalMode === "ask" ||
+        args.approvalMode === "auto_llm" ||
+        args.approvalMode === "auto_all"
+          ? args.approvalMode
+          : existing.approvalMode,
+      maxSteps: typeof args.maxSteps === "number" ? args.maxSteps : existing.maxSteps,
+      canDelegate:
+        typeof args.canDelegate === "boolean" ? args.canDelegate : existing.canDelegate,
+      canSelfEdit:
+        typeof args.canSelfEdit === "boolean" ? args.canSelfEdit : existing.canSelfEdit,
+      nestingDepth:
+        typeof args.nestingDepth === "number" ? args.nestingDepth : existing.nestingDepth,
+      ragEnabled: typeof args.ragEnabled === "boolean" ? args.ragEnabled : existing.ragEnabled,
+    };
+
+    const saved = await runCtx.agents.put(updated);
+    return { ok: true, agent: resolveAgentProfile(saved) };
+  }
+
+  private async listAgents(runCtx: RunContext | undefined): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const agents = await runCtx.agents.list();
+    return {
+      ok: true,
+      agents: agents.map((a) => {
+        const resolved = resolveAgentProfile(a);
+        const toolCount =
+          a.toolAllowlist === "all" ? AGENT_TOOLS.length : a.toolAllowlist.length;
+        return {
+          id: a.id,
+          name: a.name,
+          orchestratorModel: a.orchestratorModel,
+          workerModel: a.workerModel,
+          toolCount,
+          maxSteps: resolved.maxSteps,
+          canDelegate: resolved.canDelegate,
+          canSelfEdit: resolved.canSelfEdit,
+          updatedAt: a.updatedAt,
+        };
+      }),
+    };
+  }
+
+  private async createTask(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const title = String(args.title ?? "");
+    if (!title.trim()) return { ok: false, error: "title required" };
+
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : "todo";
+
+    const task = await runCtx.tasks.put({
+      id: crypto.randomUUID(),
+      title: title.trim(),
+      status,
+      sessionId:
+        typeof args.sessionId === "string" ? args.sessionId : (runCtx.sessionId ?? null),
+      agentId: runCtx.agentId,
+      note: typeof args.note === "string" ? args.note : undefined,
+      planMarkdown: typeof args.planMarkdown === "string" ? args.planMarkdown : undefined,
+    });
+    return { ok: true, task };
+  }
+
+  private async updateTask(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const id = String(args.id ?? "");
+    if (!id) return { ok: false, error: "id required" };
+
+    const existing = (await runCtx.tasks.list()).find((t) => t.id === id);
+    if (!existing) return { ok: false, error: `task not found: ${id}` };
+
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : existing.status;
+
+    const task = await runCtx.tasks.put({
+      ...existing,
+      status,
+      title: typeof args.title === "string" ? args.title : existing.title,
+      note: typeof args.note === "string" ? args.note : existing.note,
+      planMarkdown:
+        typeof args.planMarkdown === "string" ? args.planMarkdown : existing.planMarkdown,
+    });
+    return { ok: true, task };
+  }
+
+  private async listTasks(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : undefined;
+    const tasks = await runCtx.tasks.list({
+      sessionId: typeof args.sessionId === "string" ? args.sessionId : runCtx.sessionId,
+      globalOnly: Boolean(args.globalOnly),
+      status,
+    });
+    return { ok: true, tasks };
+  }
+
+  private async spawnSubagent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx) return { ok: false, error: "run context unavailable" };
+
+    const profile = runCtx.resolvedProfile;
+    if (profile && !profile.canDelegate) {
+      return { ok: false, error: "delegation not allowed for this agent" };
+    }
+
+    const maxNesting = profile?.nestingDepth ?? 1;
+    if (runCtx.nestingDepth >= maxNesting) {
+      return { ok: false, error: "nesting limit" };
+    }
+
+    const goal = String(args.goal ?? "");
+    if (!goal.trim()) return { ok: false, error: "goal required" };
+
+    const subagentId = crypto.randomUUID();
+    runCtx.onSubagent?.({ type: "start", subagentId, goal });
+
+    let childEnabled: string[] | undefined = Array.isArray(args.tools)
+      ? args.tools.map(String)
+      : undefined;
+    let childAgentId = strOpt(args.agentId);
+    let childModel = runCtx.model;
+    let childWorker = runCtx.workerModel;
+    let childBudget: AgentBudgetMode =
+      args.budgetMode === "budget" || args.budgetMode === "normal"
+        ? args.budgetMode
+        : runCtx.budgetMode;
+    let childMaxSteps = typeof args.maxSteps === "number" ? args.maxSteps : 16;
+    let childSystem = runCtx.systemPrompt;
+
+    if (childAgentId && runCtx.agents) {
+      const childProfile = await runCtx.agents.get(childAgentId);
+      if (childProfile) {
+        const resolved = resolveAgentProfile(childProfile);
+        childModel = resolved.orchestratorModel ?? childModel;
+        childWorker = resolved.workerModel ?? childWorker;
+        childBudget = resolved.budgetMode ?? childBudget;
+        childMaxSteps = typeof args.maxSteps === "number" ? args.maxSteps : resolved.maxSteps;
+        childSystem = resolved.systemPrompt ?? childSystem;
+        if (!childEnabled) {
+          childEnabled =
+            resolved.toolAllowlist === "all"
+              ? runCtx.enabledToolNames
+              : [...resolved.toolAllowlist];
+        }
+      }
+    }
+
+    if (!childEnabled) {
+      childEnabled = [...runCtx.enabledToolNames];
+    }
+    childEnabled = childEnabled.filter((n) => n !== "spawn_subagent");
+
+    const childLoop = new AgentLoop(
+      this.llm,
+      this.browser,
+      this.memory,
+      this.sessions,
+      this.profiles,
+    );
+
+    try {
+      const childResult = await childLoop.run({
+        model: childModel,
+        workerModel: childWorker,
+        userMessage: goal,
+        maxSteps: childMaxSteps,
+        budgetMode: childBudget,
+        enabledTools: childEnabled,
+        nestingDepth: runCtx.nestingDepth + 1,
+        agents: runCtx.agents,
+        tasks: runCtx.tasks,
+        usageLog: runCtx.usageLog,
+        sessionId: runCtx.sessionId,
+        runId: subagentId,
+        agentId: childAgentId,
+        signal: runCtx.signal,
+        rag: runCtx.rag,
+        connectors: runCtx.connectors,
+        views: runCtx.views,
+        approvalMode: runCtx.approvalMode,
+        getApprovalMode: runCtx.getApprovalMode,
+        systemPrompt: childSystem,
+        onSubagent: runCtx.onSubagent,
+        onEvent: (e) => {
+          if (e.type === "assistant_delta" && e.message) {
+            runCtx.onSubagent?.({
+              type: "delta",
+              subagentId,
+              goal,
+              summary: e.message,
+            });
+          }
+          if (e.type === "error" && e.message) {
+            runCtx.onSubagent?.({
+              type: "error",
+              subagentId,
+              goal,
+              summary: e.message,
+            });
+          }
+        },
+      });
+
+      runCtx.onSubagent?.({
+        type: "done",
+        subagentId,
+        goal,
+        summary: childResult.finalText,
+        messages: childResult.messages,
+        usage: childResult.usage,
+      });
+
+      return {
+        ok: !childResult.aborted,
+        summary: childResult.finalText,
+        steps: childResult.steps,
+        usage: childResult.usage,
+        subagentId,
+        artifacts: [] as unknown[],
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      runCtx.onSubagent?.({
+        type: "error",
+        subagentId,
+        goal,
+        summary: msg,
+      });
+      return { ok: false, error: msg, summary: msg, subagentId, artifacts: [] };
     }
   }
 
