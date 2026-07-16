@@ -1,0 +1,12 @@
+[config]
+pr_commands = ["/describe", "/review", "/improve"]
+
+[pr_reviewer]
+extra_instructions = """
+Combo-X is a Chrome MV3 browser agent (local-first). Focus on: secret redaction in logs,
+RAG path stability, budget-mode token waste (get_page dumps), no relative imports of secrets.
+Prefer concrete file:line findings over style nits.
+"""
+publish_labels = false
+enable_review_labels_effort = false
+enable_review_labels_security = false

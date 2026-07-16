@@ -92,6 +92,30 @@ describe("AgentLoop", () => {
     expect(events).toContain("done");
   });
 
+  it("budget mode defaults get_page to snippet + maxChars", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "get_page", args: "{}" }],
+      },
+      { content: "done" },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "digest",
+      budgetMode: "budget",
+    });
+    expect(browser.runContent).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "get_page", mode: "snippet", maxChars: 2_200 }),
+    );
+  });
+
   it("respects abort signal", async () => {
     const llm = mockLlm([
       {

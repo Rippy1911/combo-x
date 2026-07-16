@@ -3,7 +3,7 @@
  * Plaintext IDB (same class as sessions). Args/results are redacted before write.
  */
 
-import { redactSensitiveFields } from "./views.js";
+import { redactSensitiveDeep, redactSensitiveFields } from "./views.js";
 
 export type ActionApprovalDecision =
   | "allowed"
@@ -66,11 +66,28 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 export function summarizeResult(result: unknown, max = 400): string {
   if (result == null) return "";
   try {
-    const s = typeof result === "string" ? result : JSON.stringify(result);
+    const safe = redactSensitiveDeep(result);
+    const s = typeof safe === "string" ? safe : JSON.stringify(safe);
     return s.length > max ? `${s.slice(0, max)}…` : s;
   } catch {
     return String(result).slice(0, max);
   }
+}
+
+/** Redact typed secrets (password fields) before logging tool args. */
+export function redactToolArgs(
+  tool: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = redactSensitiveFields({ ...args });
+  if (
+    (tool === "type_index" || tool === "type_text") &&
+    typeof base.text === "string" &&
+    /password|passwd|secret|credential/i.test(String(base.selector ?? ""))
+  ) {
+    base.text = "[redacted]";
+  }
+  return base;
 }
 
 export function extractTargetUrl(args: Record<string, unknown>): string | undefined {
@@ -126,8 +143,16 @@ export class ActionLogStore {
       runId: input.runId,
       toolCallId: input.toolCallId,
       tool: input.tool,
-      args: redactSensitiveFields({ ...input.args }),
-      resultSummary: input.resultSummary,
+      args: redactToolArgs(input.tool, { ...input.args }),
+      resultSummary: summarizeResult(
+        (() => {
+          try {
+            return JSON.parse(input.resultSummary);
+          } catch {
+            return input.resultSummary;
+          }
+        })(),
+      ),
       ok: input.ok,
       approvalDecision: input.approvalDecision,
       approvalMode: input.approvalMode,

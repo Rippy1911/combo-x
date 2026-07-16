@@ -88,10 +88,17 @@ export class PageTemplateCache {
         },
       };
     }
-    // Subsequent hits: drop bulky mainSample / headings to save orchestrator tokens
-    const { mainSample: _m, headings: _h, ...rest } = digest;
+    // Subsequent hits: drop bulky chrome; keep a short mainSample if fields empty
+    const labelHits = Array.isArray(digest.labelHits) ? digest.labelHits : [];
+    const eans = Array.isArray(digest.eans) ? digest.eans : [];
+    const { mainSample, headings: _h, ...rest } = digest;
+    const keepSample =
+      (!labelHits.length && !eans.length && typeof mainSample === "string"
+        ? mainSample.slice(0, 280)
+        : undefined) ?? undefined;
     return {
       ...rest,
+      ...(keepSample ? { mainSample: keepSample } : {}),
       template: {
         status: "reuse",
         pathKind: entry.pathKind,

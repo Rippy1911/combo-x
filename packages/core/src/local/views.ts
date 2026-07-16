@@ -53,24 +53,26 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+const SENSITIVE_KEY =
+  /password|secret|token|api[_-]?key|authorization|passwd|credential/i;
+
+/** Deep-strip password-like keys from objects (profiles, nested results). */
+export function redactSensitiveDeep(value: unknown, depth = 0): unknown {
+  if (depth > 8 || value == null) return value;
+  if (Array.isArray(value)) return value.map((v) => redactSensitiveDeep(v, depth + 1));
+  if (typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : redactSensitiveDeep(v, depth + 1);
+  }
+  return out;
+}
+
 /** Strip password-like keys from row objects / profile summaries (UC-Privacy). */
 export function redactSensitiveFields<T extends Record<string, unknown>>(
   row: T,
 ): T {
-  const out = { ...row };
-  for (const key of Object.keys(out)) {
-    const lower = key.toLowerCase();
-    if (
-      lower.includes("password") ||
-      lower.includes("secret") ||
-      lower.includes("token") ||
-      lower === "api_key" ||
-      lower === "apikey"
-    ) {
-      (out as Record<string, unknown>)[key] = "[redacted]";
-    }
-  }
-  return out;
+  return redactSensitiveDeep(row) as T;
 }
 
 export function siteProfileLabelName(label: string): string | null {

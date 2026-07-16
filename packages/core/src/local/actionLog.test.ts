@@ -44,4 +44,36 @@ describe("ActionLogStore", () => {
     expect(json).not.toContain("secret");
     expect(json).toContain("[redacted]");
   });
+
+  it("redacts nested profile password in resultSummary", async () => {
+    const store = new ActionLogStore(`alog_${crypto.randomUUID()}`);
+    await store.append({
+      tool: "get_site_profile",
+      args: { name: "foodwell" },
+      resultSummary: JSON.stringify({
+        ok: true,
+        profile: { username: "anita", password: "hunter2" },
+      }),
+      ok: true,
+      approvalDecision: "n/a",
+      approvalMode: "ask",
+    });
+    const json = await store.exportJson();
+    expect(json).not.toContain("hunter2");
+    expect(json).toContain("[redacted]");
+  });
+
+  it("redacts type_index text when selector is password", async () => {
+    const store = new ActionLogStore(`alog_${crypto.randomUUID()}`);
+    await store.append({
+      tool: "type_index",
+      args: { index: 3, selector: "#password", text: "hunter2" },
+      resultSummary: '{"ok":true}',
+      ok: true,
+      approvalDecision: "allowed",
+      approvalMode: "ask",
+    });
+    const row = (await store.list(1))[0]!;
+    expect(row.args.text).toBe("[redacted]");
+  });
 });

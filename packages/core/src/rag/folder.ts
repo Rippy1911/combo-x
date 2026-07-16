@@ -208,13 +208,24 @@ export async function reindexAll(
   const files: IndexedFile[] = [];
   const errors: string[] = [];
   onProgress?.({ phase: "walk", message: `Scanning ${handles.length} folder(s)…` });
+  // Single folder: keep unprefixed paths (v0.8 compat for rag_read_file).
+  // Multi: prefix with unique root id so same folder names don't collide.
+  const multi = handles.length > 1;
+  const usedNames = new Set<string>();
   for (const h of handles) {
     const ok = await ensureDirPermission(h.handle, "read");
     if (!ok) {
       errors.push(`permission denied: ${h.folderName}`);
       continue;
     }
-    await walk(h.handle, h.folderName, files, errors, extra);
+    let prefix = "";
+    if (multi) {
+      let name = h.folderName || h.id;
+      if (usedNames.has(name)) name = `${name}__${h.id.slice(0, 6)}`;
+      usedNames.add(name);
+      prefix = name;
+    }
+    await walk(h.handle, prefix, files, errors, extra);
   }
   onProgress?.({ phase: "index", files: files.length, message: `Indexing ${files.length} files…` });
   const label = handles.map((h) => h.folderName).join(" + ");

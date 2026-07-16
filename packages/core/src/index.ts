@@ -121,6 +121,7 @@ export type { Bookmark, Reminder, ReportArtifact } from "./local/artifacts.js";
 export {
   ViewStore,
   redactSensitiveFields,
+  redactSensitiveDeep,
   siteProfileLabelName,
 } from "./local/views.js";
 export type { SavedView, ViewChartSpec, ViewSource } from "./local/views.js";
@@ -144,6 +145,7 @@ export type { InspectRow } from "./local/idbInspect.js";
 export {
   ActionLogStore,
   summarizeResult,
+  redactToolArgs,
   extractTargetUrl,
   resultOk,
   resultError,

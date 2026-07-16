@@ -120,12 +120,16 @@ function loadEnabledTools(): Set<string> {
       !saved.includes("rag_search") ||
       !saved.includes("list_attachments") ||
       !saved.includes("save_view") ||
-      !saved.includes("memory_list") ||
-      !saved.includes("page_digest")
+      !saved.includes("memory_list")
     ) {
       return new Set(ALL_TOOL_NAMES);
     }
-    return new Set(saved);
+    // Additive: turn on page_digest without wiping a custom allowlist
+    const next = new Set(saved);
+    if (!next.has("page_digest") && ALL_TOOL_NAMES.includes("page_digest")) {
+      next.add("page_digest");
+    }
+    return next;
   } catch {
     return new Set(ALL_TOOL_NAMES);
   }
@@ -1318,6 +1322,45 @@ export function App() {
               Reindex all
             </button>
           </div>
+          {ragMeta?.folders?.length ? (
+            <ul className="hint wrap" style={{ listStyle: "none", padding: 0, margin: "8px 0" }}>
+              {ragMeta.folders.map((f) => (
+                <li key={f.id} className="row" style={{ marginBottom: 4 }}>
+                  <code>{f.folderName}</code>
+                  <button
+                    type="button"
+                    disabled={ragBusy || locked}
+                    onClick={() =>
+                      void (async () => {
+                        setRagBusy(true);
+                        try {
+                          await rag.removeHandle(f.id);
+                          const left = await rag.listHandles();
+                          if (left.length) {
+                            const meta = await reindexSaved(rag, (p) =>
+                              setRagMsg(p.message ?? p.phase),
+                            );
+                            setRagMeta(meta);
+                            setRagMsg(`Removed ${f.folderName}; reindexed`);
+                          } else {
+                            await rag.clearChunks();
+                            setRagMeta(await rag.getMeta());
+                            setRagMsg("All folders removed");
+                          }
+                        } catch (e) {
+                          setRagMsg(e instanceof Error ? e.message : String(e));
+                        } finally {
+                          setRagBusy(false);
+                        }
+                      })()
+                    }
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
           <label className="hint">OpenRouter API key</label>
           <input
