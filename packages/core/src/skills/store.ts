@@ -1,5 +1,5 @@
 /**
- * On-demand skills (playbooks). Searched via skill_search / skill_read — never prepended like memory.
+ * Skills (playbooks). Name/description index is prepended each turn; full body via skill_read.
  * toolHints unlock SKILL_GATED tools for the current run after skill_read.
  */
 

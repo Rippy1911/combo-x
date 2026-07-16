@@ -1,6 +1,7 @@
 import type {
   AgentProfileStore,
   ConnectorStore,
+  CustomToolStore,
   MemoryStore,
   RagMeta,
   RagStore,
@@ -31,6 +32,7 @@ export type LibrariesPanelProps = {
   agents: AgentProfileStore;
   enabledTools: Set<string>;
   setEnabledTools?: (fn: (prev: Set<string>) => Set<string>) => void;
+  customTools?: CustomToolStore;
   rag: RagStore;
   ragMeta: RagMeta | null;
   setRagMeta: (m: RagMeta | null) => void;
@@ -60,6 +62,7 @@ export function LibrariesPanel({
   agents,
   enabledTools,
   setEnabledTools,
+  customTools,
   rag,
   ragMeta,
   setRagMeta,
@@ -96,7 +99,11 @@ export function LibrariesPanel({
       {sub === "memory" ? <MemoryBrowser memory={memory} agents={agents} /> : null}
       {sub === "skills" ? <SkillsBrowser skills={skills} agents={agents} /> : null}
       {sub === "tools" ? (
-        <ToolsLibrary enabledTools={enabledTools} setEnabledTools={setEnabledTools} />
+        <ToolsLibrary
+          enabledTools={enabledTools}
+          setEnabledTools={setEnabledTools}
+          customTools={customTools}
+        />
       ) : null}
       {sub === "knowledge" ? (
         <KnowledgeSubpanel

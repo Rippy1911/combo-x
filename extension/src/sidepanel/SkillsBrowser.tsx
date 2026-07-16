@@ -122,8 +122,8 @@ export function SkillsBrowser({
   return (
     <div className="lib-section">
       <p className="hint wrap">
-        Fetched on demand via skill_search / skill_read. Unlock specialized tools for this run. Not
-        injected into the system prompt.
+        Name/description are prepended each turn. skill_read loads the body and unlocks toolHints.
+        Create/edit here, or ask the agent to call skill_save when that tool is in the ceiling.
       </p>
       <input
         value={query}

@@ -26,6 +26,16 @@ import {
   unlockFromHints,
 } from "../tools/gating.js";
 import { pickToolsForGoal } from "../tools/pickTools.js";
+import {
+  customToolToDefinition,
+  formatSkillIndexBlock,
+  formatToolSchemaBlock,
+} from "../tools/promptCatalog.js";
+import {
+  runCustomTool,
+  type CustomTool,
+  type CustomToolStore,
+} from "../tools/customStore.js";
 import type { SkillStore } from "../skills/store.js";
 import {
   BUDGET_SYSTEM_ADDON,
@@ -111,6 +121,10 @@ export type RunContextSnapshot = {
   memoryBlock: string;
   /** Open conversation + global tasks prepended each turn (empty if none). */
   taskBlock: string;
+  /** Skill name/description index (bodies via skill_read). */
+  skillBlock: string;
+  /** Tool descriptions + JSON-schema parameters for ceiling tools. */
+  toolCatalogBlock: string;
   toolNames: string[];
   model: string;
   /** How the first orchestrator call was delivered */
@@ -187,6 +201,8 @@ export interface AgentRunOptions {
   toolMode?: AgentToolMode;
   /** On-demand skill store (search/read/save). */
   skills?: SkillStore;
+  /** User-defined custom tools (schemas + guide/echo handlers). */
+  customTools?: CustomToolStore;
   approvalMode?: ApprovalMode;
   /**
    * Live approval mode (e.g. UI flipped mid-run to auto_all).
@@ -237,8 +253,9 @@ You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and 
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
 SKILLS vs MEMORY:
 - Memories are already prepended in the system message each turn (global + active agent). Do not re-fetch them mid-stream.
-- Skills are on-demand playbooks. Use skill_search then skill_read to load a playbook AND unlock specialized tools (scrape, rest, rag, page-ext, media) for this run.
-- If a tool is locked, skill_search → skill_read the matching seed skill (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media).
+- Skill descriptions are listed in AVAILABLE SKILLS below. Use skill_search / skill_read for the full body AND to unlock specialized tools (scrape, rest, rag, page-ext, media).
+- Use skill_save to create/update playbooks when that tool is enabled. Use custom_tool_save / list_custom_tools for user-defined tools when enabled.
+- If a tool is marked [LOCKED until skill_read], skill_search → skill_read the matching skill (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media).
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 Rules:
@@ -339,6 +356,8 @@ interface RunContext {
   activeToolNames: string[];
   toolMode: AgentToolMode;
   skills?: SkillStore;
+  customTools?: CustomToolStore;
+  customToolMap: Map<string, CustomTool>;
   onSubagent?: (e: SubagentEvent) => void;
   rebuildTools: () => void;
   model: string;
@@ -408,26 +427,24 @@ export class AgentLoop {
     const userContent = await this.buildUserContent(options);
     let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
     if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
-    // Memories + open tasks loaded once per user turn (not mid-stream).
-    const memBlock = await this.formatMemoryInject(options.agentId);
-    const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
-    const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemParts.join("\n\n") },
-      ...leanHistory(options.history ?? []),
-      { role: "user", content: userContent },
-    ];
 
     let usage = ZERO;
     let steps = 0;
     let finalText = "";
     const pageTemplates = new PageTemplateCache();
 
-    // undefined/null → all tools; [] → zero tools (Disable-all must not silently restore full set).
+    const customRows = options.customTools ? await options.customTools.list() : [];
+    const customToolMap = new Map(customRows.map((t) => [t.name, t]));
+
+    // undefined/null → all built-in tools; [] → zero tools (Disable-all must not restore full set).
     let enabledToolNames =
       options.enabledTools != null
-        ? options.enabledTools
+        ? [...options.enabledTools]
         : AGENT_TOOLS.map((t) => t.function.name);
+    // Custom tools always join the ceiling when present (unless explicitly stripped).
+    for (const c of customRows) {
+      if (!enabledToolNames.includes(c.name)) enabledToolNames.push(c.name);
+    }
 
     // Enforce profile capability flags on the allowlist for this run.
     if (resolvedProfile && !resolvedProfile.canSelfEdit) {
@@ -447,14 +464,40 @@ export class AgentLoop {
 
     let activeToolNames =
       toolMode === "skill_gated"
-        ? initialActiveTools(ceiling)
+        ? [...initialActiveTools(ceiling), ...customRows.map((c) => c.name).filter((n) => ceiling.has(n))]
         : enabledToolNames.filter((n) => ceiling.has(n));
+    activeToolNames = [...new Set(activeToolNames)];
 
-    // Tool schemas re-sent each orchestrator step; skill_gated may expand after skill_read.
-    let tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
     const rebuildTools = () => {
-      tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+      const builtin = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+      const customDefs = customRows
+        .filter((c) => activeToolNames.includes(c.name))
+        .map(customToolToDefinition);
+      tools = [...builtin, ...customDefs];
     };
+    let tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+    rebuildTools();
+
+    // Memories / tasks / skill index / tool schemas — once per user turn (not mid-stream).
+    const memBlock = await this.formatMemoryInject(options.agentId);
+    const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
+    const skillBlock = await this.formatSkillInject(options.agentId, options.skills);
+    const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
+      custom: customRows,
+      maxChars: budgetMode === "budget" ? 8_000 : 14_000,
+    });
+    const systemParts = [
+      systemBase,
+      memBlock,
+      taskBlock,
+      skillBlock,
+      toolCatalogBlock,
+    ].filter(Boolean);
+    const messages: ChatMessage[] = [
+      { role: "system", content: systemParts.join("\n\n") },
+      ...leanHistory(options.history ?? []),
+      { role: "user", content: userContent },
+    ];
 
     const preferStream = typeof this.llm.chatStreaming === "function";
     emit({
@@ -463,6 +506,8 @@ export class AgentLoop {
         systemPrompt: systemBase,
         memoryBlock: memBlock,
         taskBlock,
+        skillBlock,
+        toolCatalogBlock,
         toolNames: tools.map((t) => t.function.name),
         model: orchestratorModel,
         transport: preferStream ? "stream" : "full",
@@ -483,6 +528,8 @@ export class AgentLoop {
       activeToolNames,
       toolMode,
       skills: options.skills,
+      customTools: options.customTools,
+      customToolMap,
       rebuildTools: () => {
         // Keep runCtx.activeToolNames as source of truth for unlocks.
         activeToolNames = runCtx.activeToolNames;
@@ -759,6 +806,20 @@ export class AgentLoop {
     try {
       const rows = await tasks.list({});
       return formatOpenTasksBlock(rows, sessionId);
+    } catch {
+      return "";
+    }
+  }
+
+  /** Skill name/description index (bodies via skill_read). */
+  private async formatSkillInject(
+    agentId: string | undefined,
+    skills: AgentRunOptions["skills"],
+  ): Promise<string> {
+    if (!skills) return "";
+    try {
+      const rows = await skills.list({ agentId, limit: 40 });
+      return formatSkillIndexBlock(rows);
     } catch {
       return "";
     }
@@ -1114,6 +1175,53 @@ export class AgentLoop {
             };
           }
         }
+      } else if (name === "list_custom_tools") {
+        if (!runCtx?.customTools) result = { ok: false, error: "custom tools store unavailable" };
+        else {
+          const rows = await runCtx.customTools.list();
+          result = {
+            ok: true,
+            tools: rows.map((t) => ({
+              id: t.id,
+              name: t.name,
+              description: t.description,
+              kind: t.kind,
+            })),
+          };
+        }
+      } else if (name === "custom_tool_save") {
+        if (!runCtx?.customTools) result = { ok: false, error: "custom tools store unavailable" };
+        else {
+          try {
+            let parameters: Record<string, unknown> | undefined;
+            if (typeof args.parametersJson === "string" && args.parametersJson.trim()) {
+              parameters = JSON.parse(args.parametersJson) as Record<string, unknown>;
+            }
+            const saved = await runCtx.customTools.save({
+              id: typeof args.id === "string" ? args.id : undefined,
+              name: String(args.name ?? ""),
+              description: String(args.description ?? ""),
+              parameters,
+              kind: args.kind === "echo" ? "echo" : "guide",
+              handlerNote:
+                typeof args.handlerNote === "string" ? args.handlerNote : undefined,
+            });
+            runCtx.customToolMap.set(saved.name, saved);
+            if (!runCtx.enabledToolNames.includes(saved.name)) {
+              runCtx.enabledToolNames.push(saved.name);
+            }
+            if (!runCtx.activeToolNames.includes(saved.name)) {
+              runCtx.activeToolNames.push(saved.name);
+            }
+            runCtx.rebuildTools();
+            result = { ok: true, tool: saved };
+          } catch (err) {
+            result = {
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
       } else if (name === "export_csv") {
         const filename = String(args.filename ?? "export.csv");
         const rows = Array.isArray(args.rows) ? (args.rows as string[][]) : [];
@@ -1378,6 +1486,8 @@ export class AgentLoop {
         name === "list_page_extension_audit"
       ) {
         result = await this.handlePageExtensionTool(name, args, runCtx);
+      } else if (runCtx?.customToolMap.has(name)) {
+        result = runCustomTool(runCtx.customToolMap.get(name)!, args);
       } else {
         let toolName = name;
         let toolArgs = args;
@@ -1749,6 +1859,7 @@ export class AgentLoop {
         enabledTools: childEnabled,
         toolMode: runCtx.toolMode,
         skills: runCtx.skills,
+        customTools: runCtx.customTools,
         nestingDepth: runCtx.nestingDepth + 1,
         agents: runCtx.agents,
         tasks: runCtx.tasks,

@@ -619,7 +619,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "skill_read",
       description:
-        "Load a skill body by id and unlock its toolHints (skill-gated tools) for the rest of this user turn. Skills are never auto-injected into the system prompt.",
+        "Load a skill body by id and unlock its toolHints (skill-gated tools) for the rest of this user turn. Skill name/description are already in the system skill index — use this for the full body + unlocks.",
       parameters: {
         type: "object",
         properties: {
@@ -634,7 +634,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "skill_save",
-      description: "Create or update a skill (playbook). scope=global|agent.",
+      description: "Create or update a skill (playbook). scope=global|agent. Use when this tool is in the ceiling.",
       parameters: {
         type: "object",
         properties: {
@@ -648,6 +648,45 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           toolHints: { type: "array", items: { type: "string" } },
         },
         required: ["name", "description", "body"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_custom_tools",
+      description: "List user-defined custom tools (schemas merged into the tool list).",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "custom_tool_save",
+      description:
+        "Create or update a user-defined custom tool (name/description/JSON-schema parameters). kind=guide|echo. Requires this tool in the ceiling.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: {
+            type: "string",
+            description: "snake_case tool name matching /^[a-z][a-z0-9_]{1,63}$/",
+          },
+          description: { type: "string" },
+          parametersJson: {
+            type: "string",
+            description: "JSON string of OpenAI function.parameters schema object",
+          },
+          kind: { type: "string", enum: ["guide", "echo"] },
+          handlerNote: { type: "string" },
+        },
+        required: ["name", "description"],
         additionalProperties: false,
       },
     },

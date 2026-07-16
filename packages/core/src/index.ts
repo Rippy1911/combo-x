@@ -151,6 +151,13 @@ export {
   filterToolsByNames,
 } from "./tools/catalog.js";
 export type { ToolCatalogEntry, ToolGroup } from "./tools/catalog.js";
+export {
+  formatSkillIndexBlock,
+  formatToolSchemaBlock,
+  customToolToDefinition,
+} from "./tools/promptCatalog.js";
+export { CustomToolStore, runCustomTool } from "./tools/customStore.js";
+export type { CustomTool, CustomToolKind } from "./tools/customStore.js";
 
 export { CORE_TOOL_NAMES, pickToolsForGoal } from "./tools/pickTools.js";
 export type { ToolPickerLlm } from "./tools/pickTools.js";

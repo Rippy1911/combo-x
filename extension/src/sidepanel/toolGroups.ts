@@ -57,6 +57,8 @@ export const TOOL_GROUPS = {
     "skill_search",
     "skill_read",
     "skill_save",
+    "list_custom_tools",
+    "custom_tool_save",
     "save_bookmark",
     "set_reminder",
     "create_report",

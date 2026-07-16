@@ -259,6 +259,8 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   set_reminder: "meta",
   create_report: "meta",
   search_sessions: "meta",
+  list_custom_tools: "meta",
+  custom_tool_save: "meta",
   create_agent: "agentic",
   update_agent: "agentic",
   list_agents: "agentic",

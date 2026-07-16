@@ -534,6 +534,7 @@ body {
 }
 
 .chat-main {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1780,5 +1781,113 @@ button.linkish {
 .gate-badge.skill-gated {
   border-color: #6b5a9a;
   color: #b8a8ff;
+}
+
+/* Sessions drawer: sidebar on wide, full overlay on narrow */
+.sessions-drawer-root {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.sessions-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.sessions-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(340px, 92%);
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  overflow: hidden;
+  pointer-events: auto;
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+.sessions-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sessions-drawer-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.sessions-drawer-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.session-row.active {
+  outline: 1px solid var(--accent-dim);
+}
+
+.session-rename {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.icon-btn {
+  font-size: 14px;
+  min-width: 28px;
+}
+
+.custom-tools-block {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.stack-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.stack-form textarea {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+@media (max-width: 719px) {
+  .sessions-drawer {
+    width: 100%;
+    border-right: 0;
+  }
+}
+
+@media (min-width: 720px) {
+  .chat-main.sessions-open .sessions-drawer-backdrop {
+    /* Keep dimmer so chat remains clickable to dismiss on wide too */
+  }
 }
 

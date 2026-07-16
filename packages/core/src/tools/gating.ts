@@ -3,7 +3,13 @@
  * Ceiling (enabledTools / profile allowlist) still applies.
  */
 
-export const SKILL_META_TOOLS = ["skill_search", "skill_read", "skill_save"] as const;
+export const SKILL_META_TOOLS = [
+  "skill_search",
+  "skill_read",
+  "skill_save",
+  "list_custom_tools",
+  "custom_tool_save",
+] as const;
 
 /** Attached every run when in the ceiling (browse + memory + skill meta + light meta). */
 export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [

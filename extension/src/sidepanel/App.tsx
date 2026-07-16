@@ -5,6 +5,7 @@ import {
   AgentProfileStore,
   AttachmentStore,
   ConnectorStore,
+  CustomToolStore,
   DEFAULT_MODEL,
   DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
@@ -67,6 +68,7 @@ import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
 import { PageExtensionsPanel } from "./PageExtensionsPanel";
 import { ModelPicker } from "./ModelPicker";
 import { MessagesViewport } from "./MessagesViewport";
+import { SessionsDrawer } from "./SessionsDrawer";
 import { ToolAccessPicker } from "./ToolAccessPicker";
 import { TabBar } from "./TabBar";
 
@@ -84,7 +86,6 @@ const STEPS_PRESETS = [8, 12, 16, 24, 32, 48] as const;
 
 type TabId =
   | "chat"
-  | "sessions"
   | "libraries"
   | "activity"
   | "usage"
@@ -95,7 +96,6 @@ type TabId =
 
 const ALL_TABS: Array<{ id: TabId; label: string }> = [
   { id: "chat", label: "Chat" },
-  { id: "sessions", label: "Sessions" },
   { id: "libraries", label: "Libraries" },
   { id: "activity", label: "Activity" },
   { id: "usage", label: "Usage" },
@@ -153,28 +153,37 @@ function formatUsd(n: number): string {
   return `$${n.toFixed(3)}`;
 }
 
+/** Additive-only migrate — never wipe a custom allowlist on reload. */
+const TOOLS_MIGRATE_FLAG = "combo_x_tools_migrate_v15";
+const TOOLS_MIGRATE_ADD = [
+  "parse_data",
+  "get_interactive",
+  "rag_search",
+  "list_attachments",
+  "save_view",
+  "memory_list",
+  "create_page_extension",
+  "page_digest",
+  "skill_search",
+  "skill_read",
+  "skill_save",
+  "list_custom_tools",
+  "custom_tool_save",
+] as const;
+
 function loadEnabledTools(): Set<string> {
   try {
     const raw = localStorage.getItem(TOOLS_STORAGE_KEY);
     if (!raw) return new Set(ALL_TOOL_NAMES);
     const saved = (JSON.parse(raw) as string[]).filter((n) => ALL_TOOL_NAMES.includes(n));
-    // v0.3 migrate: enable new scrape/parse tools if older allowlist lacked them
-    if (
-      !saved.includes("parse_data") ||
-      !saved.includes("get_interactive") ||
-      !saved.includes("rag_search") ||
-      !saved.includes("list_attachments") ||
-      !saved.includes("save_view") ||
-      !saved.includes("memory_list") ||
-      !saved.includes("create_page_extension")
-    ) {
-      return new Set(ALL_TOOL_NAMES);
-    }
-    // Additive: turn on page_digest without wiping a custom allowlist
     const next = new Set(saved);
-    if (!next.has("page_digest") && ALL_TOOL_NAMES.includes("page_digest")) {
-      next.add("page_digest");
+    if (!localStorage.getItem(TOOLS_MIGRATE_FLAG)) {
+      for (const n of TOOLS_MIGRATE_ADD) {
+        if (ALL_TOOL_NAMES.includes(n)) next.add(n);
+      }
+      localStorage.setItem(TOOLS_MIGRATE_FLAG, "1");
     }
+    // Empty array is a valid "disable all" choice.
     return next;
   } catch {
     return new Set(ALL_TOOL_NAMES);
@@ -199,6 +208,7 @@ export function App() {
   const agentProfiles = useMemo(() => new AgentProfileStore(), []);
   const usageStore = useMemo(() => new UsageStore(), []);
   const taskStore = useMemo(() => new TaskStore(), []);
+  const customTools = useMemo(() => new CustomToolStore(), []);
   const pageExtensions = useMemo(() => new PageExtensionStore(), []);
   const connectorStore = useMemo(() => new ConnectorStore(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -252,8 +262,7 @@ export function App() {
     resolve: (allow: boolean) => void;
   } | null>(null);
   const [sessionList, setSessionList] = useState<ChatSession[]>([]);
-  const [sessionQuery, setSessionQuery] = useState("");
-  const [sessionBookmarksOnly, setSessionBookmarksOnly] = useState(false);
+  const [sessionsDrawerOpen, setSessionsDrawerOpen] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
   const [sessionUsage, setSessionUsage] = useState<LlmUsage>(ZERO);
@@ -321,6 +330,31 @@ export function App() {
   const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentList, setAgentList] = useState<AgentProfile[]>([]);
+
+  /** Persist ceiling to localStorage (via effect) + active agent allowlist when set. */
+  const updateEnabledTools = useCallback(
+    (fn: (prev: Set<string>) => Set<string>) => {
+      setEnabledTools((prev) => {
+        const next = fn(prev);
+        const agentId = activeAgentId;
+        if (agentId) {
+          void (async () => {
+            const p = await agentProfiles.get(agentId);
+            if (!p) return;
+            await agentProfiles.put({
+              ...p,
+              toolAllowlist: [...next],
+            });
+            const list = await agentProfiles.list();
+            setAgentList(list);
+          })();
+        }
+        return next;
+      });
+    },
+    [activeAgentId, agentProfiles],
+  );
+
   const effectiveToolMode: AgentToolMode = useMemo(() => {
     const p = agentList.find((a) => a.id === activeAgentId);
     return p?.toolMode ?? "skill_gated";
@@ -1000,6 +1034,7 @@ export function App() {
           enabledTools: runTools,
           toolMode: runToolMode,
           skills,
+          customTools,
           approvalMode: runApproval,
           getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
           approvalModel: runWorker,
@@ -1084,6 +1119,7 @@ export function App() {
       input,
       memory,
       skills,
+      customTools,
       maxStepsOverride,
       model,
       pendingAttachments,
@@ -1190,7 +1226,6 @@ export function App() {
         onSelect={(id) => {
           const next = id as TabId;
           setTab(next);
-          if (next === "sessions") void refreshSessions();
           if (next === "vault") void refreshVaultLabels();
           if (next === "settings" || next === "libraries") {
             void connectorStore.list().then((list) => setConnectorCount(list.length));
@@ -1202,71 +1237,98 @@ export function App() {
       {tab === "chat" ? (
         <>
           <div
-            className={`chat-main${preview || browserOpen ? " chat-main-split" : ""}`}
+            className={`chat-main${preview || browserOpen ? " chat-main-split" : ""}${sessionsDrawerOpen ? " sessions-open" : ""}`}
           >
+            <SessionsDrawer
+              open={sessionsDrawerOpen}
+              onClose={() => setSessionsDrawerOpen(false)}
+              sessions={sessions}
+              sessionList={sessionList}
+              refreshSessions={refreshSessions}
+              currentSessionId={currentSession?.id}
+              onOpenSession={loadSession}
+              onNewChat={newChat}
+            />
             <div className="chat-thread">
-              {currentSession ? (
-                <div className="conv-bar">
-                  <div className="conv-bar-main">
-                    <span className="conv-label">Conversation</span>
-                    <code className="conv-id" title={currentSession.id}>
-                      {shortConversationId(currentSession.id)}
-                    </code>
-                    <button
-                      type="button"
-                      className="msg-action"
-                      title="Copy full conversation id"
-                      onClick={() => {
-                        void (async () => {
-                          const ok = await copyText(currentSession.id);
-                          if (ok) {
-                            setIdCopied(true);
-                            window.setTimeout(() => setIdCopied(false), 1200);
-                          }
-                        })();
-                      }}
-                    >
-                      {idCopied ? "Copied id" : "Copy id"}
-                    </button>
-                    <button
-                      type="button"
-                      className={browserOpen ? "msg-action active" : "msg-action"}
-                      title="Toggle browser preview (Nanobrowser-style tab mirror)"
-                      onClick={() => setBrowserOpen((v) => !v)}
-                    >
-                      Browser
-                    </button>
-                    <button
-                      type="button"
-                      className={showActions ? "msg-action active" : "msg-action"}
-                      title="Show or hide tool action chips"
-                      onClick={() => setShowActions((v) => !v)}
-                    >
-                      {showActions ? "Actions on" : "Text only"}
-                    </button>
-                    {effectiveApproval === "ask" ? (
-                      <span className="approval-pill ask" title="Tools require confirmation">
-                        ask
-                      </span>
-                    ) : (
+              <div className="conv-bar">
+                <div className="conv-bar-main">
+                  <button
+                    type="button"
+                    className={sessionsDrawerOpen ? "msg-action active icon-btn" : "msg-action icon-btn"}
+                    title="Sessions & history"
+                    aria-label="Sessions and history"
+                    aria-expanded={sessionsDrawerOpen}
+                    onClick={() => {
+                      setSessionsDrawerOpen((v) => !v);
+                      void refreshSessions();
+                    }}
+                  >
+                    ☰
+                  </button>
+                  {currentSession ? (
+                    <>
+                      <span className="conv-label">Conversation</span>
+                      <code className="conv-id" title={currentSession.id}>
+                        {shortConversationId(currentSession.id)}
+                      </code>
                       <button
                         type="button"
-                        className={
-                          effectiveApproval === "auto_all"
-                            ? "approval-pill auto dangerish"
-                            : "approval-pill auto"
-                        }
-                        title="Click to disable auto-approve (back to ask)"
+                        className="msg-action"
+                        title="Copy full conversation id"
                         onClick={() => {
-                          setApprovalMode("ask");
-                          approvalModeRef.current = "ask";
-                          setStatus("Auto-approve off — tools will ask again");
+                          void (async () => {
+                            const ok = await copyText(currentSession.id);
+                            if (ok) {
+                              setIdCopied(true);
+                              window.setTimeout(() => setIdCopied(false), 1200);
+                            }
+                          })();
                         }}
                       >
-                        {effectiveApproval === "auto_all" ? "auto-all · disable" : "auto-llm · disable"}
+                        {idCopied ? "Copied id" : "Copy id"}
                       </button>
-                    )}
-                  </div>
+                      <button
+                        type="button"
+                        className={browserOpen ? "msg-action active" : "msg-action"}
+                        title="Toggle browser preview (Nanobrowser-style tab mirror)"
+                        onClick={() => setBrowserOpen((v) => !v)}
+                      >
+                        Browser
+                      </button>
+                      <button
+                        type="button"
+                        className={showActions ? "msg-action active" : "msg-action"}
+                        title="Show or hide tool action chips"
+                        onClick={() => setShowActions((v) => !v)}
+                      >
+                        {showActions ? "Actions on" : "Text only"}
+                      </button>
+                      {effectiveApproval === "ask" ? (
+                        <span className="approval-pill ask" title="Tools require confirmation">
+                          ask
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className={
+                            effectiveApproval === "auto_all"
+                              ? "approval-pill auto dangerish"
+                              : "approval-pill auto"
+                          }
+                          title="Click to disable auto-approve (back to ask)"
+                          onClick={() => {
+                            setApprovalMode("ask");
+                            approvalModeRef.current = "ask";
+                            setStatus("Auto-approve off — tools will ask again");
+                          }}
+                        >
+                          {effectiveApproval === "auto_all" ? "auto-all · disable" : "auto-llm · disable"}
+                        </button>
+                      )}
+                    </>
+                  ) : null}
+                </div>
+                {currentSession ? (
                   <button
                     type="button"
                     className={
@@ -1282,8 +1344,8 @@ export function App() {
                   >
                     {currentSession.bookmarked ? "Bookmarked" : "Bookmark"}
                   </button>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
               <SubagentStrip runs={subagentRuns} />
               <MessagesViewport
                 itemCount={turns.length}
@@ -1293,8 +1355,9 @@ export function App() {
                   <>
                     {turns.length === 0 ? (
                       <div className="bubble system">
-                        Hi — I’m Combo-X. Memories are prepended each turn; skills unlock tools via{" "}
-                        <code>skill_read</code>. Approval: <strong>{effectiveApproval}</strong>.
+                        Hi — I’m Combo-X. Memories + skill descriptions + tool schemas are prepended
+                        each turn; <code>skill_read</code> loads bodies and unlocks gated tools.
+                        Approval: <strong>{effectiveApproval}</strong>.
                       </div>
                     ) : null}
                     {turns.slice(start, end).map((t) => (
@@ -1419,7 +1482,7 @@ export function App() {
                         </div>
                         {inspectTurnId === t.id && t.runContext ? (
                           <pre className="context-inspect">
-                            {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}\n\n--- OPEN TASKS (session + global; always prepended once per turn) ---\n${t.runContext.taskBlock || "(none)"}`}
+                            {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}\n\n--- OPEN TASKS (session + global; always prepended once per turn) ---\n${t.runContext.taskBlock || "(none)"}\n\n--- SKILLS INDEX (descriptions; bodies via skill_read) ---\n${t.runContext.skillBlock || "(none)"}\n\n--- TOOL CATALOG (descriptions + parameters schemas) ---\n${t.runContext.toolCatalogBlock || "(none)"}`}
                           </pre>
                         ) : null}
                       </div>
@@ -1527,7 +1590,7 @@ export function App() {
             <div className="row composer-tools-row">
               <ToolAccessPicker
                 enabledTools={enabledTools}
-                setEnabledTools={setEnabledTools}
+                setEnabledTools={updateEnabledTools}
                 toolMode={effectiveToolMode}
                 unlockedThisRun={unlockedThisRun}
               />
@@ -1657,107 +1720,14 @@ export function App() {
         </>
       ) : null}
 
-      {tab === "sessions" ? (
-        <div className="panel">
-          <h2>Sessions</h2>
-          <p className="hint">Persisted in IndexedDB on this device. Sync across devices = planned.</p>
-          <div className="row">
-            <input
-              value={sessionQuery}
-              onChange={(e) => setSessionQuery(e.target.value)}
-              placeholder="Search past sessions…"
-            />
-            <button
-              type="button"
-              onClick={() =>
-                void (async () => {
-                  if (!sessionQuery.trim()) return refreshSessions();
-                  setSessionList(await sessions.search(sessionQuery, 30));
-                })()
-              }
-            >
-              Search
-            </button>
-            <button
-              type="button"
-              className={sessionBookmarksOnly ? "primary" : undefined}
-              title="Show bookmarked conversations or messages"
-              aria-pressed={sessionBookmarksOnly}
-              onClick={() => setSessionBookmarksOnly((v) => !v)}
-            >
-              Bookmarks
-            </button>
-            <button type="button" className="primary" onClick={() => void newChat()}>
-              New chat
-            </button>
-          </div>
-          <ul className="list">
-            {sessionList
-              .filter((s) => {
-                if (!sessionBookmarksOnly) return true;
-                return (
-                  !!s.bookmarked || s.messages.some((m) => m.bookmarked && m.role !== "system")
-                );
-              })
-              .map((s) => {
-                const lastUser = [...s.messages].reverse().find((m) => m.role === "user");
-                const lastAsst = [...s.messages].reverse().find((m) => m.role === "assistant");
-                return (
-              <li key={s.id} className={s.bookmarked ? "session-row bookmarked" : "session-row"}>
-                <button type="button" className="linkish session-open" onClick={() => void loadSession(s.id)}>
-                  <strong>
-                    {s.bookmarked ? "[B] " : ""}
-                    {s.title || "Untitled"}
-                    {s.messages.some((m) => m.bookmarked) ? " · msgs bookmarked" : ""}
-                  </strong>
-                  {lastUser?.content ? (
-                    <>
-                      <br />
-                      <span className="hint clamp-2">
-                        You: {lastUser.content}
-                      </span>
-                    </>
-                  ) : null}
-                  {lastAsst?.content ? (
-                    <>
-                      <br />
-                      <span className="hint clamp-2">
-                        Agent: {lastAsst.content}
-                      </span>
-                    </>
-                  ) : null}
-                  <br />
-                  <span className="hint">
-                    {new Date(s.updatedAt).toLocaleString()} · {s.totalTokens} tok ·{" "}
-                    {formatUsd(s.estimatedCostUsd)}
-                  </span>
-                  <br />
-                  <span className="hint mono-id" title={s.id}>
-                    id {shortConversationId(s.id)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="msg-action"
-                  title="Copy conversation id"
-                  onClick={() => void copyText(s.id)}
-                >
-                  Copy id
-                </button>
-              </li>
-            );
-              })}
-          </ul>
-        </div>
-      ) : null}
-
       {tab === "libraries" ? (
         <LibrariesPanel
           memory={memory}
           skills={skills}
           agents={agentProfiles}
           enabledTools={enabledTools}
-          setEnabledTools={setEnabledTools}
+          setEnabledTools={updateEnabledTools}
+          customTools={customTools}
           rag={rag}
           ragMeta={ragMeta}
           setRagMeta={setRagMeta}
@@ -1819,7 +1789,7 @@ export function App() {
           budgetMode={budgetMode}
           setBudgetMode={setBudgetMode}
           enabledTools={enabledTools}
-          setEnabledTools={setEnabledTools}
+          setEnabledTools={updateEnabledTools}
           activeAgentId={activeAgentId}
           setActiveAgentId={setActiveAgentId}
           ragExclude={ragExclude}

@@ -218,18 +218,24 @@ Full catalog: [`docs/TOOLS.md`](./TOOLS.md).
 
 ## Memory inject + lean history
 
-### Memory + open-task inject (once per user turn)
+### Memory + tasks + skills + tool schemas (once per user turn)
 
 Before the first orchestrator call each `run()`:
 
 - `formatMemoryInject()` — top memories (global + active agent) via `listForInject`
-- `formatTaskInject()` — open session + global tasks (`formatOpenTasksBlock`, cap 10) so the model tracks the board without calling `list_tasks` first (ns-agent Conversation Tasks parity for *prompt* inject; UI board remains the Tasks tab)
+- `formatTaskInject()` — open session + global tasks (`formatOpenTasksBlock`, cap 10)
+- `formatSkillInject()` — skill **name/description/hints** index (bodies still via `skill_read`)
+- `formatToolSchemaBlock()` — ceiling tool descriptions + JSON-schema parameters (marks `[LOCKED until skill_read]`)
 
 ```typescript
 // packages/core/src/agent/loop.ts
-const memBlock = await this.formatMemoryInject(options.agentId);
-const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
-const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
+const systemParts = [
+  systemBase,
+  memBlock,
+  taskBlock,
+  skillBlock,
+  toolCatalogBlock,
+].filter(Boolean);
 messages = [
   { role: "system", content: systemParts.join("\n\n") },
   ...leanHistory(options.history ?? []),
@@ -237,7 +243,7 @@ messages = [
 ];
 ```
 
-Memory scoring: keyword + recency (`packages/core/src/memory/store.ts`).
+Memory scoring: keyword + recency (`packages/core/src/memory/store.ts`). Custom tools: `CustomToolStore` + `custom_tool_save`.
 
 ### Lean history (subsequent turns)
 
