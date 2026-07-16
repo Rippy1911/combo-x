@@ -2,7 +2,7 @@
 
 Local-first **browser agent** Chrome extension (MV3).
 
-**Current: v1.4.0** — Libraries hub (Memory / Skills / Tools / KB / Integrations); skill-gated tools + seed packs; optional auto-pick for static/expensive orch; Sessions 2-line previews; opt-in LIVE LLM eval (`pnpm test:llm-eval`).
+**Current: v1.4.1** — Virtualized chat (50-msg window), max-turns picker, hide actions, auto-allow pill + one-click ask, Tool access picker (attached vs skill-locked), skills scope filters; v1.4 Libraries + skill gating + LIVE llm-eval.
 
 **Architecture:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — mermaid diagrams for loop, tools, sub-agents, memories, usage.
 

@@ -9,6 +9,7 @@ import {
   type AgentBudgetMode,
   type AgentProfile,
   type AgentProfileStore,
+  type AgentToolMode,
   type ApprovalMode,
   type Connector,
   type ConnectorStore,
@@ -111,6 +112,7 @@ export function SettingsPanel({
   const [draftConnectorIds, setDraftConnectorIds] = useState<string[]>([]);
   const [draftBudget, setDraftBudget] = useState<AgentBudgetMode>("budget");
   const [draftApproval, setDraftApproval] = useState<ApprovalMode>("ask");
+  const [draftToolMode, setDraftToolMode] = useState<AgentToolMode>("skill_gated");
   const [restName, setRestName] = useState("");
   const [restBaseUrl, setRestBaseUrl] = useState("");
   const [mcpJson, setMcpJson] = useState("");
@@ -156,6 +158,7 @@ export function SettingsPanel({
     setDraftConnectorIds([]);
     setDraftBudget(budgetMode);
     setDraftApproval(approvalMode);
+    setDraftToolMode("skill_gated");
   };
 
   const startEditProfile = (p: AgentProfile) => {
@@ -168,6 +171,7 @@ export function SettingsPanel({
     setDraftConnectorIds([...p.connectorIds]);
     setDraftBudget(p.budgetMode ?? "budget");
     setDraftApproval(p.approvalMode ?? "ask");
+    setDraftToolMode(p.toolMode ?? "skill_gated");
   };
 
   const saveProfile = async () => {
@@ -184,6 +188,7 @@ export function SettingsPanel({
             connectorIds: draftConnectorIds,
             budgetMode: draftBudget,
             approvalMode: draftApproval,
+            toolMode: draftToolMode,
             createdAt: now,
             updatedAt: now,
           }
@@ -197,6 +202,7 @@ export function SettingsPanel({
             connectorIds: draftConnectorIds,
             budgetMode: draftBudget,
             approvalMode: draftApproval,
+            toolMode: draftToolMode,
           };
     await agentProfiles.put(row);
     if (!activeAgentId) {
@@ -427,6 +433,14 @@ export function SettingsPanel({
           >
             <option value="budget">Budget</option>
             <option value="normal">Normal</option>
+          </select>
+          <label className="hint">Tool mode</label>
+          <select
+            value={draftToolMode}
+            onChange={(e) => setDraftToolMode(e.target.value as AgentToolMode)}
+          >
+            <option value="skill_gated">Skill-gated (lean + skill_read unlocks)</option>
+            <option value="static">Static (full allowlist every turn / auto-pick)</option>
           </select>
           <label className="hint">Approval mode</label>
           <select

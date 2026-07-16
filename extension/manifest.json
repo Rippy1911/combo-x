@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Combo-X",
   "description": "Local-first browser agent — BYOK, vault, sessions, scrape/export, approvals.",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "icons": {
     "16": "public/icon-16.png",
     "48": "public/icon-48.png",

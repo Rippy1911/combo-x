@@ -15,12 +15,12 @@ import {
   SkillStore,
   Vault,
   ViewStore,
+  type AgentToolMode,
   extractTargetUrl,
   getProtocolVersion,
   leanHistory,
   normalizeModelId,
   parseAttachment,
-  resolveAgentProfile,
   resultError,
   resultOk,
   summarizeResult,
@@ -65,6 +65,8 @@ import { TasksPanel } from "./TasksPanel";
 import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
 import { PageExtensionsPanel } from "./PageExtensionsPanel";
 import { ModelPicker } from "./ModelPicker";
+import { MessagesViewport } from "./MessagesViewport";
+import { ToolAccessPicker } from "./ToolAccessPicker";
 import { TabBar } from "./TabBar";
 
 const KEY_LABEL = "openrouter_api_key";
@@ -75,6 +77,9 @@ const APPROVAL_KEY = "combo_x_approval_mode";
 const BUDGET_KEY = "combo_x_budget_mode";
 const RAG_EXCLUDE_KEY = "combo_x_rag_exclude";
 const LAST_SESSION_KEY = "combo_x_last_session_id";
+const SHOW_ACTIONS_KEY = "combo_x_show_actions";
+const MAX_STEPS_KEY = "combo_x_max_steps";
+const STEPS_PRESETS = [8, 12, 16, 24, 32, 48] as const;
 
 type TabId =
   | "chat"
@@ -265,8 +270,16 @@ export function App() {
 
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ChatMessage[]>([]);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
   const approvalModeRef = useRef(approvalMode);
+  const [showActions, setShowActions] = useState(() => {
+    const v = localStorage.getItem(SHOW_ACTIONS_KEY);
+    return v !== "0";
+  });
+  const [maxStepsOverride, setMaxStepsOverride] = useState<number>(() => {
+    const n = Number(localStorage.getItem(MAX_STEPS_KEY));
+    return STEPS_PRESETS.includes(n as (typeof STEPS_PRESETS)[number]) ? n : 16;
+  });
+  const [unlockedThisRun, setUnlockedThisRun] = useState<string[]>([]);
 
   useEffect(() => {
     approvalModeRef.current = approvalMode;
@@ -286,8 +299,12 @@ export function App() {
   }, [enabledTools]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns, status, pendingApproval]);
+    localStorage.setItem(SHOW_ACTIONS_KEY, showActions ? "1" : "0");
+  }, [showActions]);
+
+  useEffect(() => {
+    localStorage.setItem(MAX_STEPS_KEY, String(maxStepsOverride));
+  }, [maxStepsOverride]);
 
   const [, setSetupMsg] = useState("");
   const [, setRagPathHint] = useState(
@@ -303,6 +320,14 @@ export function App() {
   const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentList, setAgentList] = useState<AgentProfile[]>([]);
+  const effectiveToolMode: AgentToolMode = useMemo(() => {
+    const p = agentList.find((a) => a.id === activeAgentId);
+    return p?.toolMode ?? "skill_gated";
+  }, [agentList, activeAgentId]);
+  const effectiveApproval: ApprovalMode = useMemo(() => {
+    const p = agentList.find((a) => a.id === activeAgentId);
+    return p?.approvalMode ?? approvalMode;
+  }, [agentList, activeAgentId, approvalMode]);
   const [, setConnectorCount] = useState(0);
 
   const applySetupPayload = useCallback((payload: unknown, opts?: { syncApproval?: boolean }) => {
@@ -722,12 +747,15 @@ export function App() {
       const llm = new OpenRouterClient({ apiKey: key });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
-      const resolved = activeProfile ? resolveAgentProfile(activeProfile) : null;
       const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
       const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runApproval = activeProfile?.approvalMode ?? approvalModeRef.current;
-      const runMaxSteps = resolved?.maxSteps;
+      // Prefer composer override; profile maxSteps only if explicitly stored (not resolve default 32).
+      const runMaxSteps = maxStepsOverride || activeProfile?.maxSteps || undefined;
+      const runToolMode: AgentToolMode =
+        activeProfile?.toolMode ?? "skill_gated";
+      setUnlockedThisRun([]);
       const runTools =
         activeProfile?.toolAllowlist === "all"
           ? ALL_TOOL_NAMES
@@ -911,6 +939,28 @@ export function App() {
             ),
           );
         }
+        if (event.type === "tools_unlocked") {
+          const unlocked = event.unlockedTools ?? [];
+          setUnlockedThisRun((prev) => [...new Set([...prev, ...unlocked])]);
+          if (unlocked.length) {
+            setStatus(
+              `Unlocked ${unlocked.length} tools via skill${event.skillId ? ` (${event.skillId.slice(0, 8)}…)` : ""}`,
+            );
+          }
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === userTurn.id && t.runContext
+                ? {
+                    ...t,
+                    runContext: {
+                      ...t.runContext,
+                      toolNames: event.activeTools ?? t.runContext.toolNames,
+                    },
+                  }
+                : t,
+            ),
+          );
+        }
         if (event.type === "assistant_delta" && event.message != null) {
           setTurns((prev) =>
             prev.map((t) =>
@@ -934,7 +984,7 @@ export function App() {
           maxSteps: runMaxSteps,
           systemPrompt: activeProfile?.systemPrompt,
           enabledTools: runTools,
-          toolMode: activeProfile?.toolMode,
+          toolMode: runToolMode,
           skills,
           approvalMode: runApproval,
           getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
@@ -1019,6 +1069,7 @@ export function App() {
       input,
       memory,
       skills,
+      maxStepsOverride,
       model,
       pendingAttachments,
       workerModel,
@@ -1138,7 +1189,7 @@ export function App() {
           <div
             className={`chat-main${preview || browserOpen ? " chat-main-split" : ""}`}
           >
-            <div className="messages">
+            <div className="chat-thread">
               {currentSession ? (
                 <div className="conv-bar">
                   <div className="conv-bar-main">
@@ -1170,6 +1221,36 @@ export function App() {
                     >
                       Browser
                     </button>
+                    <button
+                      type="button"
+                      className={showActions ? "msg-action active" : "msg-action"}
+                      title="Show or hide tool action chips"
+                      onClick={() => setShowActions((v) => !v)}
+                    >
+                      {showActions ? "Actions on" : "Text only"}
+                    </button>
+                    {effectiveApproval === "ask" ? (
+                      <span className="approval-pill ask" title="Tools require confirmation">
+                        ask
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className={
+                          effectiveApproval === "auto_all"
+                            ? "approval-pill auto dangerish"
+                            : "approval-pill auto"
+                        }
+                        title="Click to disable auto-approve (back to ask)"
+                        onClick={() => {
+                          setApprovalMode("ask");
+                          approvalModeRef.current = "ask";
+                          setStatus("Auto-approve off — tools will ask again");
+                        }}
+                      >
+                        {effectiveApproval === "auto_all" ? "auto-all · disable" : "auto-llm · disable"}
+                      </button>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -1189,133 +1270,147 @@ export function App() {
                 </div>
               ) : null}
               <SubagentStrip runs={subagentRuns} />
-              {turns.length === 0 ? (
-                <div className="bubble system">
-                  Hi — I’m Combo-X. I can open tabs (<code>open_tab</code>), scrape tables, export CSV,
-                  and keep sessions. Approval mode: <strong>{approvalMode}</strong>.
-                </div>
-              ) : null}
-              {turns.map((t) => (
-                <div
-                  key={t.id}
-                  className={`bubble ${t.role}${t.bookmarked ? " bookmarked" : ""}`}
-                >
-                  {t.role === "assistant" ? (
-                    <MarkdownView content={t.content} streaming={streamingId === t.id} />
-                  ) : (
-                    <div className="bubble-plain">{t.content}</div>
-                  )}
-                  {t.role === "assistant" && t.content.includes("|") ? (
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => {
-                        const p = buildPreviewFromMarkdown(t.content);
-                        if (p) setPreview(p);
-                      }}
-                    >
-                      Open tables / preview
-                    </button>
-                  ) : null}
-                  {t.attachments && t.attachments.length > 0 ? (
-                    <div className="attach-chips">
-                      {t.attachments.map((a) => (
-                        <span key={a.id} className="attach-chip done">
-                          {a.kind}: {a.name}
-                          <button
-                            type="button"
-                            className="attach-x"
-                            onClick={() =>
-                              void (async () => {
-                                const row = await attachments.get(a.id);
-                                if (!row) return;
-                                setPreview(
-                                  buildPreviewFromAttachment({
-                                    name: row.name,
-                                    kind: row.kind,
-                                    text: row.text,
-                                    dataUrl: row.dataUrl,
-                                  }),
-                                );
-                              })()
-                            }
-                          >
-                            ↗
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                  {t.tools && t.tools.length > 0 ? (
-                    <div className="chips">
-                      {t.tools.map((tool) => (
-                        <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
-                      ))}
-                    </div>
-                  ) : null}
-                  <div className="bubble-footer">
-                    <MessageToolbar
-                      content={t.content}
-                      createdAt={t.createdAt}
-                      bookmarked={t.bookmarked}
-                      onToggleBookmark={() => toggleMessageBookmark(t.id)}
-                    />
-                    <div className="msg-extra-actions">
-                      {t.role === "assistant" && t.delivery ? (
-                        <span
-                          className={
-                            t.delivery === "stream" ? "delivery-pill stream" : "delivery-pill full"
-                          }
-                          title={
-                            t.delivery === "stream"
-                              ? "Orchestrator used streaming (chatStreaming)"
-                              : "Orchestrator used a full non-stream call"
-                          }
-                        >
-                          {t.delivery === "stream" ? "stream" : "full call"}
-                        </span>
-                      ) : null}
-                      {t.role === "user" ? (
-                        <button
-                          type="button"
-                          className="msg-action"
-                          disabled={running}
-                          title="Edit and resend from here (drops later turns)"
-                          onClick={() => {
-                            setEditingTurnId(t.id);
-                            setInput(t.content);
-                          }}
-                        >
-                          {editingTurnId === t.id ? "Editing…" : "Edit"}
-                        </button>
-                      ) : null}
-                      {t.role === "user" ? (
-                        <button
-                          type="button"
-                          className="msg-action"
-                          title="Inspect system context + memories for this turn"
-                          disabled={!t.runContext}
-                          onClick={() =>
-                            setInspectTurnId((id) => (id === t.id ? null : t.id))
-                          }
-                        >
-                          Context
-                        </button>
-                      ) : null}
-                    </div>
-                    {t.usage && t.role === "assistant" ? (
-                      <div className="turn-usage" title="Prompt (in) / completion (out) tokens + cost">
-                        {formatUsageLine(t.usage)}
+              <MessagesViewport
+                itemCount={turns.length}
+                stickKey={currentSession?.id ?? "none"}
+              >
+                {({ start, end }) => (
+                  <>
+                    {turns.length === 0 ? (
+                      <div className="bubble system">
+                        Hi — I’m Combo-X. Memories are prepended each turn; skills unlock tools via{" "}
+                        <code>skill_read</code>. Approval: <strong>{effectiveApproval}</strong>.
                       </div>
                     ) : null}
-                  </div>
-                  {inspectTurnId === t.id && t.runContext ? (
-                    <pre className="context-inspect">
-                      {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
-                    </pre>
-                  ) : null}
-                </div>
-              ))}
+                    {turns.slice(start, end).map((t) => (
+                      <div
+                        key={t.id}
+                        className={`bubble ${t.role}${t.bookmarked ? " bookmarked" : ""}`}
+                      >
+                        {t.role === "assistant" ? (
+                          <MarkdownView content={t.content} streaming={streamingId === t.id} />
+                        ) : (
+                          <div className="bubble-plain">{t.content}</div>
+                        )}
+                        {showActions && t.role === "assistant" && t.content.includes("|") ? (
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => {
+                              const p = buildPreviewFromMarkdown(t.content);
+                              if (p) setPreview(p);
+                            }}
+                          >
+                            Open tables / preview
+                          </button>
+                        ) : null}
+                        {t.attachments && t.attachments.length > 0 ? (
+                          <div className="attach-chips">
+                            {t.attachments.map((a) => (
+                              <span key={a.id} className="attach-chip done">
+                                {a.kind}: {a.name}
+                                <button
+                                  type="button"
+                                  className="attach-x"
+                                  onClick={() =>
+                                    void (async () => {
+                                      const row = await attachments.get(a.id);
+                                      if (!row) return;
+                                      setPreview(
+                                        buildPreviewFromAttachment({
+                                          name: row.name,
+                                          kind: row.kind,
+                                          text: row.text,
+                                          dataUrl: row.dataUrl,
+                                        }),
+                                      );
+                                    })()
+                                  }
+                                >
+                                  ↗
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {showActions && t.tools && t.tools.length > 0 ? (
+                          <div className="chips">
+                            {t.tools.map((tool) => (
+                              <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="bubble-footer">
+                          <MessageToolbar
+                            content={t.content}
+                            createdAt={t.createdAt}
+                            bookmarked={t.bookmarked}
+                            onToggleBookmark={() => toggleMessageBookmark(t.id)}
+                          />
+                          <div className="msg-extra-actions">
+                            {t.role === "assistant" && t.delivery ? (
+                              <span
+                                className={
+                                  t.delivery === "stream"
+                                    ? "delivery-pill stream"
+                                    : "delivery-pill full"
+                                }
+                                title={
+                                  t.delivery === "stream"
+                                    ? "Orchestrator used streaming (chatStreaming)"
+                                    : "Orchestrator used a full non-stream call"
+                                }
+                              >
+                                {t.delivery === "stream" ? "stream" : "full call"}
+                              </span>
+                            ) : null}
+                            {t.role === "user" ? (
+                              <button
+                                type="button"
+                                className="msg-action"
+                                disabled={running}
+                                title="Edit and resend from here (drops later turns)"
+                                onClick={() => {
+                                  setEditingTurnId(t.id);
+                                  setInput(t.content);
+                                }}
+                              >
+                                {editingTurnId === t.id ? "Editing…" : "Edit"}
+                              </button>
+                            ) : null}
+                            {t.role === "user" ? (
+                              <button
+                                type="button"
+                                className="msg-action"
+                                title="Inspect system context + memories for this turn"
+                                disabled={!t.runContext}
+                                onClick={() =>
+                                  setInspectTurnId((id) => (id === t.id ? null : t.id))
+                                }
+                              >
+                                Context
+                              </button>
+                            ) : null}
+                          </div>
+                          {t.usage && t.role === "assistant" ? (
+                            <div
+                              className="turn-usage"
+                              title="Prompt (in) / completion (out) tokens + cost"
+                            >
+                              {formatUsageLine(t.usage)}
+                            </div>
+                          ) : null}
+                        </div>
+                        {inspectTurnId === t.id && t.runContext ? (
+                          <pre className="context-inspect">
+                            {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
+                          </pre>
+                        ) : null}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </MessagesViewport>
               {pendingApproval ? (
                 <ApprovalBanner
                   tool={pendingApproval.tool}
@@ -1343,7 +1438,6 @@ export function App() {
                 />
               ) : null}
               {status && running ? <div className="bubble system">{status}</div> : null}
-              <div ref={bottomRef} />
             </div>
             <PreviewDrawer
               preview={preview}
@@ -1397,9 +1491,41 @@ export function App() {
                   void vault.putByLabel(MODEL_LABEL, id);
                 }}
               />
+              <label className="steps-pick" title="Max orchestrator turns for the next send">
+                <span className="hint">Turns</span>
+                <select
+                  value={maxStepsOverride}
+                  onChange={(e) => setMaxStepsOverride(Number(e.target.value))}
+                >
+                  {STEPS_PRESETS.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button type="button" onClick={() => void newChat()}>
                 New
               </button>
+            </div>
+            <div className="row composer-tools-row">
+              <ToolAccessPicker
+                enabledTools={enabledTools}
+                setEnabledTools={setEnabledTools}
+                toolMode={effectiveToolMode}
+                unlockedThisRun={unlockedThisRun}
+              />
+              {unlockedThisRun.length > 0 ? (
+                <span className="hint">
+                  +{unlockedThisRun.length} unlocked this run
+                </span>
+              ) : (
+                <span className="hint">
+                  {effectiveToolMode === "skill_gated"
+                    ? "skill_gated: specialty tools need skill_read"
+                    : "static: full ceiling each turn"}
+                </span>
+              )}
             </div>
             {pendingAttachments.length > 0 ? (
               <div className="attach-chips">

@@ -12,6 +12,8 @@ export function SkillsBrowser({
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [query, setQuery] = useState("");
+  const [scopeFilter, setScopeFilter] = useState<"all" | "global" | "agent">("all");
+  const [filterAgentId, setFilterAgentId] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
@@ -39,12 +41,17 @@ export function SkillsBrowser({
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return allSkills;
     return allSkills.filter((s) => {
+      if (scopeFilter === "global" && s.scope === "agent") return false;
+      if (scopeFilter === "agent") {
+        if (s.scope !== "agent") return false;
+        if (filterAgentId && s.agentId !== filterAgentId) return false;
+      }
+      if (!q) return true;
       const hay = `${s.name} ${s.description} ${s.tags.join(" ")} ${s.body}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [allSkills, query]);
+  }, [allSkills, query, scopeFilter, filterAgentId]);
 
   const openEdit = (s: Skill) => {
     setExpandedId(s.id);
@@ -123,6 +130,32 @@ export function SkillsBrowser({
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search skills…"
       />
+      <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+        {(["all", "global", "agent"] as const).map((f) => (
+          <button
+            key={f}
+            type="button"
+            className={scopeFilter === f ? "msg-action active" : "msg-action"}
+            onClick={() => setScopeFilter(f)}
+          >
+            {f === "all" ? "All" : f === "global" ? "Global" : "Per-agent"}
+          </button>
+        ))}
+        {scopeFilter === "agent" ? (
+          <select
+            value={filterAgentId}
+            onChange={(e) => setFilterAgentId(e.target.value)}
+            aria-label="Filter by agent"
+          >
+            <option value="">Any agent</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
+      </div>
       <div className="row">
         <button type="button" onClick={() => void refresh()} disabled={busy}>
           Refresh
@@ -149,6 +182,9 @@ export function SkillsBrowser({
               </div>
               <p className="hint wrap" style={{ margin: "4px 0" }}>
                 {s.description}
+              </p>
+              <p className="hint clamp-2" style={{ margin: "0 0 4px" }}>
+                {s.body}
               </p>
               {(s.toolHints?.length ?? 0) > 0 ? (
                 <div className="row" style={{ alignItems: "center", gap: 6 }}>
