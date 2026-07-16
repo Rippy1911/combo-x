@@ -1,6 +1,9 @@
 /** Curated OpenRouter model presets (verified live 2026-07-16). */
 export const DEFAULT_MODEL = "x-ai/grok-4.5";
 
+/** Cheap worker model for parse_data / structured extract. */
+export const DEFAULT_WORKER_MODEL = "google/gemini-3.5-flash";
+
 /** Legacy bad default from Combo-X v0.1 — auto-migrate. */
 export const LEGACY_BAD_MODELS = new Set(["x-ai/grok-4.5-fast", "openrouter/x-ai/grok-4.5-fast"]);
 

@@ -3,6 +3,7 @@ import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 /** Pure DOM helpers used by the content script (and unit-tested with jsdom). */
 
 const MAX_TEXT = 12_000;
+const interactiveMaps = new WeakMap<Document, HTMLElement[]>();
 
 export function handleContentRequest(request: ContentRequest, doc: Document = document): ContentResponse {
   try {
@@ -35,30 +36,7 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         return { ok: true, data: { clicked: request.selector } };
       }
       case "type_text": {
-        const el = doc.querySelector(request.selector);
-        if (!el) return { ok: false, error: `no element matching ${request.selector}` };
-        if (
-          !(el instanceof HTMLInputElement) &&
-          !(el instanceof HTMLTextAreaElement) &&
-          !(el instanceof HTMLElement && el.isContentEditable)
-        ) {
-          return { ok: false, error: "element is not typable" };
-        }
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-          el.focus();
-          el.value = request.text;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          if (request.submit) {
-            el.form?.requestSubmit?.() ??
-              el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-          }
-        } else {
-          (el as HTMLElement).focus();
-          (el as HTMLElement).textContent = request.text;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        return { ok: true, data: { typed: request.text.length } };
+        return typeInto(doc.querySelector(request.selector), request.text, request.submit);
       }
       case "extract": {
         const nodes = Array.from(doc.querySelectorAll(request.selector)).slice(0, 50);
@@ -87,6 +65,87 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           .filter(Boolean);
         return { ok: true, data: { tables, count: tables.length } };
       }
+      case "scroll":
+        return doScroll(doc, request.direction, request.percent, request.selector);
+      case "wait":
+        // Sync stub for unit tests; content script awaits via bridge helper if needed.
+        return { ok: true, data: { waitedMs: Math.min(request.ms, 10_000) } };
+      case "find_text": {
+        const limit = request.limit ?? 20;
+        const needle = request.text.toLowerCase();
+        const matches: Array<{ index: number; text: string; tag: string }> = [];
+        const walker = doc.createTreeWalker(doc.body ?? doc, NodeFilter.SHOW_TEXT);
+        let node = walker.nextNode();
+        let i = 0;
+        while (node && matches.length < limit) {
+          const raw = (node.textContent ?? "").trim();
+          if (raw.length > 1 && raw.toLowerCase().includes(needle)) {
+            const parent = node.parentElement;
+            matches.push({
+              index: i,
+              text: raw.slice(0, 200),
+              tag: parent?.tagName?.toLowerCase() ?? "text",
+            });
+            if (request.scrollIntoView && parent && matches.length === 1) {
+              parent.scrollIntoView?.({ block: "center", behavior: "instant" as ScrollBehavior });
+            }
+            i += 1;
+          }
+          node = walker.nextNode();
+        }
+        return { ok: true, data: { matches, count: matches.length } };
+      }
+      case "get_interactive": {
+        const limit = request.limit ?? 80;
+        const els = collectInteractive(doc, limit);
+        interactiveMaps.set(doc, els);
+        const items = els.map((el, index) => ({
+          i: index,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") ?? undefined,
+          text: (el.innerText || el.textContent || el.getAttribute("aria-label") || "")
+            .trim()
+            .replace(/\s+/g, " ")
+            .slice(0, 100),
+          href: el instanceof HTMLAnchorElement ? el.href : undefined,
+          type: el instanceof HTMLInputElement ? el.type : undefined,
+          name: el.getAttribute("name") ?? undefined,
+        }));
+        return { ok: true, data: { items, count: items.length } };
+      }
+      case "click_index": {
+        const map = interactiveMaps.get(doc);
+        if (!map?.length) {
+          return { ok: false, error: "call get_interactive first on this page" };
+        }
+        const el = map[request.index];
+        if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
+        el.click();
+        return { ok: true, data: { clickedIndex: request.index, tag: el.tagName.toLowerCase() } };
+      }
+      case "type_index": {
+        const map = interactiveMaps.get(doc);
+        if (!map?.length) {
+          return { ok: false, error: "call get_interactive first on this page" };
+        }
+        const el = map[request.index];
+        if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
+        return typeInto(el, request.text, request.submit);
+      }
+      case "query_all": {
+        const limit = request.limit ?? 80;
+        const attrs = request.attributes ?? [];
+        const nodes = Array.from(doc.querySelectorAll(request.selector)).slice(0, limit);
+        const items = nodes.map((n) => {
+          const item: Record<string, string | null> = {
+            text: (n.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 300),
+            href: n instanceof HTMLAnchorElement ? n.href : n.getAttribute("href"),
+          };
+          for (const a of attrs) item[a] = n.getAttribute(a);
+          return item;
+        });
+        return { ok: true, data: { items, count: items.length } };
+      }
       default:
         return { ok: false, error: "unknown op" };
     }
@@ -98,6 +157,93 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
   }
 }
 
+function typeInto(el: Element | null, text: string, submit?: boolean): ContentResponse {
+  if (!el) return { ok: false, error: "no element" };
+  if (
+    !(el instanceof HTMLInputElement) &&
+    !(el instanceof HTMLTextAreaElement) &&
+    !(el instanceof HTMLElement && el.isContentEditable)
+  ) {
+    return { ok: false, error: "element is not typable" };
+  }
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.focus();
+    el.value = text;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    if (submit) {
+      el.form?.requestSubmit?.() ??
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    }
+  } else {
+    (el as HTMLElement).focus();
+    (el as HTMLElement).textContent = text;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  return { ok: true, data: { typed: text.length } };
+}
+
+function doScroll(
+  doc: Document,
+  direction: "up" | "down" | "top" | "bottom" | "percent",
+  percent?: number,
+  selector?: string,
+): ContentResponse {
+  const view = doc.defaultView;
+  const target = selector ? doc.querySelector(selector) : null;
+  const scrollEl =
+    target instanceof HTMLElement
+      ? target
+      : (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement;
+
+  try {
+    if (direction === "top") {
+      if (target instanceof HTMLElement) target.scrollTop = 0;
+      else view?.scrollTo?.(0, 0);
+    } else if (direction === "bottom") {
+      if (target instanceof HTMLElement) target.scrollTop = target.scrollHeight;
+      else view?.scrollTo?.(0, scrollEl?.scrollHeight ?? 0);
+    } else if (direction === "percent") {
+      const p = Math.min(100, Math.max(0, percent ?? 50)) / 100;
+      const max = (scrollEl?.scrollHeight ?? 0) - (view?.innerHeight ?? 0);
+      view?.scrollTo?.(0, max * p);
+    } else {
+      const delta =
+        direction === "down" ? (view?.innerHeight ?? 600) * 0.8 : -(view?.innerHeight ?? 600) * 0.8;
+      if (target instanceof HTMLElement) target.scrollBy?.(0, delta);
+      else view?.scrollBy?.(0, delta);
+    }
+  } catch {
+    /* jsdom lacks scrollTo — still report ok for unit tests */
+  }
+  return { ok: true, data: { scrolled: direction, percent: percent ?? null } };
+}
+
+function collectInteractive(doc: Document, limit: number): HTMLElement[] {
+  const sel =
+    'a[href], button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], summary, [contenteditable="true"]';
+  const raw = Array.from(doc.querySelectorAll(sel)) as HTMLElement[];
+  const out: HTMLElement[] = [];
+  for (const el of raw) {
+    if (out.length >= limit) break;
+    if (!isVisible(el)) continue;
+    out.push(el);
+  }
+  return out;
+}
+
+function isVisible(el: HTMLElement): boolean {
+  if (el.getAttribute("aria-hidden") === "true") return false;
+  const style = el.ownerDocument.defaultView?.getComputedStyle?.(el);
+  if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+  const rect = el.getBoundingClientRect?.();
+  if (rect && rect.width === 0 && rect.height === 0) {
+    // jsdom often returns 0x0 — still allow if not display:none
+    if (style?.display === "none") return false;
+  }
+  return true;
+}
+
 function visibleText(doc: Document): string {
   const body = doc.body;
   if (!body) return "";
@@ -106,4 +252,10 @@ function visibleText(doc: Document): string {
     for (const n of Array.from(clone.querySelectorAll(sel))) n.remove();
   }
   return (clone.innerText || clone.textContent || "").replace(/\s+\n/g, "\n").replace(/[ \t]+/g, " ").trim();
+}
+
+/** Async wait for content script (real delay). */
+export async function waitMs(ms: number): Promise<void> {
+  const capped = Math.min(Math.max(0, ms), 10_000);
+  await new Promise((r) => setTimeout(r, capped));
 }

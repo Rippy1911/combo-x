@@ -48,4 +48,46 @@ describe("handleContentRequest", () => {
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/no element/);
   });
+
+  it("query_all and get_interactive + click_index", () => {
+    document.body.innerHTML = `
+      <a class="card" href="https://shop.example/p1">Piadina EAN 111</a>
+      <button id="go">Go</button>
+      <input id="q" />
+    `;
+    const q = handleContentRequest(
+      { op: "query_all", selector: "a.card", attributes: ["href"] },
+      document,
+    );
+    expect(q.ok).toBe(true);
+    const items = (q.data as { items: Array<{ text: string }> }).items;
+    expect(items[0]?.text).toMatch(/Piadina/);
+
+    const snap = handleContentRequest({ op: "get_interactive", limit: 20 }, document);
+    expect(snap.ok).toBe(true);
+    const interactive = (snap.data as { items: Array<{ i: number; tag: string }> }).items;
+    expect(interactive.length).toBeGreaterThan(0);
+
+    let clicked = false;
+    document.getElementById("go")!.addEventListener("click", () => {
+      clicked = true;
+    });
+    const btn = interactive.find((x) => x.tag === "button");
+    expect(btn).toBeTruthy();
+    expect(
+      handleContentRequest({ op: "click_index", index: btn!.i }, document).ok,
+    ).toBe(true);
+    expect(clicked).toBe(true);
+  });
+
+  it("find_text and scroll", () => {
+    document.body.innerHTML = `<p>Hello foodwell catalog</p>`;
+    const found = handleContentRequest(
+      { op: "find_text", text: "foodwell", scrollIntoView: false },
+      document,
+    );
+    expect(found.ok).toBe(true);
+    expect((found.data as { count: number }).count).toBeGreaterThan(0);
+    expect(handleContentRequest({ op: "scroll", direction: "top" }, document).ok).toBe(true);
+  });
 });

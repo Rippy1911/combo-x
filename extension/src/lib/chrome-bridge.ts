@@ -8,7 +8,6 @@ async function sleep(ms: number) {
 export function createChromeBridge(): BrowserBridge {
   return {
     async runContent(request: ContentRequest, tabId?: number): Promise<ContentResponse> {
-      // Retry: after click/navigation the content script may be gone briefly
       let last: ContentResponse = { ok: false, error: "no attempt" };
       for (let i = 0; i < 4; i += 1) {
         const res = (await chrome.runtime.sendMessage({
@@ -48,6 +47,33 @@ export function createChromeBridge(): BrowserBridge {
       })) as { ok: boolean; error?: string };
       if (!res.ok) throw new Error(res.error ?? "activate_tab failed");
       await sleep(300);
+      return { ok: true };
+    },
+    async navigate(url: string, tabId?: number) {
+      const res = (await chrome.runtime.sendMessage({
+        type: "navigate",
+        url,
+        tabId,
+      })) as { ok: boolean; data?: { url: string }; error?: string };
+      if (!res.ok) throw new Error(res.error ?? "navigate failed");
+      await sleep(600);
+      return { ok: true, url: res.data?.url ?? url };
+    },
+    async goBack(tabId?: number) {
+      const res = (await chrome.runtime.sendMessage({
+        type: "go_back",
+        tabId,
+      })) as { ok: boolean; error?: string };
+      if (!res.ok) throw new Error(res.error ?? "go_back failed");
+      await sleep(400);
+      return { ok: true };
+    },
+    async closeTab(tabId: number) {
+      const res = (await chrome.runtime.sendMessage({
+        type: "close_tab",
+        tabId,
+      })) as { ok: boolean; error?: string };
+      if (!res.ok) throw new Error(res.error ?? "close_tab failed");
       return { ok: true };
     },
     async downloadText(filename: string, text: string, mime = "text/plain") {

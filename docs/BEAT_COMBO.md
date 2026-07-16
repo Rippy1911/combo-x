@@ -16,11 +16,11 @@ Source of truth for the challenge: `../combo` on `feat/v0.1-phase-b` (2026-07-16
 ## What Combo-X ships instead
 
 1. **AgentLoop** — tool calling; default **32** steps; abort; approval modes (`ask` / `auto_llm` / `auto_all`).
-2. **16 tools** — page DOM + `open_tab` / `activate_tab` + `scrape_tables` / `export_csv` + bookmarks / reminders / HTML reports + `search_sessions` + memory.
-3. **UI** — expandable tool chips, allow-box for sensitive actions, Sessions tab, token/cost meter, Setup ingest page.
-4. **Content handlers** — unit-tested DOM ops; SW reinjects content scripts after navigation.
+2. **Dual models (v0.3)** — orchestrator + cheap **worker** for `parse_data` (Nanobrowser-style cost split without full Planner/Navigator).
+3. **Scrape/nav toolkit** — `get_interactive` / index click, scroll/wait/find, `query_all`, `navigate` / `go_back` / `close_tab`, tables + CSV.
+4. **UI** — tool chips, allow-box, Sessions, token meter, Setup ingest.
 5. **MemoryStore + SessionStore** — IndexedDB; searchable past chats.
-6. **24 unit tests + build** — green locally. Sync/scale = plan only (`docs/SYNC_AND_SCALE.md`).
+6. Gap vs Nanobrowser: [`docs/NANOBROWSER_GAP.md`](./NANOBROWSER_GAP.md). Sync: [`docs/SYNC_AND_SCALE.md`](./SYNC_AND_SCALE.md).
 
 ## Reused (not reinvented)
 

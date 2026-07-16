@@ -122,6 +122,52 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         break;
       }
+      case "navigate": {
+        try {
+          const id = parsed.data.tabId ?? (await activeTabId());
+          if (id == null) {
+            sendResponse({ ok: false, error: "no active tab" });
+            break;
+          }
+          const tab = await chrome.tabs.update(id, { url: parsed.data.url });
+          sendResponse({ ok: true, data: { url: tab?.url ?? parsed.data.url } });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        break;
+      }
+      case "go_back": {
+        try {
+          const id = parsed.data.tabId ?? (await activeTabId());
+          if (id == null) {
+            sendResponse({ ok: false, error: "no active tab" });
+            break;
+          }
+          await chrome.tabs.goBack(id);
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        break;
+      }
+      case "close_tab": {
+        try {
+          await chrome.tabs.remove(parsed.data.tabId);
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        break;
+      }
       case "download_text": {
         try {
           const mime = parsed.data.mime ?? "text/plain";

@@ -8,7 +8,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab: title, URL, and visible text (truncated). Use first to understand the page.",
+        "Read the active tab: title, URL, and visible text (truncated). Prefer get_interactive or query_all for structured scrape.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -20,6 +20,49 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       parameters: {
         type: "object",
         properties: { limit: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_interactive",
+      description:
+        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index.",
+      parameters: {
+        type: "object",
+        properties: { limit: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "click_index",
+      description: "Click interactive element by index from the last get_interactive on this page.",
+      parameters: {
+        type: "object",
+        properties: { index: { type: "number" } },
+        required: ["index"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "type_index",
+      description: "Type into interactive element by index from get_interactive.",
+      parameters: {
+        type: "object",
+        properties: {
+          index: { type: "number" },
+          text: { type: "string" },
+          submit: { type: "boolean" },
+        },
+        required: ["index", "text"],
         additionalProperties: false,
       },
     },
@@ -73,9 +116,27 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "query_all",
+      description:
+        "Batch extract nodes by CSS into {text,href,attrs[]} — efficient for product cards / EAN lists.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string" },
+          limit: { type: "number" },
+          attributes: { type: "array", items: { type: "string" } },
+        },
+        required: ["selector"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "scrape_tables",
       description:
-        "Extract HTML tables from the page as row arrays (great for product/EAN lists). Optional CSS selector.",
+        "Extract HTML tables from the page as row arrays. Optional CSS selector.",
       parameters: {
         type: "object",
         properties: {
@@ -84,6 +145,77 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         },
         additionalProperties: false,
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "scroll",
+      description: "Scroll the page or a container (up/down/top/bottom/percent).",
+      parameters: {
+        type: "object",
+        properties: {
+          direction: {
+            type: "string",
+            enum: ["up", "down", "top", "bottom", "percent"],
+          },
+          percent: { type: "number" },
+          selector: { type: "string" },
+        },
+        required: ["direction"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wait",
+      description: "Wait up to 10s for page settle after navigation/click.",
+      parameters: {
+        type: "object",
+        properties: { ms: { type: "number" } },
+        required: ["ms"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_text",
+      description: "Search visible text; optionally scroll first match into view.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          scrollIntoView: { type: "boolean" },
+          limit: { type: "number" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "navigate",
+      description: "Navigate the active tab to a URL (same tab).",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string" } },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "go_back",
+      description: "Browser history back in the active tab.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
   {
@@ -98,13 +230,10 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "open_tab",
-      description:
-        "Open a URL in a new tab and focus it. Use this to go to allegro.pl, foodwell, etc.",
+      description: "Open a URL in a new tab and focus it.",
       parameters: {
         type: "object",
-        properties: {
-          url: { type: "string", description: "https URL" },
-        },
+        properties: { url: { type: "string", description: "https URL" } },
         required: ["url"],
         additionalProperties: false,
       },
@@ -126,9 +255,49 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "export_csv",
+      name: "close_tab",
+      description: "Close a tab by id from list_tabs.",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        required: ["tabId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "parse_data",
       description:
-        "Turn a 2D array of rows into a downloadable CSV (filename + rows). Use after scrape_tables or extract.",
+        "Cheap worker LLM: extract structured JSON rows from text (or current page) for a given intent. Use after query_all/scrape_tables/get_page — do not dump huge HTML into the orchestrator.",
+      parameters: {
+        type: "object",
+        properties: {
+          intent: {
+            type: "string",
+            description: "What to extract, e.g. product name, EAN, price",
+          },
+          text: { type: "string", description: "Raw text to parse; omit if use_page" },
+          use_page: {
+            type: "boolean",
+            description: "If true, read truncated visible page text first",
+          },
+          schema_hint: {
+            type: "string",
+            description: "Optional JSON shape hint, e.g. [{name,ean,price}]",
+          },
+        },
+        required: ["intent"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "export_csv",
+      description: "Download rows as CSV (after scrape / parse_data).",
       parameters: {
         type: "object",
         properties: {
@@ -164,7 +333,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "set_reminder",
-      description: "Create a local reminder (fires via chrome notification when due, if permitted).",
+      description: "Create a local reminder (chrome notification when due).",
       parameters: {
         type: "object",
         properties: {
@@ -180,8 +349,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "create_report",
-      description:
-        "Create a local HTML report page (title + markdown-ish body). Returns a blob URL the user can open/download.",
+      description: "Create a local HTML report and download it.",
       parameters: {
         type: "object",
         properties: {
@@ -278,6 +446,51 @@ export function toolArgsToContentRequest(
         op: "scrape_tables",
         selector: typeof args.selector === "string" ? args.selector : undefined,
         limit: typeof args.limit === "number" ? args.limit : 20,
+      };
+    case "scroll": {
+      const direction = String(args.direction ?? "");
+      if (!["up", "down", "top", "bottom", "percent"].includes(direction)) return null;
+      return {
+        op: "scroll",
+        direction: direction as "up" | "down" | "top" | "bottom" | "percent",
+        percent: typeof args.percent === "number" ? args.percent : undefined,
+        selector: typeof args.selector === "string" ? args.selector : undefined,
+      };
+    }
+    case "wait":
+      if (typeof args.ms !== "number") return null;
+      return { op: "wait", ms: Math.min(Math.max(1, Math.floor(args.ms)), 10_000) };
+    case "find_text":
+      if (typeof args.text !== "string") return null;
+      return {
+        op: "find_text",
+        text: args.text,
+        scrollIntoView: Boolean(args.scrollIntoView),
+        limit: typeof args.limit === "number" ? args.limit : 20,
+      };
+    case "get_interactive":
+      return {
+        op: "get_interactive",
+        limit: typeof args.limit === "number" ? args.limit : 80,
+      };
+    case "click_index":
+      if (typeof args.index !== "number") return null;
+      return { op: "click_index", index: Math.floor(args.index) };
+    case "type_index":
+      if (typeof args.index !== "number" || typeof args.text !== "string") return null;
+      return {
+        op: "type_index",
+        index: Math.floor(args.index),
+        text: args.text,
+        submit: Boolean(args.submit),
+      };
+    case "query_all":
+      if (typeof args.selector !== "string") return null;
+      return {
+        op: "query_all",
+        selector: args.selector,
+        limit: typeof args.limit === "number" ? args.limit : 80,
+        attributes: Array.isArray(args.attributes) ? args.attributes.map(String) : undefined,
       };
     default:
       return null;

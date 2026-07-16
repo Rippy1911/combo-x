@@ -1,6 +1,7 @@
 import { ArtifactStore, buildReportHtml } from "../local/artifacts.js";
 import type { ChatMessage, ChatResult, LlmUsage, OpenRouterClient, ToolCall } from "../llm/openrouter.js";
 import type { MemoryStore } from "../memory/store.js";
+import { DEFAULT_WORKER_MODEL } from "../models.js";
 import { SENSITIVE_TOOLS } from "../protocol/messages.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { SessionStore } from "../sessions/store.js";
@@ -13,6 +14,9 @@ export interface BrowserBridge {
   listTabs(): Promise<Array<{ id: number; title: string; url: string }>>;
   openTab(url: string, active?: boolean): Promise<{ id: number; url: string }>;
   activateTab(tabId: number): Promise<{ ok: boolean }>;
+  navigate(url: string, tabId?: number): Promise<{ ok: boolean; url: string }>;
+  goBack(tabId?: number): Promise<{ ok: boolean }>;
+  closeTab(tabId: number): Promise<{ ok: boolean }>;
   downloadText(filename: string, text: string, mime?: string): Promise<{ ok: boolean }>;
 }
 
@@ -32,12 +36,15 @@ export interface AgentEvent {
   result?: unknown;
   usage?: LlmUsage;
   toolCallId?: string;
-  /** For tool_approval: resolve with true/false */
+  /** orchestrator | worker | approval */
+  usageSource?: "orchestrator" | "worker" | "approval";
   resolve?: (allow: boolean) => void;
 }
 
 export interface AgentRunOptions {
   model: string;
+  /** Cheap model for parse_data (and optional approval) */
+  workerModel?: string;
   userMessage: string;
   history?: ChatMessage[];
   maxSteps?: number;
@@ -45,7 +52,6 @@ export interface AgentRunOptions {
   systemPrompt?: string;
   enabledTools?: string[];
   approvalMode?: ApprovalMode;
-  /** Cheap model for auto_llm intent check */
   approvalModel?: string;
   onEvent?: (event: AgentEvent) => void;
 }
@@ -59,15 +65,19 @@ export interface AgentRunResult {
   hitStepLimit: boolean;
 }
 
-const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent.
-You CAN open new tabs with open_tab (e.g. https://allegro.pl) and switch tabs with activate_tab.
-You can scrape tables, export CSV, save bookmarks, set reminders, and create HTML reports.
+const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
+You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and close_tab.
+For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
+For catalogs/scrapes: scroll + query_all or scrape_tables, then parse_data (cheap worker LLM) to structure rows, then export_csv.
 Rules:
-- Prefer get_page before clicking/typing.
-- After click/open_tab that navigates, wait and get_page again (content script may need a moment).
+- Prefer get_interactive or query_all over dumping huge get_page text into your own context.
+- After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
-- For catalog/export jobs, scrape_tables + export_csv.
 - Be concise in the final answer.`;
+
+const PARSE_SYSTEM = `You extract structured data from untrusted page text.
+Reply with ONLY valid JSON: {"rows":[...],"notes":"optional short note"}.
+rows must match the user's intent / schema_hint. No markdown fences.`;
 
 function sumUsage(a: LlmUsage, b: LlmUsage): LlmUsage {
   return {
@@ -85,6 +95,26 @@ const ZERO: LlmUsage = {
   estimatedCostUsd: 0,
 };
 
+function parseJsonLoose(raw: string): unknown {
+  const trimmed = raw.trim();
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fence ? fence[1]!.trim() : trimmed;
+  try {
+    return JSON.parse(body);
+  } catch {
+    const start = body.indexOf("{");
+    const end = body.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(body.slice(start, end + 1));
+      } catch {
+        /* fallthrough */
+      }
+    }
+    return { rows: [], notes: "parse_failed", raw: body.slice(0, 500) };
+  }
+}
+
 export class AgentLoop {
   private readonly artifacts = new ArtifactStore();
 
@@ -98,6 +128,7 @@ export class AgentLoop {
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
     const maxSteps = options.maxSteps ?? 32;
     const approvalMode = options.approvalMode ?? "ask";
+    const workerModel = options.workerModel ?? DEFAULT_WORKER_MODEL;
     const emit = options.onEvent ?? (() => undefined);
     const messages: ChatMessage[] = [
       { role: "system", content: options.systemPrompt ?? DEFAULT_SYSTEM },
@@ -140,7 +171,7 @@ export class AgentLoop {
       }
 
       usage = sumUsage(usage, result.usage);
-      emit({ type: "usage", usage: result.usage });
+      emit({ type: "usage", usage: result.usage, usageSource: "orchestrator" });
       steps += 1;
 
       if (result.toolCalls.length === 0) {
@@ -168,9 +199,12 @@ export class AgentLoop {
           call,
           args,
           approvalMode,
-          options.approvalModel ?? options.model,
+          options.approvalModel ?? workerModel,
           emit,
           options.signal,
+          (u) => {
+            usage = sumUsage(usage, u);
+          },
         );
         if (!allowed) {
           const denied = { ok: false, error: "denied by user / policy" };
@@ -190,7 +224,9 @@ export class AgentLoop {
           continue;
         }
 
-        const toolResult = await this.executeTool(call, args, emit);
+        const toolResult = await this.executeTool(call, args, emit, workerModel, (u) => {
+          usage = sumUsage(usage, u);
+        });
         messages.push({
           role: "tool",
           tool_call_id: call.id,
@@ -201,7 +237,7 @@ export class AgentLoop {
     }
 
     finalText =
-      `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + export_csv).`;
+      `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + parse_data + export_csv).`;
     messages.push({ role: "assistant", content: finalText });
     emit({ type: "done", message: finalText, usage });
     return { messages, finalText, steps, usage, aborted: false, hitStepLimit: true };
@@ -213,7 +249,8 @@ export class AgentLoop {
     mode: ApprovalMode,
     approvalModel: string,
     emit: (e: AgentEvent) => void,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    onUsage: (u: LlmUsage) => void,
   ): Promise<boolean> {
     if (!SENSITIVE_TOOLS.has(call.function.name)) return true;
     if (mode === "auto_all") return true;
@@ -236,6 +273,8 @@ export class AgentLoop {
           maxTokens: 4,
           temperature: 0,
         });
+        onUsage(verdict.usage);
+        emit({ type: "usage", usage: verdict.usage, usageSource: "approval" });
         const text = (verdict.content ?? "").trim().toLowerCase();
         return text.startsWith("y");
       } catch {
@@ -243,7 +282,6 @@ export class AgentLoop {
       }
     }
 
-    // ask
     return await new Promise<boolean>((resolve) => {
       if (signal?.aborted) {
         resolve(false);
@@ -269,6 +307,8 @@ export class AgentLoop {
     call: ToolCall,
     args: Record<string, unknown>,
     emit: (e: AgentEvent) => void,
+    workerModel: string,
+    onUsage: (u: LlmUsage) => void,
   ): Promise<unknown> {
     const name = call.function.name;
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
@@ -282,8 +322,15 @@ export class AgentLoop {
         const url = String(args.url ?? "");
         result = await this.browser.openTab(url, true);
       } else if (name === "activate_tab") {
-        const tabId = Number(args.tabId);
-        result = await this.browser.activateTab(tabId);
+        result = await this.browser.activateTab(Number(args.tabId));
+      } else if (name === "navigate") {
+        result = await this.browser.navigate(String(args.url ?? ""));
+      } else if (name === "go_back") {
+        result = await this.browser.goBack();
+      } else if (name === "close_tab") {
+        result = await this.browser.closeTab(Number(args.tabId));
+      } else if (name === "parse_data") {
+        result = await this.parseData(args, workerModel, emit, onUsage);
       } else if (name === "remember") {
         const text = String(args.text ?? "");
         const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
@@ -346,7 +393,6 @@ export class AgentLoop {
           result = { ok: false, error: `invalid args for ${name}` };
         } else {
           result = await this.browser.runContent(req);
-          // After navigation-ish clicks, brief settle is handled in bridge retries
         }
       }
 
@@ -358,5 +404,40 @@ export class AgentLoop {
       emit({ type: "tool_result", tool: name, args, result, toolCallId: call.id });
       return result;
     }
+  }
+
+  private async parseData(
+    args: Record<string, unknown>,
+    workerModel: string,
+    emit: (e: AgentEvent) => void,
+    onUsage: (u: LlmUsage) => void,
+  ): Promise<unknown> {
+    const intent = String(args.intent ?? "");
+    const schemaHint = args.schema_hint != null ? String(args.schema_hint) : "";
+    let text = typeof args.text === "string" ? args.text : "";
+    if (args.use_page || !text.trim()) {
+      const page = await this.browser.runContent({ op: "get_page" });
+      const data = page.data as { text?: string; title?: string; url?: string } | undefined;
+      text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 14_000);
+    }
+    if (!text.trim()) return { ok: false, error: "no text to parse" };
+
+    emit({ type: "status", message: `Worker parse (${workerModel})…` });
+    const result = await this.llm.chat({
+      model: workerModel,
+      messages: [
+        { role: "system", content: PARSE_SYSTEM },
+        {
+          role: "user",
+          content: `Intent: ${intent}\nSchema hint: ${schemaHint || "(infer reasonable columns)"}\n\n--- PAGE TEXT ---\n${text}`,
+        },
+      ],
+      temperature: 0.1,
+      maxTokens: 4096,
+    });
+    onUsage(result.usage);
+    emit({ type: "usage", usage: result.usage, usageSource: "worker" });
+    const parsed = parseJsonLoose(result.content ?? "{}");
+    return { ok: true, model: workerModel, data: parsed };
   }
 }

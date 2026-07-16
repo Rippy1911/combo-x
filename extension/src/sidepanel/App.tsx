@@ -2,6 +2,7 @@ import {
   AGENT_TOOLS,
   AgentLoop,
   DEFAULT_MODEL,
+  DEFAULT_WORKER_MODEL,
   MODEL_PRESETS,
   MemoryStore,
   OpenRouterClient,
@@ -23,6 +24,7 @@ import { ToolChip, type ToolChipData } from "./ToolChip";
 
 const KEY_LABEL = "openrouter_api_key";
 const MODEL_LABEL = "openrouter_model";
+const WORKER_MODEL_LABEL = "openrouter_worker_model";
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
 
@@ -53,7 +55,12 @@ function loadEnabledTools(): Set<string> {
   try {
     const raw = localStorage.getItem(TOOLS_STORAGE_KEY);
     if (!raw) return new Set(ALL_TOOL_NAMES);
-    return new Set((JSON.parse(raw) as string[]).filter((n) => ALL_TOOL_NAMES.includes(n)));
+    const saved = (JSON.parse(raw) as string[]).filter((n) => ALL_TOOL_NAMES.includes(n));
+    // v0.3 migrate: enable new scrape/parse tools if older allowlist lacked them
+    if (!saved.includes("parse_data") || !saved.includes("get_interactive")) {
+      return new Set(ALL_TOOL_NAMES);
+    }
+    return new Set(saved);
   } catch {
     return new Set(ALL_TOOL_NAMES);
   }
@@ -77,7 +84,9 @@ export function App() {
   const [passphrase, setPassphrase] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [workerModel, setWorkerModel] = useState(DEFAULT_WORKER_MODEL);
   const [customModel, setCustomModel] = useState("");
+  const [customWorkerModel, setCustomWorkerModel] = useState("");
   const [tab, setTab] = useState<TabId>("chat");
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<UiTurn[]>([]);
@@ -241,6 +250,8 @@ export function App() {
       storedModel = normalized;
     }
     setModel(normalized);
+    const storedWorker = await vault.getByLabel(WORKER_MODEL_LABEL);
+    setWorkerModel(storedWorker ? normalizeModelId(storedWorker) : DEFAULT_WORKER_MODEL);
     if (key) setApiKey(key);
     setNeedsOnboarding(!key);
     setLocked(false);
@@ -264,16 +275,19 @@ export function App() {
     if (!initialized) await vault.setPassphrase(passphrase);
     else if (!(await vault.unlock(passphrase))) return setStatus("Wrong passphrase");
     const m = normalizeModelId(model);
+    const w = normalizeModelId(workerModel);
     await vault.putByLabel(KEY_LABEL, apiKey.trim());
     await vault.putByLabel(MODEL_LABEL, m);
+    await vault.putByLabel(WORKER_MODEL_LABEL, w);
     setModel(m);
+    setWorkerModel(w);
     setNeedsOnboarding(false);
     setLocked(false);
     const s = await sessions.create("New chat");
     setCurrentSession(s);
     await refreshVaultLabels();
     setTab("chat");
-  }, [apiKey, model, passphrase, refreshVaultLabels, sessions, vault]);
+  }, [apiKey, model, workerModel, passphrase, refreshVaultLabels, sessions, vault]);
 
   const newChat = useCallback(async () => {
     abortRef.current?.abort();
@@ -424,12 +438,13 @@ export function App() {
       try {
         const result = await agent.run({
           model: normalizeModelId(model),
+          workerModel: normalizeModelId(workerModel),
           userMessage: text,
           history: historyRef.current,
           signal: controller.signal,
           enabledTools: [...enabledTools],
           approvalMode: approvalModeRef.current,
-          approvalModel: "google/gemini-3.5-flash",
+          approvalModel: normalizeModelId(workerModel),
           maxSteps: 32,
           onEvent,
         });
@@ -482,6 +497,7 @@ export function App() {
       input,
       memory,
       model,
+      workerModel,
       persistSession,
       running,
       sessionUsage,
@@ -704,7 +720,9 @@ export function App() {
               <span className="hint" style={{ marginLeft: "auto" }}>
                 {lastTurnUsage
                   ? `last: ${lastTurnUsage.totalTokens} tok`
-                  : `${enabledTools.size} tools on`}
+                  : model === workerModel
+                    ? `${enabledTools.size} tools`
+                    : `orch≠worker`}
               </span>
             </div>
           </div>
@@ -766,9 +784,8 @@ export function App() {
             <option value="auto_all">Auto-approve all (this browser)</option>
           </select>
           <p className="hint wrap">
-            Sensitive: click, type, open_tab, activate_tab. “1/8” was never a mystery score — old UI
-            showed <code>enabledTools/total</code> or step <code>1 of 8</code>. Now status says
-            “Working… turn N (limit 32)” and the footer shows last-turn tokens.
+            Sensitive: click, type, click_index, type_index, open_tab, navigate, go_back, close_tab.
+            Orchestrator plans; worker runs <code>parse_data</code>.
           </p>
           <label className="hint">OpenRouter API key</label>
           <input
@@ -777,7 +794,7 @@ export function App() {
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="sk-or-v1-…"
           />
-          <label className="hint">Model</label>
+          <label className="hint">Orchestrator model</label>
           <select value={model} onChange={(e) => setModel(e.target.value)}>
             {MODEL_PRESETS.map((p) => (
               <option key={p.id} value={p.id}>
@@ -789,7 +806,21 @@ export function App() {
             className="mono"
             value={customModel}
             onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="custom model id override"
+            placeholder="custom orchestrator model id"
+          />
+          <label className="hint">Worker model (parse_data / cheap extract)</label>
+          <select value={workerModel} onChange={(e) => setWorkerModel(e.target.value)}>
+            {MODEL_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} — {p.id}
+              </option>
+            ))}
+          </select>
+          <input
+            className="mono"
+            value={customWorkerModel}
+            onChange={(e) => setCustomWorkerModel(e.target.value)}
+            placeholder="custom worker model id"
           />
           <div className="row">
             <button
@@ -798,10 +829,13 @@ export function App() {
               onClick={() =>
                 void (async () => {
                   const m = normalizeModelId(customModel.trim() || model);
+                  const w = normalizeModelId(customWorkerModel.trim() || workerModel);
                   if (apiKey.trim()) await vault.putByLabel(KEY_LABEL, apiKey.trim());
                   await vault.putByLabel(MODEL_LABEL, m);
+                  await vault.putByLabel(WORKER_MODEL_LABEL, w);
                   setModel(m);
-                  setSettingsMsg(`Saved ${m}`);
+                  setWorkerModel(w);
+                  setSettingsMsg(`Saved orch=${m} · worker=${w}`);
                 })()
               }
             >

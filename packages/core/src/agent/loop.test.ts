@@ -4,10 +4,18 @@ import { MemoryStore } from "../memory/store.js";
 import type { BrowserBridge } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
-function mockLlm(sequence: Array<{ content: string | null; toolCalls?: Array<{ id: string; name: string; args: string }> }>) {
+function mockLlm(
+  sequence: Array<{
+    content: string | null;
+    toolCalls?: Array<{ id: string; name: string; args: string }>;
+    model?: string;
+  }>,
+  onChat?: (model: string) => void,
+) {
   let i = 0;
   return {
-    chat: vi.fn(async () => {
+    chat: vi.fn(async (opts: { model: string }) => {
+      onChat?.(opts.model);
       const step = sequence[i] ?? sequence[sequence.length - 1]!;
       i += 1;
       return {
@@ -17,7 +25,7 @@ function mockLlm(sequence: Array<{ content: string | null; toolCalls?: Array<{ i
           type: "function" as const,
           function: { name: t.name, arguments: t.args },
         })),
-        model: "mock",
+        model: step.model ?? opts.model,
         usage: {
           promptTokens: 1,
           completionTokens: 1,
@@ -34,11 +42,14 @@ function stubBrowser(overrides: Partial<BrowserBridge> = {}): BrowserBridge {
   return {
     runContent: vi.fn(async () => ({
       ok: true,
-      data: { title: "Example", url: "https://example.com", text: "Hello" },
+      data: { title: "Example", url: "https://example.com", text: "Hello EAN 590123" },
     })),
     listTabs: vi.fn(async () => []),
     openTab: vi.fn(async (url: string) => ({ id: 1, url })),
     activateTab: vi.fn(async () => ({ ok: true })),
+    navigate: vi.fn(async (url: string) => ({ ok: true, url })),
+    goBack: vi.fn(async () => ({ ok: true })),
+    closeTab: vi.fn(async () => ({ ok: true })),
     downloadText: vi.fn(async () => ({ ok: true })),
     ...overrides,
   };
@@ -59,7 +70,7 @@ describe("AgentLoop", () => {
     const agent = new AgentLoop(llm, browser, memory);
     const events: string[] = [];
     const result = await agent.run({
-      model: "mock",
+      model: "mock-orch",
       userMessage: "What is this page?",
       onEvent: (e) => events.push(e.type),
     });
@@ -121,19 +132,59 @@ describe("AgentLoop", () => {
     expect(hits.length).toBeGreaterThan(0);
   });
 
-  it("can open_tab via bridge", async () => {
+  it("parse_data uses worker model", async () => {
+    const models: string[] = [];
+    const llm = mockLlm(
+      [
+        {
+          content: null,
+          toolCalls: [
+            {
+              id: "1",
+              name: "parse_data",
+              args: JSON.stringify({
+                intent: "extract EANs",
+                text: "Product A EAN 123",
+                schema_hint: "[{name,ean}]",
+              }),
+            },
+          ],
+        },
+        {
+          content: JSON.stringify({ rows: [{ name: "Product A", ean: "123" }], notes: "ok" }),
+        },
+        { content: "Found 1 product." },
+      ],
+      (m) => models.push(m),
+    );
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "orch-model",
+      workerModel: "worker-model",
+      userMessage: "parse",
+    });
+    expect(result.finalText).toMatch(/product/i);
+    expect(models).toContain("orch-model");
+    expect(models).toContain("worker-model");
+  });
+
+  it("can navigate via bridge", async () => {
     const llm = mockLlm([
       {
         content: null,
         toolCalls: [
           {
             id: "1",
-            name: "open_tab",
+            name: "navigate",
             args: JSON.stringify({ url: "https://allegro.pl" }),
           },
         ],
       },
-      { content: "Opened Allegro." },
+      { content: "Navigated." },
     ]);
     const browser = stubBrowser();
     const agent = new AgentLoop(
@@ -141,12 +192,11 @@ describe("AgentLoop", () => {
       browser,
       new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
     );
-    const result = await agent.run({
+    await agent.run({
       model: "mock",
-      userMessage: "open allegro",
+      userMessage: "go",
       approvalMode: "auto_all",
     });
-    expect(result.finalText).toMatch(/Allegro/i);
-    expect(browser.openTab).toHaveBeenCalledWith("https://allegro.pl", true);
+    expect(browser.navigate).toHaveBeenCalledWith("https://allegro.pl");
   });
 });

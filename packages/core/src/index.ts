@@ -33,7 +33,7 @@ export {
   toolArgsToContentRequest,
   rowsToCsv,
 } from "./browser/tools.js";
-export { handleContentRequest } from "./browser/content-handlers.js";
+export { handleContentRequest, waitMs } from "./browser/content-handlers.js";
 
 export { AgentLoop } from "./agent/loop.js";
 export type {
@@ -46,6 +46,7 @@ export type {
 
 export {
   DEFAULT_MODEL,
+  DEFAULT_WORKER_MODEL,
   LEGACY_BAD_MODELS,
   MODEL_PRESETS,
   normalizeModelId,

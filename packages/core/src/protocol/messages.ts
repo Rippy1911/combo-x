@@ -10,6 +10,17 @@ export const BrowserToolNameSchema = z.enum([
   "type_text",
   "extract",
   "scrape_tables",
+  "scroll",
+  "wait",
+  "find_text",
+  "get_interactive",
+  "click_index",
+  "type_index",
+  "query_all",
+  "navigate",
+  "go_back",
+  "close_tab",
+  "parse_data",
   "remember",
   "recall",
   "list_tabs",
@@ -43,6 +54,42 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     selector: z.string().optional(),
     limit: z.number().int().positive().max(50).optional(),
   }),
+  z.object({
+    op: z.literal("scroll"),
+    direction: z.enum(["up", "down", "top", "bottom", "percent"]),
+    percent: z.number().min(0).max(100).optional(),
+    selector: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal("wait"),
+    ms: z.number().int().positive().max(10_000),
+  }),
+  z.object({
+    op: z.literal("find_text"),
+    text: z.string().min(1),
+    scrollIntoView: z.boolean().optional(),
+    limit: z.number().int().positive().max(50).optional(),
+  }),
+  z.object({
+    op: z.literal("get_interactive"),
+    limit: z.number().int().positive().max(120).optional(),
+  }),
+  z.object({
+    op: z.literal("click_index"),
+    index: z.number().int().nonnegative(),
+  }),
+  z.object({
+    op: z.literal("type_index"),
+    index: z.number().int().nonnegative(),
+    text: z.string(),
+    submit: z.boolean().optional(),
+  }),
+  z.object({
+    op: z.literal("query_all"),
+    selector: z.string().min(1),
+    limit: z.number().int().positive().max(200).optional(),
+    attributes: z.array(z.string()).optional(),
+  }),
 ]);
 export type ContentRequest = z.infer<typeof ContentRequestSchema>;
 
@@ -70,6 +117,19 @@ export const RuntimeMessageSchema = z.discriminatedUnion("type", [
     tabId: z.number().int(),
   }),
   z.object({
+    type: z.literal("navigate"),
+    url: z.string().url(),
+    tabId: z.number().int().optional(),
+  }),
+  z.object({
+    type: z.literal("go_back"),
+    tabId: z.number().int().optional(),
+  }),
+  z.object({
+    type: z.literal("close_tab"),
+    tabId: z.number().int(),
+  }),
+  z.object({
     type: z.literal("download_text"),
     filename: z.string().min(1),
     text: z.string(),
@@ -87,6 +147,11 @@ export function getProtocolVersion(): number {
 export const SENSITIVE_TOOLS = new Set([
   "click",
   "type_text",
+  "click_index",
+  "type_index",
   "open_tab",
   "activate_tab",
+  "navigate",
+  "go_back",
+  "close_tab",
 ]);

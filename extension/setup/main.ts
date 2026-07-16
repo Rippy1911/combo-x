@@ -1,34 +1,56 @@
 const TOOL_NAMES = [
   "get_page",
   "get_links",
+  "get_interactive",
+  "click_index",
+  "type_index",
   "click",
   "type_text",
   "extract",
+  "query_all",
   "scrape_tables",
-  "remember",
-  "recall",
+  "scroll",
+  "wait",
+  "find_text",
+  "navigate",
+  "go_back",
   "list_tabs",
   "open_tab",
   "activate_tab",
+  "close_tab",
+  "parse_data",
   "export_csv",
   "save_bookmark",
   "set_reminder",
   "create_report",
   "search_sessions",
+  "remember",
+  "recall",
 ];
 
 const TOOL_BLURB: Record<string, string> = {
   get_page: "Read active tab (title, url, text).",
   get_links: "List links on the page.",
+  get_interactive: "Indexed clickable/inputs snapshot.",
+  click_index: "Click by interactive index.",
+  type_index: "Type by interactive index.",
   click: "Click an element (CSS selector).",
   type_text: "Type into an input (CSS selector).",
   extract: "Extract text/attribute from elements.",
-  scrape_tables: "Scrape <table> rows into rows[][] for export.",
+  query_all: "Batch CSS extract for cards/lists.",
+  scrape_tables: "Scrape <table> rows into rows[][].",
+  scroll: "Scroll page or container.",
+  wait: "Wait up to 10s.",
+  find_text: "Find visible text (+ optional scroll).",
+  navigate: "Navigate current tab to URL.",
+  go_back: "History back.",
   remember: "Save a note to local memory.",
   recall: "Search local memory.",
   list_tabs: "List open tabs.",
   open_tab: "Open a URL in a new tab.",
   activate_tab: "Switch to a tab by id.",
+  close_tab: "Close a tab by id.",
+  parse_data: "Cheap worker LLM structured extract.",
   export_csv: "Download rows as CSV.",
   save_bookmark: "Save a bookmark.",
   set_reminder: "Set a reminder (ISO time).",
@@ -73,7 +95,6 @@ function render() {
     document.querySelectorAll<HTMLInputElement>("#tools input").forEach((c) => (c.checked = false));
   });
 
-  // Pre-fill from existing storage so re-opening reflects current state.
   void chrome.storage.local.get("combo_x_setup_payload").then((res) => {
     const p = res.combo_x_setup_payload as SetupPayload | undefined;
     if (!p) return;
