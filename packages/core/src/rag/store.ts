@@ -11,6 +11,11 @@ export interface RagChunkRow {
   indexedAt: string;
 }
 
+export interface RagFolderRef {
+  id: string;
+  folderName: string;
+}
+
 export interface RagMeta {
   id: "meta";
   folderName: string;
@@ -18,6 +23,10 @@ export interface RagMeta {
   chunkCount: number;
   indexedAt: string | null;
   lastError: string | null;
+  /** Granted folders (multi-root) */
+  folders?: RagFolderRef[];
+  /** Extra directory names to skip (on top of built-in node_modules/.git/…) */
+  excludeDirs?: string[];
 }
 
 function openDb(name: string): Promise<IDBDatabase> {
@@ -68,44 +77,77 @@ export class RagStore {
     return this.db.transaction(name, mode).objectStore(name);
   }
 
-  async saveHandle(handle: FileSystemDirectoryHandle, folderName: string): Promise<void> {
+  async saveHandle(
+    handle: FileSystemDirectoryHandle,
+    folderName: string,
+    id = "root",
+  ): Promise<void> {
     await this.getDb();
     await idbReq(
       this.store("handles", "readwrite").put({
-        id: "root",
+        id,
         handle,
         folderName,
         savedAt: new Date().toISOString(),
       }),
     );
-    const meta = (await this.getMeta()) ?? {
-      id: "meta" as const,
-      folderName,
-      fileCount: 0,
-      chunkCount: 0,
-      indexedAt: null,
-      lastError: null,
-    };
-    meta.folderName = folderName;
-    await idbReq(this.store("meta", "readwrite").put(meta));
+    const folders = await this.listFolderRefs();
+    const label = folders.map((f) => f.folderName).join(" + ") || folderName;
+    await this.setMeta({ folderName: label, folders });
+  }
+
+  /** Add another folder root (multi-folder index). */
+  async addHandle(handle: FileSystemDirectoryHandle, folderName: string): Promise<string> {
+    const id = `f_${crypto.randomUUID().slice(0, 8)}`;
+    await this.saveHandle(handle, folderName, id);
+    return id;
+  }
+
+  async listHandles(): Promise<
+    Array<{ id: string; handle: FileSystemDirectoryHandle; folderName: string }>
+  > {
+    await this.getDb();
+    const rows = await idbReq<
+      Array<{ id: string; handle: FileSystemDirectoryHandle; folderName: string }>
+    >(this.store("handles", "readonly").getAll());
+    return (rows ?? []).filter((r) => r?.handle);
+  }
+
+  async listFolderRefs(): Promise<RagFolderRef[]> {
+    const handles = await this.listHandles();
+    return handles.map((h) => ({ id: h.id, folderName: h.folderName }));
   }
 
   async getHandle(): Promise<{
     handle: FileSystemDirectoryHandle;
     folderName: string;
   } | null> {
-    await this.getDb();
-    const row = await idbReq<{
-      handle: FileSystemDirectoryHandle;
-      folderName: string;
-    } | undefined>(this.store("handles", "readonly").get("root"));
-    if (!row?.handle) return null;
-    return { handle: row.handle, folderName: row.folderName };
+    const all = await this.listHandles();
+    const root = all.find((h) => h.id === "root") ?? all[0];
+    if (!root) return null;
+    return { handle: root.handle, folderName: root.folderName };
   }
 
   async clearHandle(): Promise<void> {
     await this.getDb();
-    await idbReq(this.store("handles", "readwrite").delete("root"));
+    const all = await this.listHandles();
+    const tx = this.db!.transaction("handles", "readwrite");
+    for (const h of all) tx.objectStore("handles").delete(h.id);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    await this.setMeta({ folders: [], folderName: "" });
+  }
+
+  async removeHandle(id: string): Promise<void> {
+    await this.getDb();
+    await idbReq(this.store("handles", "readwrite").delete(id));
+    const folders = await this.listFolderRefs();
+    await this.setMeta({
+      folders,
+      folderName: folders.map((f) => f.folderName).join(" + "),
+    });
   }
 
   async getMeta(): Promise<RagMeta | null> {

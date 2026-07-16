@@ -5,6 +5,7 @@ export const PROTOCOL_VERSION = 1 as const;
 
 export const BrowserToolNameSchema = z.enum([
   "get_page",
+  "page_digest",
   "get_links",
   "click",
   "type_text",
@@ -51,7 +52,12 @@ export const BrowserToolNameSchema = z.enum([
 export type BrowserToolName = z.infer<typeof BrowserToolNameSchema>;
 
 export const ContentRequestSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("get_page") }),
+  z.object({
+    op: z.literal("get_page"),
+    maxChars: z.number().int().positive().max(50_000).optional(),
+    mode: z.enum(["full", "snippet", "structure"]).optional(),
+  }),
+  z.object({ op: z.literal("page_digest") }),
   z.object({ op: z.literal("get_links"), limit: z.number().int().positive().max(200).optional() }),
   z.object({ op: z.literal("click"), selector: z.string().min(1) }),
   z.object({

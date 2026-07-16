@@ -4,12 +4,12 @@
 
 Chrome cannot open `~/projects/foo` from a path string. Combo-X uses the **File System Access API**:
 
-1. **Setup → Grant folder** (or Settings → Grant folder) — user picks a directory once.
-2. Handle is stored in IndexedDB (`combo_x_rag` / `handles`).
-3. Indexer walks the tree (skips `node_modules`, `.git`, `dist`, …), chunks text files, stores embeddings (deterministic hash vectors) + keyword index.
+1. **Settings → Device RAG → Grant folder** (or **Add another folder**) — user picks directories; exclude dirs editable (defaults skip `node_modules`, `.git`, `dist`, …).
+2. Handles stored in IndexedDB (`combo_x_rag` / `handles`).
+3. Indexer walks trees with built-in + extra excludes, chunks text files, stores embeddings (deterministic hash vectors) + keyword index.
 4. Agent tools: `rag_status`, `rag_search`, `rag_read_file`.
 
-Re-grant if Chrome forgets permission; use **Reindex** after code changes.
+Workspace setup page only toggles connector/tool flags — folder grant stays in Settings. Re-grant if Chrome forgets permission; use **Reindex** after code changes.
 
 ## Connectors (working product)
 

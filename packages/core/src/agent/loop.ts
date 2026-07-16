@@ -7,6 +7,13 @@ import {
   formatAttachmentInventory,
 } from "../attachments/parse.js";
 import type { ViewChartSpec, ViewStore } from "../local/views.js";
+import {
+  BUDGET_SYSTEM_ADDON,
+  defaultGetPageMaxChars,
+  resolveMaxSteps,
+  type AgentBudgetMode,
+} from "./budget.js";
+import { PageTemplateCache } from "./pageTemplateCache.js";
 import { leanHistory } from "./leanHistory.js";
 import type {
   ChatMessage,
@@ -18,6 +25,7 @@ import type {
 } from "../llm/openrouter.js";
 import type { MemoryStore } from "../memory/store.js";
 import { DEFAULT_WORKER_MODEL } from "../models.js";
+import { approvalDecisionFor } from "../local/actionLog.js";
 import { SENSITIVE_TOOLS } from "../protocol/messages.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
@@ -78,6 +86,10 @@ export interface AgentEvent {
   /** orchestrator | worker | approval */
   usageSource?: "orchestrator" | "worker" | "approval";
   resolve?: (allow: boolean) => void;
+  /** Present on tool_result after the approval gate */
+  approvalMode?: ApprovalMode;
+  /** allowed | denied | auto_all | auto_llm | n/a */
+  approvalDecision?: "allowed" | "denied" | "auto_all" | "auto_llm" | "n/a";
 }
 
 export interface ConnectorBundle {
@@ -96,6 +108,11 @@ export interface AgentRunOptions {
   systemPrompt?: string;
   enabledTools?: string[];
   approvalMode?: ApprovalMode;
+  /**
+   * Live approval mode (e.g. UI flipped mid-run to auto_all).
+   * When set, consulted per tool call so Auto-approve persists for the rest of the run.
+   */
+  getApprovalMode?: () => ApprovalMode;
   approvalModel?: string;
   onEvent?: (event: AgentEvent) => void;
   /** Local folder RAG index (IndexedDB) */
@@ -108,6 +125,8 @@ export interface AgentRunOptions {
   pendingAttachmentIds?: string[];
   /** Named Views (Views tab / save_view) */
   views?: ViewStore;
+  /** Minimize steps/tokens — prefer page_digest + worker parse */
+  budgetMode?: AgentBudgetMode;
 }
 
 export interface AgentRunResult {
@@ -203,12 +222,15 @@ export class AgentLoop {
   ) {}
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
-    const maxSteps = options.maxSteps ?? 32;
-    const approvalMode = options.approvalMode ?? "ask";
+    const budgetMode = options.budgetMode ?? "normal";
+    const maxSteps = resolveMaxSteps(budgetMode, options.maxSteps);
+    const resolveApprovalMode = (): ApprovalMode =>
+      options.getApprovalMode?.() ?? options.approvalMode ?? "ask";
     const workerModel = options.workerModel ?? DEFAULT_WORKER_MODEL;
     const emit = options.onEvent ?? (() => undefined);
     const userContent = await this.buildUserContent(options);
-    const systemBase = options.systemPrompt ?? DEFAULT_SYSTEM;
+    let systemBase = options.systemPrompt ?? DEFAULT_SYSTEM;
+    if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
     const memBlock = await this.formatMemoryInject();
     const messages: ChatMessage[] = [
       { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
@@ -219,6 +241,7 @@ export class AgentLoop {
     let usage = ZERO;
     let steps = 0;
     let finalText = "";
+    const pageTemplates = new PageTemplateCache();
 
     for (let step = 0; step < maxSteps; step += 1) {
       if (options.signal?.aborted) {
@@ -289,10 +312,12 @@ export class AgentLoop {
         }
 
         const args = parseToolArguments(call.function.arguments);
+        const modeNow = resolveApprovalMode();
+        const sensitive = SENSITIVE_TOOLS.has(call.function.name);
         const allowed = await this.approve(
           call,
           args,
-          approvalMode,
+          modeNow,
           options.approvalModel ?? workerModel,
           emit,
           options.signal,
@@ -300,6 +325,7 @@ export class AgentLoop {
             usage = sumUsage(usage, u);
           },
         );
+        const decision = approvalDecisionFor(modeNow, allowed, sensitive);
         if (!allowed) {
           const denied = { ok: false, error: "denied by user / policy" };
           emit({
@@ -308,6 +334,8 @@ export class AgentLoop {
             args,
             result: denied,
             toolCallId: call.id,
+            approvalMode: modeNow,
+            approvalDecision: decision,
           });
           messages.push({
             role: "tool",
@@ -330,6 +358,9 @@ export class AgentLoop {
           options.connectors,
           options.attachments,
           options.views,
+          { approvalMode: modeNow, approvalDecision: decision },
+          budgetMode,
+          pageTemplates,
         );
         messages.push({
           role: "tool",
@@ -487,6 +518,12 @@ export class AgentLoop {
     connectors?: ConnectorBundle,
     attachments?: AttachmentStore,
     views?: ViewStore,
+    approvalMeta?: {
+      approvalMode: ApprovalMode;
+      approvalDecision: NonNullable<AgentEvent["approvalDecision"]>;
+    },
+    budgetMode: AgentBudgetMode = "normal",
+    pageTemplates?: PageTemplateCache,
   ): Promise<unknown> {
     const name = call.function.name;
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
@@ -750,20 +787,62 @@ export class AgentLoop {
       } else if (name === "scrape_catalog") {
         result = await this.scrapeCatalog(args, workerModel, emit, onUsage);
       } else {
-        const req = toolArgsToContentRequest(name, args);
+        let toolArgs = args;
+        if (name === "get_page" && budgetMode === "budget") {
+          toolArgs = {
+            ...args,
+            mode: args.mode ?? "snippet",
+            maxChars:
+              typeof args.maxChars === "number"
+                ? args.maxChars
+                : defaultGetPageMaxChars(budgetMode),
+          };
+        }
+        const req = toolArgsToContentRequest(name, toolArgs);
         if (!req) {
           result = { ok: false, error: `invalid args for ${name}` };
         } else {
           result = await this.browser.runContent(req);
+          if (
+            pageTemplates &&
+            result &&
+            typeof result === "object" &&
+            (result as { ok?: boolean }).ok &&
+            (name === "page_digest" ||
+              (name === "get_page" && toolArgs.mode === "structure"))
+          ) {
+            const data = (result as { data?: unknown }).data;
+            if (data && typeof data === "object") {
+              (result as { data: unknown }).data = pageTemplates.annotate(
+                data as Record<string, unknown>,
+              );
+            }
+          }
         }
       }
 
-      emit({ type: "tool_result", tool: name, args, result, toolCallId: call.id });
+      emit({
+        type: "tool_result",
+        tool: name,
+        args,
+        result,
+        toolCallId: call.id,
+        approvalMode: approvalMeta?.approvalMode,
+        approvalDecision: approvalMeta?.approvalDecision,
+      });
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       const result = { ok: false, error: msg };
-      emit({ type: "tool_result", tool: name, args, result, toolCallId: call.id });
+      emit({
+        type: "tool_result",
+        tool: name,
+        args,
+        result,
+        toolCallId: call.id,
+        approvalMode: approvalMeta?.approvalMode,
+        approvalDecision: approvalMeta?.approvalDecision,
+      });
       return result;
     }
   }
@@ -777,12 +856,30 @@ export class AgentLoop {
     const intent = String(args.intent ?? "");
     const schemaHint = args.schema_hint != null ? String(args.schema_hint) : "";
     let text = typeof args.text === "string" ? args.text : "";
+    let pageSource: "text" | "page_digest" | "get_page" = "text";
     if (args.use_page || !text.trim()) {
-      const page = await this.browser.runContent({ op: "get_page" });
-      const data = page.data as { text?: string; title?: string; url?: string } | undefined;
-      text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 14_000);
+      const digest = await this.browser.runContent({ op: "page_digest" });
+      if (digest.ok && digest.data) {
+        pageSource = "page_digest";
+        text = JSON.stringify(digest.data).slice(0, 10_000);
+      } else {
+        const page = await this.browser.runContent({
+          op: "get_page",
+          mode: "snippet",
+          maxChars: 4_000,
+        });
+        pageSource = "get_page";
+        const data = page.data as { text?: string; title?: string; url?: string } | undefined;
+        text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 10_000);
+      }
     }
-    if (!text.trim()) return { ok: false, error: "no text to parse" };
+    if (!text.trim()) {
+      return {
+        ok: false,
+        error: "no text to parse",
+        meta: { workerModel, source: pageSource, inputChars: 0, fallback: true },
+      };
+    }
 
     emit({ type: "status", message: `Worker parse (${workerModel})…` });
     const result = await this.llm.chat({
@@ -799,8 +896,27 @@ export class AgentLoop {
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "worker" });
-    const parsed = parseJsonLoose(result.content ?? "{}");
-    return { ok: true, model: workerModel, data: parsed };
+    const parsed = parseJsonLoose(result.content ?? "{}") as {
+      rows?: unknown;
+      notes?: string;
+    };
+    const failed =
+      parsed &&
+      typeof parsed === "object" &&
+      "notes" in parsed &&
+      String(parsed.notes).includes("parse_failed");
+    return {
+      ok: !failed,
+      model: workerModel,
+      data: parsed,
+      meta: {
+        workerModel,
+        source: pageSource,
+        inputChars: text.length,
+        fallback: failed === true,
+        notes: typeof parsed?.notes === "string" ? parsed.notes : undefined,
+      },
+    };
   }
 
   private async saveSiteProfile(args: Record<string, unknown>): Promise<unknown> {

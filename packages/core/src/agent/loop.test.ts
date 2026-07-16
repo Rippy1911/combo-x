@@ -377,6 +377,86 @@ describe("AgentLoop", () => {
     expect(roles.filter((r) => r === "user").length).toBeGreaterThanOrEqual(1);
   });
 
+  it("emits approvalDecision on sensitive tool_result", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://example.com" }),
+          },
+        ],
+      },
+      { content: "ok" },
+    ]);
+    const decisions: Array<string | undefined> = [];
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "go",
+      approvalMode: "auto_all",
+      onEvent: (e) => {
+        if (e.type === "tool_result") decisions.push(e.approvalDecision);
+      },
+    });
+    expect(decisions).toContain("auto_all");
+  });
+
+  it("mid-run Auto-approve via getApprovalMode skips later prompts", async () => {
+    let mode: "ask" | "auto_all" = "ask";
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://a.example" }),
+          },
+        ],
+      },
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "2",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://b.example" }),
+          },
+        ],
+      },
+      { content: "Done." },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    let approvals = 0;
+    await agent.run({
+      model: "mock",
+      userMessage: "go twice",
+      approvalMode: "ask",
+      getApprovalMode: () => mode,
+      onEvent: (e) => {
+        if (e.type === "tool_approval") {
+          approvals += 1;
+          mode = "auto_all";
+          e.resolve?.(true);
+        }
+      },
+    });
+    expect(approvals).toBe(1);
+    expect(browser.navigate).toHaveBeenCalledTimes(2);
+  });
+
   it("ask deny blocks navigate (T-Approve-1)", async () => {
     const llm = mockLlm([
       {

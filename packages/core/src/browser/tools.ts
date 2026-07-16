@@ -8,7 +8,23 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab: title, URL, and visible text (truncated). Prefer get_interactive or query_all for structured scrape.",
+        "Read the active tab. Prefer page_digest in budget mode. mode=snippet|structure|full; maxChars caps text. Prefer extract/query_all for fields.",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["snippet", "structure", "full"] },
+          maxChars: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_digest",
+      description:
+        "Cheap page map: title, url, headings, EAN/catalog label hits, short main sample — NOT full nav chrome. Prefer this over get_page for PDPs/invoices.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -695,7 +711,16 @@ export function toolArgsToContentRequest(
 ): ContentRequest | null {
   switch (name) {
     case "get_page":
-      return { op: "get_page" };
+      return {
+        op: "get_page",
+        mode:
+          args.mode === "snippet" || args.mode === "structure" || args.mode === "full"
+            ? args.mode
+            : undefined,
+        maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
+      };
+    case "page_digest":
+      return { op: "page_digest" };
     case "get_links":
       return {
         op: "get_links",

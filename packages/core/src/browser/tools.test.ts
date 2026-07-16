@@ -8,6 +8,7 @@ describe("tool helpers", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "get_page",
+        "page_digest",
         "get_interactive",
         "click_index",
         "type_index",
@@ -61,7 +62,17 @@ describe("tool helpers", () => {
   });
 
   it("maps tool args to content requests", () => {
-    expect(toolArgsToContentRequest("get_page", {})).toEqual({ op: "get_page" });
+    expect(toolArgsToContentRequest("get_page", {})).toEqual({
+      op: "get_page",
+      mode: undefined,
+      maxChars: undefined,
+    });
+    expect(toolArgsToContentRequest("get_page", { mode: "snippet", maxChars: 1000 })).toEqual({
+      op: "get_page",
+      mode: "snippet",
+      maxChars: 1000,
+    });
+    expect(toolArgsToContentRequest("page_digest", {})).toEqual({ op: "page_digest" });
     expect(toolArgsToContentRequest("click", { selector: "#x" })).toEqual({
       op: "click",
       selector: "#x",

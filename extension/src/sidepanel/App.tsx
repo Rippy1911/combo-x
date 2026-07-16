@@ -1,9 +1,11 @@
 import {
   AGENT_TOOLS,
+  ActionLogStore,
   AgentLoop,
   ArtifactStore,
   AttachmentStore,
   DEFAULT_MODEL,
+  DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
   MODEL_PRESETS,
   MemoryStore,
@@ -12,13 +14,18 @@ import {
   SessionStore,
   Vault,
   ViewStore,
+  extractTargetUrl,
   getProtocolVersion,
   grantAndIndex,
   leanHistory,
   normalizeModelId,
   parseAttachment,
   reindexSaved,
+  resultError,
+  resultOk,
+  summarizeResult,
   stripImageParts,
+  type AgentBudgetMode,
   type AgentEvent,
   type ApprovalMode,
   type AttachmentRecord,
@@ -41,6 +48,7 @@ import {
   type PreviewPayload,
 } from "./PreviewDrawer";
 import { ToolChip, type ToolChipData } from "./ToolChip";
+import { ActivityPanel } from "./ActivityPanel";
 import { ViewsPanel } from "./ViewsPanel";
 
 const KEY_LABEL = "openrouter_api_key";
@@ -51,8 +59,32 @@ const IF_PASS_LABEL = "ideaforge_password";
 const GH_TOKEN_LABEL = "github_token";
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
+const BUDGET_KEY = "combo_x_budget_mode";
+const RAG_EXCLUDE_KEY = "combo_x_rag_exclude";
 
-type TabId = "chat" | "sessions" | "views" | "settings" | "vault" | "tools" | "mcp";
+type TabId =
+  | "chat"
+  | "sessions"
+  | "views"
+  | "activity"
+  | "settings"
+  | "vault"
+  | "tools"
+  | "mcp";
+
+async function getActiveTabMeta(): Promise<{
+  url?: string;
+  title?: string;
+  tabId?: number;
+}> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab) return {};
+    return { url: tab.url, title: tab.title, tabId: tab.id };
+  } catch {
+    return {};
+  }
+}
 
 type UiTurn = {
   id: string;
@@ -88,7 +120,8 @@ function loadEnabledTools(): Set<string> {
       !saved.includes("rag_search") ||
       !saved.includes("list_attachments") ||
       !saved.includes("save_view") ||
-      !saved.includes("memory_list")
+      !saved.includes("memory_list") ||
+      !saved.includes("page_digest")
     ) {
       return new Set(ALL_TOOL_NAMES);
     }
@@ -112,6 +145,7 @@ export function App() {
   const attachments = useMemo(() => new AttachmentStore(), []);
   const views = useMemo(() => new ViewStore(), []);
   const artifacts = useMemo(() => new ArtifactStore(), []);
+  const actionLog = useMemo(() => new ActionLogStore(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profiles = useMemo<ProfileStore>(
     () => ({
@@ -150,6 +184,13 @@ export function App() {
   const [vaultLabels, setVaultLabels] = useState<string[]>([]);
   const [enabledTools, setEnabledTools] = useState<Set<string>>(() => loadEnabledTools());
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => loadApproval());
+  const [budgetMode, setBudgetMode] = useState<AgentBudgetMode>(() => {
+    const v = localStorage.getItem(BUDGET_KEY);
+    return v === "budget" ? "budget" : "normal";
+  });
+  const [ragExclude, setRagExclude] = useState(
+    () => localStorage.getItem(RAG_EXCLUDE_KEY) ?? DEFAULT_SKIP_DIRS.join(", "),
+  );
   const [pendingApproval, setPendingApproval] = useState<{
     tool: string;
     args: Record<string, unknown>;
@@ -177,6 +218,14 @@ export function App() {
   }, [approvalMode]);
 
   useEffect(() => {
+    localStorage.setItem(BUDGET_KEY, budgetMode);
+  }, [budgetMode]);
+
+  useEffect(() => {
+    localStorage.setItem(RAG_EXCLUDE_KEY, ragExclude);
+  }, [ragExclude]);
+
+  useEffect(() => {
     localStorage.setItem(TOOLS_STORAGE_KEY, JSON.stringify([...enabledTools]));
   }, [enabledTools]);
 
@@ -202,7 +251,7 @@ export function App() {
   const [ideaforgePass, setIdeaforgePass] = useState("");
   const [githubToken, setGithubToken] = useState("");
 
-  const applySetupPayload = useCallback((payload: unknown) => {
+  const applySetupPayload = useCallback((payload: unknown, opts?: { syncApproval?: boolean }) => {
     if (!payload || typeof payload !== "object") return false;
     const p = payload as {
       type?: string;
@@ -215,7 +264,11 @@ export function App() {
     if (Array.isArray(p.tools)) {
       setEnabledTools(new Set(p.tools.filter((n) => ALL_TOOL_NAMES.includes(n))));
     }
-    if (p.approvalMode === "ask" || p.approvalMode === "auto_llm" || p.approvalMode === "auto_all") {
+    // Do not stomp Settings/banner choice on focus re-sync (setup often defaults to ask).
+    if (
+      opts?.syncApproval &&
+      (p.approvalMode === "ask" || p.approvalMode === "auto_llm" || p.approvalMode === "auto_all")
+    ) {
       setApprovalMode(p.approvalMode);
     }
     if (p.ragPathHint != null) {
@@ -261,7 +314,8 @@ export function App() {
     });
     const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
       if (area === "local" && changes.combo_x_setup_payload?.newValue) {
-        applySetupPayload(changes.combo_x_setup_payload.newValue);
+        // Explicit Setup → Apply: sync approval too
+        applySetupPayload(changes.combo_x_setup_payload.newValue, { syncApproval: true });
       }
     };
     chrome.storage.onChanged.addListener(onStorage);
@@ -523,6 +577,8 @@ export function App() {
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       let turnUsage = ZERO;
       const toolMap = new Map<string, ToolChipData>();
+      const runId = crypto.randomUUID();
+      const sessionIdForLog = session.id;
 
       const flushTools = () => {
         const tools = [...toolMap.values()];
@@ -573,14 +629,34 @@ export function App() {
             event.result &&
             "error" in event.result &&
             String((event.result as { error?: string }).error).includes("denied");
+          const args = event.args ?? prev?.args ?? {};
           toolMap.set(id, {
             id,
             name: event.tool,
-            args: event.args ?? prev?.args ?? {},
+            args,
             result: event.result,
             status: denied ? "denied" : "done",
           });
           flushTools();
+          void (async () => {
+            const page = await getActiveTabMeta();
+            await actionLog.append({
+              tool: event.tool!,
+              args,
+              resultSummary: summarizeResult(event.result),
+              ok: resultOk(event.result),
+              approvalDecision: event.approvalDecision ?? "n/a",
+              approvalMode: event.approvalMode ?? approvalModeRef.current,
+              pageUrl: page.url,
+              pageTitle: page.title,
+              tabId: page.tabId,
+              targetUrl: extractTargetUrl(args),
+              sessionId: sessionIdForLog,
+              runId,
+              toolCallId: event.toolCallId,
+              error: resultError(event.result),
+            });
+          })();
         }
         if (event.type === "assistant_delta" && event.message != null) {
           setTurns((prev) =>
@@ -603,8 +679,9 @@ export function App() {
           signal: controller.signal,
           enabledTools: [...enabledTools],
           approvalMode: approvalModeRef.current,
+          getApprovalMode: () => approvalModeRef.current,
           approvalModel: normalizeModelId(workerModel),
-          maxSteps: 32,
+          budgetMode,
           rag,
           attachments,
           views,
@@ -662,7 +739,9 @@ export function App() {
     },
     [
       apiKey,
+      actionLog,
       attachments,
+      budgetMode,
       views,
       bridge,
       currentSession,
@@ -777,10 +856,11 @@ export function App() {
             ["chat", "Chat"],
             ["sessions", "Sessions"],
             ["views", "Views"],
+            ["activity", "Activity"],
             ["settings", "Settings"],
             ["vault", "Vault"],
             ["tools", "Tools"],
-            ["mcp", "Setup"],
+            ["mcp", "Workspace"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -1093,6 +1173,13 @@ export function App() {
         />
       ) : null}
 
+      {tab === "activity" ? (
+        <ActivityPanel
+          actionLog={actionLog}
+          onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
+        />
+      ) : null}
+
       {tab === "settings" ? (
         <div className="panel">
           <h2>Settings</h2>
@@ -1105,10 +1192,133 @@ export function App() {
             <option value="auto_llm">Auto (LLM judges intent)</option>
             <option value="auto_all">Auto-approve all (this browser)</option>
           </select>
+          <label className="hint">Token budget</label>
+          <select
+            value={budgetMode}
+            onChange={(e) => setBudgetMode(e.target.value as AgentBudgetMode)}
+          >
+            <option value="normal">Normal — full tools / 32 steps</option>
+            <option value="budget">
+              Budget — page_digest + worker parse, 16 steps, short get_page
+            </option>
+          </select>
           <p className="hint wrap">
-            Sensitive: click, type, click_index, type_index, open_tab, navigate, go_back, close_tab.
-            Orchestrator plans; worker runs <code>parse_data</code>.
+            Budget mode: prefer <code>page_digest</code> / <code>extract</code> /{" "}
+            <code>parse_data</code> (FoodWell PDP EAN pairs, invoice→scrape). Avoid full{" "}
+            <code>get_page</code> dumps.
           </p>
+          <h3>Device RAG (local folders)</h3>
+          <p className="hint wrap">
+            Grant one or more folders on this Mac. Built-in skips:{" "}
+            <code>node_modules</code>, <code>.git</code>, <code>dist</code>, …. Extra excludes
+            below (comma-separated dir names).
+          </p>
+          <p className="hint wrap">
+            Index:{" "}
+            <code>
+              {ragMeta
+                ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
+                : "(none)"}
+            </code>
+          </p>
+          <label className="hint">Extra exclude dirs</label>
+          <input
+            value={ragExclude}
+            onChange={(e) => setRagExclude(e.target.value)}
+            placeholder="node_modules, .git, dist, coverage"
+          />
+          <div className="row">
+            <button
+              type="button"
+              className="primary"
+              disabled={ragBusy || locked}
+              onClick={() =>
+                void (async () => {
+                  setRagBusy(true);
+                  setRagMsg("Pick a folder…");
+                  try {
+                    const excludeDirs = ragExclude
+                      .split(/[,\n]/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    const meta = await grantAndIndex(
+                      rag,
+                      (p) => setRagMsg(p.message ?? p.phase),
+                      { append: false, excludeDirs },
+                    );
+                    setRagMeta(meta);
+                    setRagPathHint(meta.folderName);
+                    localStorage.setItem("combo_x_rag_path_hint", meta.folderName);
+                    setEnabledTools((prev) => {
+                      const next = new Set(prev);
+                      next.add("rag_search");
+                      next.add("rag_read_file");
+                      next.add("rag_status");
+                      return next;
+                    });
+                    setRagMsg(`Ready — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
+                  } catch (e) {
+                    setRagMsg(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setRagBusy(false);
+                  }
+                })()
+              }
+            >
+              Grant folder + index
+            </button>
+            <button
+              type="button"
+              disabled={ragBusy || locked}
+              onClick={() =>
+                void (async () => {
+                  setRagBusy(true);
+                  setRagMsg("Add folder…");
+                  try {
+                    const excludeDirs = ragExclude
+                      .split(/[,\n]/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    const meta = await grantAndIndex(
+                      rag,
+                      (p) => setRagMsg(p.message ?? p.phase),
+                      { append: true, excludeDirs },
+                    );
+                    setRagMeta(meta);
+                    setRagMsg(`Added — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
+                  } catch (e) {
+                    setRagMsg(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setRagBusy(false);
+                  }
+                })()
+              }
+            >
+              Add another folder
+            </button>
+            <button
+              type="button"
+              disabled={ragBusy || locked}
+              onClick={() =>
+                void (async () => {
+                  setRagBusy(true);
+                  setRagMsg("Reindexing…");
+                  try {
+                    const meta = await reindexSaved(rag, (p) => setRagMsg(p.message ?? p.phase));
+                    setRagMeta(meta);
+                    setRagMsg(`Reindexed — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
+                  } catch (e) {
+                    setRagMsg(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setRagBusy(false);
+                  }
+                })()
+              }
+            >
+              Reindex all
+            </button>
+          </div>
+          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
           <label className="hint">OpenRouter API key</label>
           <input
             type="password"
@@ -1269,90 +1479,35 @@ export function App() {
 
       {tab === "mcp" ? (
         <div className="panel">
-          <h2>Device RAG + connectors</h2>
+          <h2>Healthtree workspace</h2>
           <p className="hint wrap">
-            Grant a local folder (File System Access). Agent tools: <code>rag_search</code>,{" "}
-            <code>rag_read_file</code>. IdeaForge + GitHub are live when credentials are in Settings.
+            Your Combo-X profile for FoodWell B2B scrapes, invoice PDF → carton/retail EAN, IdeaForge /
+            GitHub. Folder RAG + excludes live under Settings (Grant / Add folder). Prefer Budget mode
+            for multi-PDP EAN mapping.
           </p>
           <p className="hint wrap">
-            Index:{" "}
+            RAG:{" "}
             <code>
               {ragMeta
                 ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
-                : "(none)"}
+                : "(none — grant in Settings)"}
             </code>
-            {ragMeta?.indexedAt ? (
-              <>
-                <br />
-                Last indexed: {new Date(ragMeta.indexedAt).toLocaleString()}
-              </>
-            ) : null}
           </p>
+          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
           <div className="row">
-            <button
-              type="button"
-              className="primary"
-              disabled={ragBusy || locked}
-              onClick={() =>
-                void (async () => {
-                  setRagBusy(true);
-                  setRagMsg("Pick a folder…");
-                  try {
-                    const meta = await grantAndIndex(rag, (p) => setRagMsg(p.message ?? p.phase));
-                    setRagMeta(meta);
-                    setRagPathHint(meta.folderName);
-                    localStorage.setItem("combo_x_rag_path_hint", meta.folderName);
-                    setEnabledTools((prev) => {
-                      const next = new Set(prev);
-                      next.add("rag_search");
-                      next.add("rag_read_file");
-                      next.add("rag_status");
-                      return next;
-                    });
-                    setRagMsg(`Ready — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
-                  } catch (e) {
-                    setRagMsg(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setRagBusy(false);
-                  }
-                })()
-              }
-            >
-              Grant folder + index
+            <button type="button" className="primary" onClick={() => setTab("settings")}>
+              Open Settings (RAG + Budget)
             </button>
             <button
               type="button"
-              disabled={ragBusy || locked}
-              onClick={() =>
-                void (async () => {
-                  setRagBusy(true);
-                  setRagMsg("Reindexing…");
-                  try {
-                    const meta = await reindexSaved(rag, (p) => setRagMsg(p.message ?? p.phase));
-                    setRagMeta(meta);
-                    setRagMsg(`Reindexed — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
-                  } catch (e) {
-                    setRagMsg(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setRagBusy(false);
-                  }
-                })()
-              }
+              onClick={() => {
+                const url = chrome.runtime.getURL("setup/index.html");
+                void chrome.tabs.create({ url });
+              }}
             >
-              Reindex
+              Open workspace setup page
             </button>
           </div>
-          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
-          <button
-            type="button"
-            className="primary"
-            onClick={() => {
-              const url = chrome.runtime.getURL("setup/index.html");
-              void chrome.tabs.create({ url });
-            }}
-          >
-            Open setup page
-          </button>
           {setupMsg ? <p className="hint wrap">{setupMsg}</p> : null}
           <p className="hint wrap">
             Label: <code>{ragPathHint || "(none)"}</code>
@@ -1363,7 +1518,7 @@ export function App() {
             {githubToken ? "token set" : "missing"}
           </p>
           <p className="hint wrap">
-            See <code>docs/LOCAL_RAG.md</code>
+            See <code>docs/LOCAL_RAG.md</code> · <code>docs/BUDGET.md</code>
           </p>
         </div>
       ) : null}

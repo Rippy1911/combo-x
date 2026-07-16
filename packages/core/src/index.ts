@@ -71,12 +71,28 @@ export type { RagChunkRow, RagMeta, IndexedFile } from "./rag/store.js";
 export {
   grantAndIndex,
   reindexSaved,
+  reindexAll,
   indexDirectory,
   pickDirectory,
   ensureDirPermission,
   shouldIndexFile,
+  DEFAULT_SKIP_DIRS,
 } from "./rag/folder.js";
-export type { IndexProgress } from "./rag/folder.js";
+export type { IndexProgress, IndexOptions } from "./rag/folder.js";
+export {
+  BUDGET_MAX_STEPS,
+  BUDGET_GET_PAGE_CHARS,
+  resolveMaxSteps,
+  defaultGetPageMaxChars,
+  BUDGET_SYSTEM_ADDON,
+} from "./agent/budget.js";
+export type { AgentBudgetMode } from "./agent/budget.js";
+export {
+  PageTemplateCache,
+  pathKindFromUrl,
+  templateKey,
+} from "./agent/pageTemplateCache.js";
+export type { PageTemplateEntry } from "./agent/pageTemplateCache.js";
 export { chunkText, RAG_DEFAULT_CHUNK_SIZE } from "./rag/chunk.js";
 export { hybridScore, mockVector, tokenize } from "./rag/embed.js";
 
@@ -124,3 +140,13 @@ export {
   inspectStore,
 } from "./local/idbInspect.js";
 export type { InspectRow } from "./local/idbInspect.js";
+
+export {
+  ActionLogStore,
+  summarizeResult,
+  extractTargetUrl,
+  resultOk,
+  resultError,
+  approvalDecisionFor,
+} from "./local/actionLog.js";
+export type { ActionLogEntry, ActionApprovalDecision } from "./local/actionLog.js";
