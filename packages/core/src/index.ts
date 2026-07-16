@@ -60,6 +60,9 @@ export type { AttachmentKind, ParseResult } from "./attachments/parse.js";
 export { MemoryStore, rankMemories } from "./memory/store.js";
 export type { MemoryEntry, MemoryKind, MemoryScope } from "./memory/store.js";
 
+export { SkillStore, seedSkillDefinitions } from "./skills/store.js";
+export type { Skill, SkillScope } from "./skills/store.js";
+
 export {
   AGENT_TOOLS,
   parseToolArguments,
@@ -134,6 +137,7 @@ export { githubRestTemplate } from "./connectors/templates.js";
 export { AgentProfileStore, resolveAgentProfile } from "./agents/profiles.js";
 export type {
   AgentProfile,
+  AgentToolMode,
   ResolvedAgentProfile,
   ToolAllowlist,
   ApprovalMode as AgentProfileApprovalMode,
@@ -149,6 +153,19 @@ export type { ToolCatalogEntry, ToolGroup } from "./tools/catalog.js";
 
 export { CORE_TOOL_NAMES, pickToolsForGoal } from "./tools/pickTools.js";
 export type { ToolPickerLlm } from "./tools/pickTools.js";
+
+export {
+  ALWAYS_ON_TOOL_NAMES,
+  SKILL_GATED_TOOL_NAMES,
+  SKILL_META_TOOLS,
+  TOOL_PACKS,
+  isAlwaysOnTool,
+  isSkillGatedTool,
+  packForTool,
+  initialActiveTools,
+  unlockFromHints,
+} from "./tools/gating.js";
+export type { ToolPackId } from "./tools/gating.js";
 
 export { UsageStore, providerFromModel } from "./usage/store.js";
 export type {

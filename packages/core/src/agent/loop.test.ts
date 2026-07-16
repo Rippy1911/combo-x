@@ -422,7 +422,7 @@ describe("AgentLoop", () => {
     });
     const agent = new AgentLoop(llm, stubBrowser(), memory);
     await agent.run({ model: "mock", userMessage: "hi" });
-    expect(seenSystem).toMatch(/USER MEMORIES/);
+    expect(seenSystem).toMatch(/AGENT MEMORIES/);
     expect(seenSystem).toMatch(/Anita prefers morning calls/);
   });
 
@@ -756,9 +756,15 @@ describe("AgentLoop", () => {
       model: "mock",
       userMessage: "tabs",
       enabledTools: ["list_tabs", "get_page"],
+      toolMode: "static",
       maxSteps: 3,
     });
-    expect(filterSpy).toHaveBeenCalledTimes(1);
+    // Schemas are rebuilt each orchestrator step (skill unlocks may expand mid-run).
+    expect(filterSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const call of filterSpy.mock.results) {
+      const tools = call.value as typeof AGENT_TOOLS;
+      expect(tools.every((t) => ["list_tabs", "get_page"].includes(t.function.name))).toBe(true);
+    }
     filterSpy.mockRestore();
   });
 

@@ -600,6 +600,61 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "skill_search",
+      description:
+        "Search on-demand skills (playbooks). Returns name/description/toolHints only — does NOT unlock tools. Call skill_read to load body and unlock gated tools for this run.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "skill_read",
+      description:
+        "Load a skill body by id and unlock its toolHints (skill-gated tools) for the rest of this user turn. Skills are never auto-injected into the system prompt.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string", description: "Optional name lookup if id unknown" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "skill_save",
+      description: "Create or update a skill (playbook). scope=global|agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          body: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+          scope: { type: "string", enum: ["global", "agent"] },
+          agentId: { type: "string" },
+          toolHints: { type: "array", items: { type: "string" } },
+        },
+        required: ["name", "description", "body"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "save_site_profile",
       description:
         "Save a site login + scrape recipe to the encrypted vault as site_profile:<name>. Set up once, then login/scrape_catalog reuse it without re-entering. Example: {name:'foodwell', loginUrl, username, password, usernameSelector, passwordSelector, submitSelector, selector, nextSelector|nextText, intent}.",
@@ -893,18 +948,25 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "create_agent",
       description:
-        "Create a reusable agent profile (model, tools, budget). Auto-picks tools from goal when autoPickTools is true.",
+        "Create a reusable agent profile. Prefer skill_gated (default when skills installed); autoPickTools true builds a static fat allowlist for expensive orch.",
       parameters: {
         type: "object",
         properties: {
           name: { type: "string" },
-          goal: { type: "string", description: "Used for auto tool picking" },
+          goal: { type: "string", description: "Used for auto tool picking when autoPickTools is true" },
           systemPrompt: { type: "string" },
           orchestratorModel: { type: "string" },
           workerModel: { type: "string" },
           budgetMode: { type: "string", enum: ["normal", "budget"] },
           maxSteps: { type: "number" },
-          autoPickTools: { type: "boolean", description: "Default true when goal provided" },
+          toolMode: {
+            type: "string",
+            enum: ["skill_gated", "static"],
+          },
+          autoPickTools: {
+            type: "boolean",
+            description: "Default false when skills installed; true runs pickToolsForGoal",
+          },
         },
         required: ["name"],
         additionalProperties: false,

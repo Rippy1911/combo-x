@@ -1,9 +1,11 @@
 # Combo-X Architecture
 
-**Version:** 1.3.0 (`feat/v0.9-budget-activity-rag`)  
+**Version:** 1.4.0 (`feat/v0.9-budget-activity-rag`)  
 **Stack:** Chrome MV3 extension · React side panel · `@combo-x/core` (shared logic) · OpenRouter tool-calling · IndexedDB local-first stores
 
-Combo-X is a **local-first browser agent**: the orchestrator LLM plans steps, calls tools, and the extension executes DOM/media/API work on the user's machine. BYOK OpenRouter. v1.3 adds browser preview, turn edit, stream/full badges + per-turn context inspect, `save_memory` (memories injected once per user turn, not mid-stream). v1.2 page extensions; v1.1 agentic control / sub-agents.
+Combo-X is a **local-first browser agent**: the orchestrator LLM plans steps, calls tools, and the extension executes DOM/media/API work on the user's machine. BYOK OpenRouter.
+
+**Memory vs Skills (v1.4):** Memories (global + active agent) are **always prepended** once per user turn. Skills are **on-demand** (`skill_search` → `skill_read`) and unlock SKILL_GATED tool packs for that run. Default `toolMode: skill_gated`; `static` + `pickToolsForGoal` remain for expensive orch profiles.
 
 ---
 

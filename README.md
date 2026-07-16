@@ -2,7 +2,7 @@
 
 Local-first **browser agent** Chrome extension (MV3).
 
-**Current: v1.3.1** — OpenRouter native cost + searchable model picker; in/out token summary; agent `save_memory` (global/agent, always prepended); responsive drag-reorder tabs.
+**Current: v1.4.0** — Libraries hub (Memory / Skills / Tools / KB / Integrations); skill-gated tools + seed packs; optional auto-pick for static/expensive orch; Sessions 2-line previews; opt-in LIVE LLM eval (`pnpm test:llm-eval`).
 
 **Architecture:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — mermaid diagrams for loop, tools, sub-agents, memories, usage.
 

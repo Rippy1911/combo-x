@@ -182,6 +182,44 @@ export class MemoryStore {
     return [...global, ...agentScoped].slice(0, limit);
   }
 
+  async get(id: string): Promise<MemoryEntry | null> {
+    await this.getDb();
+    const row = await idbReq<MemoryEntry | undefined>(this.store("readonly").get(id));
+    return row ? normalizeEntry(row) : null;
+  }
+
+  async update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, "text" | "tags" | "kind" | "scope" | "agentId">>,
+  ): Promise<MemoryEntry> {
+    const existing = await this.get(id);
+    if (!existing) throw new Error(`memory not found: ${id}`);
+    const scope: MemoryScope =
+      patch.scope === "agent" || patch.scope === "global" ? patch.scope : existing.scope;
+    const agentId =
+      scope === "agent" ? (patch.agentId ?? existing.agentId)?.trim() : undefined;
+    if (scope === "agent" && !agentId) throw new Error("agentId required when scope is agent");
+    const entry: MemoryEntry = {
+      ...existing,
+      text: patch.text != null ? patch.text.trim() : existing.text,
+      tags: patch.tags ?? existing.tags,
+      kind: patch.kind ?? existing.kind,
+      scope,
+      agentId,
+    };
+    if (!entry.text) throw new Error("memory text must not be empty");
+    await idbReq(this.store("readwrite").put(entry));
+    return entry;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const existing = await this.get(id);
+    if (!existing) return false;
+    await this.getDb();
+    await idbReq(this.store("readwrite").delete(id));
+    return true;
+  }
+
   async clear(): Promise<void> {
     await this.getDb();
     await idbReq(this.store("readwrite").clear());

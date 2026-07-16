@@ -5,6 +5,11 @@ export type TabDef = { id: string; label: string };
 const ORDER_KEY = "combo_x_tab_order_v1";
 const MORE_RESERVE_PX = 76;
 
+function migrateTabId(id: string): string {
+  if (id === "views" || id === "tools" || id === "mcp") return "libraries";
+  return id;
+}
+
 function loadOrder(defaults: string[]): string[] {
   try {
     const raw = localStorage.getItem(ORDER_KEY);
@@ -12,7 +17,11 @@ function loadOrder(defaults: string[]): string[] {
     const parsed = JSON.parse(raw) as string[];
     if (!Array.isArray(parsed)) return defaults;
     const known = new Set(defaults);
-    const ordered = parsed.filter((id) => known.has(id));
+    const ordered: string[] = [];
+    for (const id of parsed.map(migrateTabId)) {
+      if (!known.has(id) || ordered.includes(id)) continue;
+      ordered.push(id);
+    }
     for (const id of defaults) {
       if (!ordered.includes(id)) ordered.push(id);
     }

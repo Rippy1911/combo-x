@@ -6,6 +6,9 @@ export type AgentBudgetMode = "normal" | "budget";
 
 export type ApprovalMode = "ask" | "auto_llm" | "auto_all";
 
+/** skill_gated = lean ALWAYS_ON + unlock via skill_read; static = attach full allowlist every turn. */
+export type AgentToolMode = "skill_gated" | "static";
+
 export interface AgentProfile {
   id: string;
   name: string;
@@ -13,6 +16,8 @@ export interface AgentProfile {
   orchestratorModel?: string;
   workerModel?: string;
   toolAllowlist: ToolAllowlist;
+  /** Default skill_gated when skills exist; static keeps pickToolsForGoal / fat allowlist. */
+  toolMode?: AgentToolMode;
   connectorIds: string[];
   budgetMode?: AgentBudgetMode;
   approvalMode?: ApprovalMode;

@@ -3,7 +3,6 @@ import {
   ActionLogStore,
   AgentLoop,
   AgentProfileStore,
-  ArtifactStore,
   AttachmentStore,
   ConnectorStore,
   DEFAULT_MODEL,
@@ -13,6 +12,7 @@ import {
   OpenRouterClient,
   RagStore,
   SessionStore,
+  SkillStore,
   Vault,
   ViewStore,
   extractTargetUrl,
@@ -59,14 +59,13 @@ import {
 import { ToolChip, type ToolChipData } from "./ToolChip";
 import { ActivityPanel } from "./ActivityPanel";
 import { SettingsPanel } from "./SettingsPanel";
-import { ViewsPanel } from "./ViewsPanel";
+import { LibrariesPanel, type LibSubNav } from "./LibrariesPanel";
 import { UsagePanel } from "./UsagePanel";
 import { TasksPanel } from "./TasksPanel";
 import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
 import { PageExtensionsPanel } from "./PageExtensionsPanel";
 import { ModelPicker } from "./ModelPicker";
 import { TabBar } from "./TabBar";
-import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const KEY_LABEL = "openrouter_api_key";
 const MODEL_LABEL = "openrouter_model";
@@ -80,28 +79,24 @@ const LAST_SESSION_KEY = "combo_x_last_session_id";
 type TabId =
   | "chat"
   | "sessions"
-  | "views"
+  | "libraries"
   | "activity"
   | "usage"
   | "tasks"
   | "pageext"
   | "settings"
-  | "vault"
-  | "tools"
-  | "mcp";
+  | "vault";
 
 const ALL_TABS: Array<{ id: TabId; label: string }> = [
   { id: "chat", label: "Chat" },
   { id: "sessions", label: "Sessions" },
-  { id: "views", label: "Views" },
+  { id: "libraries", label: "Libraries" },
   { id: "activity", label: "Activity" },
   { id: "usage", label: "Usage" },
   { id: "tasks", label: "Tasks" },
   { id: "pageext", label: "Page ext" },
   { id: "settings", label: "Settings" },
   { id: "vault", label: "Vault" },
-  { id: "tools", label: "Tools" },
-  { id: "mcp", label: "Workspace" },
 ];
 
 async function getActiveTabMeta(): Promise<{
@@ -189,11 +184,11 @@ function loadApproval(): ApprovalMode {
 export function App() {
   const vault = useMemo(() => new Vault(), []);
   const memory = useMemo(() => new MemoryStore(), []);
+  const skills = useMemo(() => new SkillStore(), []);
   const sessions = useMemo(() => new SessionStore(), []);
   const rag = useMemo(() => new RagStore(), []);
   const attachments = useMemo(() => new AttachmentStore(), []);
   const views = useMemo(() => new ViewStore(), []);
-  const artifacts = useMemo(() => new ArtifactStore(), []);
   const actionLog = useMemo(() => new ActionLogStore(), []);
   const agentProfiles = useMemo(() => new AgentProfileStore(), []);
   const usageStore = useMemo(() => new UsageStore(), []);
@@ -230,6 +225,7 @@ export function App() {
   const [customModel, setCustomModel] = useState("");
   const [customWorkerModel, setCustomWorkerModel] = useState("");
   const [tab, setTab] = useState<TabId>("chat");
+  const [libSubnav, setLibSubnav] = useState<LibSubNav>("memory");
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<UiTurn[]>([]);
   const [running, setRunning] = useState(false);
@@ -293,8 +289,8 @@ export function App() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, status, pendingApproval]);
 
-  const [setupMsg, setSetupMsg] = useState("");
-  const [ragPathHint, setRagPathHint] = useState(
+  const [, setSetupMsg] = useState("");
+  const [, setRagPathHint] = useState(
     () => localStorage.getItem("combo_x_rag_path_hint") ?? "",
   );
   const [, setConnectors] = useState<string[]>(() => {
@@ -307,7 +303,7 @@ export function App() {
   const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentList, setAgentList] = useState<AgentProfile[]>([]);
-  const [connectorCount, setConnectorCount] = useState(0);
+  const [, setConnectorCount] = useState(0);
 
   const applySetupPayload = useCallback((payload: unknown, opts?: { syncApproval?: boolean }) => {
     if (!payload || typeof payload !== "object") return false;
@@ -938,6 +934,8 @@ export function App() {
           maxSteps: runMaxSteps,
           systemPrompt: activeProfile?.systemPrompt,
           enabledTools: runTools,
+          toolMode: activeProfile?.toolMode,
+          skills,
           approvalMode: runApproval,
           getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
           approvalModel: runWorker,
@@ -1020,6 +1018,7 @@ export function App() {
       enabledTools,
       input,
       memory,
+      skills,
       model,
       pendingAttachments,
       workerModel,
@@ -1127,7 +1126,7 @@ export function App() {
           setTab(next);
           if (next === "sessions") void refreshSessions();
           if (next === "vault") void refreshVaultLabels();
-          if (next === "settings" || next === "mcp") {
+          if (next === "settings" || next === "libraries") {
             void connectorStore.list().then((list) => setConnectorCount(list.length));
             void agentProfiles.list().then(setAgentList);
           }
@@ -1352,7 +1351,10 @@ export function App() {
               onExport={(filename, text, mime) =>
                 void bridge.downloadText(filename, text, mime)
               }
-              onGoViews={() => setTab("views")}
+              onGoViews={() => {
+                setLibSubnav("tables");
+                setTab("libraries");
+              }}
             />
             <BrowserPreview open={browserOpen} onClose={() => setBrowserOpen(false)} />
           </div>
@@ -1555,7 +1557,10 @@ export function App() {
                   !!s.bookmarked || s.messages.some((m) => m.bookmarked && m.role !== "system")
                 );
               })
-              .map((s) => (
+              .map((s) => {
+                const lastUser = [...s.messages].reverse().find((m) => m.role === "user");
+                const lastAsst = [...s.messages].reverse().find((m) => m.role === "assistant");
+                return (
               <li key={s.id} className={s.bookmarked ? "session-row bookmarked" : "session-row"}>
                 <button type="button" className="linkish session-open" onClick={() => void loadSession(s.id)}>
                   <strong>
@@ -1563,6 +1568,22 @@ export function App() {
                     {s.title || "Untitled"}
                     {s.messages.some((m) => m.bookmarked) ? " · msgs bookmarked" : ""}
                   </strong>
+                  {lastUser?.content ? (
+                    <>
+                      <br />
+                      <span className="hint clamp-2">
+                        You: {lastUser.content}
+                      </span>
+                    </>
+                  ) : null}
+                  {lastAsst?.content ? (
+                    <>
+                      <br />
+                      <span className="hint clamp-2">
+                        Agent: {lastAsst.content}
+                      </span>
+                    </>
+                  ) : null}
                   <br />
                   <span className="hint">
                     {new Date(s.updatedAt).toLocaleString()} · {s.totalTokens} tok ·{" "}
@@ -1582,22 +1603,29 @@ export function App() {
                   Copy id
                 </button>
               </li>
-            ))}
+            );
+              })}
           </ul>
         </div>
       ) : null}
 
-      {tab === "views" ? (
-        <ViewsPanel
-          vault={vault}
-          views={views}
-          sessions={sessions}
-          attachments={attachments}
-          rag={rag}
+      {tab === "libraries" ? (
+        <LibrariesPanel
           memory={memory}
-          artifacts={artifacts}
+          skills={skills}
+          agents={agentProfiles}
+          enabledTools={enabledTools}
+          setEnabledTools={setEnabledTools}
+          rag={rag}
+          ragMeta={ragMeta}
+          setRagMeta={setRagMeta}
+          ragExclude={ragExclude}
+          setRagExclude={setRagExclude}
           vaultUnlocked={vault.isUnlocked()}
+          locked={locked}
           connectorStore={connectorStore}
+          views={views}
+          initialSubnav={libSubnav}
           onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
         />
       ) : null}
@@ -1686,107 +1714,6 @@ export function App() {
         </div>
       ) : null}
 
-      {tab === "tools" ? (
-        <div className="panel">
-          <h2>Tools</h2>
-          <p className="hint wrap">
-            {activeAgentId
-              ? `Synced with agent “${agentList.find((a) => a.id === activeAgentId)?.name ?? activeAgentId}”. Edits update global allowlist.`
-              : "Global tool allowlist — create an agent in Settings to pin per-workflow tools."}
-          </p>
-          <div className="row">
-            <button type="button" onClick={() => setEnabledTools(new Set(ALL_TOOL_NAMES))}>
-              Enable all
-            </button>
-            <button type="button" onClick={() => setEnabledTools(new Set())}>
-              Disable all
-            </button>
-          </div>
-          <div className="tool-groups">
-            {GROUP_ORDER.map((group) => (
-              <div key={group} className="tool-group">
-                <h3>{group}</h3>
-                <ul className="list tools">
-                  {TOOL_GROUPS[group]
-                    .filter((name) => ALL_TOOL_NAMES.includes(name))
-                    .map((name) => {
-                      const t = AGENT_TOOLS.find((x) => x.function.name === name);
-                      if (!t) return null;
-                      return (
-                        <li key={name}>
-                          <label className="tool-row">
-                            <input
-                              type="checkbox"
-                              checked={enabledTools.has(name)}
-                              onChange={() =>
-                                setEnabledTools((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(name)) next.delete(name);
-                                  else next.add(name);
-                                  return next;
-                                })
-                              }
-                            />
-                            <span>
-                              <strong>{name}</strong>
-                              <br />
-                              <span className="hint">{t.function.description}</span>
-                            </span>
-                          </label>
-                        </li>
-                      );
-                    })}
-                </ul>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {tab === "mcp" ? (
-        <div className="panel">
-          <h2>Workspace</h2>
-          <p className="hint wrap">
-            Local Combo-X status — RAG index, configured connectors, and active agent profile.
-          </p>
-          <ul className="list">
-            <li>
-              RAG:{" "}
-              {ragMeta?.chunkCount
-                ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
-                : "not indexed — grant in Settings → Device RAG"}
-            </li>
-            <li>Connectors: {connectorCount} configured</li>
-            <li>
-              Active agent:{" "}
-              {activeAgentId
-                ? agentList.find((a) => a.id === activeAgentId)?.name ?? activeAgentId
-                : "Default (global)"}
-            </li>
-            <li>
-              Budget: {budgetMode} · Approval: {approvalMode} · Tools enabled: {enabledTools.size}
-            </li>
-          </ul>
-          <div className="row">
-            <button type="button" className="primary" onClick={() => setTab("settings")}>
-              Open Settings
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const url = chrome.runtime.getURL("setup/index.html");
-                void chrome.tabs.create({ url });
-              }}
-            >
-              Open setup page
-            </button>
-          </div>
-          {setupMsg ? <p className="hint wrap">{setupMsg}</p> : null}
-          <p className="hint wrap">
-            Folder hint: <code>{ragPathHint || "(none)"}</code>
-          </p>
-        </div>
-      ) : null}
     </div>
   );
 }
