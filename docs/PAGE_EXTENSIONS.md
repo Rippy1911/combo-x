@@ -1,6 +1,6 @@
 # Page extensions (browser userscripts)
 
-**Shipped in v1.2** — MAIN-world inject, isolated IDB, agent-only bridge, full audit.
+**Shipped in v1.2 / hardened v1.3** — MAIN-world inject, isolated IDB, agent-only bridge with per-injection `bridgeToken`, `autoInject` opt-in (default off), overbroad URL patterns rejected, full audit.
 
 ## Isolation model
 
