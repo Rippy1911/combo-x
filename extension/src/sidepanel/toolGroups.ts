@@ -51,6 +51,7 @@ export const TOOL_GROUPS = {
   ],
   Memory: [
     "remember",
+    "save_memory",
     "recall",
     "memory_list",
     "save_bookmark",

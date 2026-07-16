@@ -98,6 +98,15 @@ export interface ProfileStore {
   save(profile: SiteProfile): Promise<void>;
 }
 
+export type RunContextSnapshot = {
+  systemPrompt: string;
+  memoryBlock: string;
+  toolNames: string[];
+  model: string;
+  /** How the first orchestrator call was delivered */
+  transport: "stream" | "full";
+};
+
 export interface AgentEvent {
   type:
     | "status"
@@ -107,7 +116,8 @@ export interface AgentEvent {
     | "assistant_delta"
     | "done"
     | "error"
-    | "usage";
+    | "usage"
+    | "run_context";
   message?: string;
   tool?: string;
   args?: Record<string, unknown>;
@@ -121,6 +131,8 @@ export interface AgentEvent {
   approvalMode?: ApprovalMode;
   /** allowed | denied | auto_all | auto_llm | n/a */
   approvalDecision?: "allowed" | "denied" | "auto_all" | "auto_llm" | "n/a";
+  /** Emitted once per user turn — system + memories (not re-sent mid-stream). */
+  runContext?: RunContextSnapshot;
 }
 
 /** Runtime for dynamic REST/MCP connectors (no hardcoded hosts). */
@@ -376,6 +388,7 @@ export class AgentLoop {
     const userContent = await this.buildUserContent(options);
     let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
     if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
+    // Memories loaded once per user turn (not re-fetched during streaming deltas).
     const memBlock = await this.formatMemoryInject();
     const messages: ChatMessage[] = [
       { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
@@ -389,17 +402,36 @@ export class AgentLoop {
     const pageTemplates = new PageTemplateCache();
 
     // undefined/null → all tools; [] → zero tools (Disable-all must not silently restore full set).
-    const enabledToolNames =
+    let enabledToolNames =
       options.enabledTools != null
         ? options.enabledTools
         : AGENT_TOOLS.map((t) => t.function.name);
 
+    // Enforce profile capability flags on the allowlist for this run.
+    if (resolvedProfile && !resolvedProfile.canSelfEdit) {
+      enabledToolNames = enabledToolNames.filter(
+        (n) => n !== "create_agent" && n !== "update_agent",
+      );
+    }
+    if (resolvedProfile && !resolvedProfile.canDelegate) {
+      enabledToolNames = enabledToolNames.filter((n) => n !== "spawn_subagent");
+    }
+
     // Full tool schemas are re-sent on every LLM call (OpenAI protocol).
     // Token savings come from a smaller allowlist (pickToolsForGoal / agent profile), not stripping mid-run.
-    const tools =
-      options.enabledTools != null
-        ? AGENT_TOOLS.filter((t) => options.enabledTools!.includes(t.function.name))
-        : AGENT_TOOLS;
+    const tools = AGENT_TOOLS.filter((t) => enabledToolNames.includes(t.function.name));
+
+    const preferStream = typeof this.llm.chatStreaming === "function";
+    emit({
+      type: "run_context",
+      runContext: {
+        systemPrompt: systemBase,
+        memoryBlock: memBlock,
+        toolNames: tools.map((t) => t.function.name),
+        model: orchestratorModel,
+        transport: preferStream ? "stream" : "full",
+      },
+    });
 
     const runCtx: RunContext = {
       nestingDepth,
@@ -851,11 +883,11 @@ export class AgentLoop {
             ? { ok: true, ...file }
             : { ok: false, error: `attachment not found: ${id}` };
         }
-      } else if (name === "remember") {
-        const text = String(args.text ?? "");
+      } else if (name === "remember" || name === "save_memory") {
+        const text = String(args.text ?? args.fact ?? "");
         const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
         const entry = await this.memory.remember({ text, tags, kind: "note" });
-        result = { saved: true, id: entry.id };
+        result = { ok: true, saved: true, id: entry.id };
       } else if (name === "recall") {
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : 5;
@@ -1091,9 +1123,17 @@ export class AgentLoop {
             filename: typeof args.filename === "string" ? args.filename : undefined,
           });
       } else if (name === "create_agent") {
-        result = await this.createAgent(args, runCtx, workerModel);
+        if (runCtx?.resolvedProfile && !runCtx.resolvedProfile.canSelfEdit) {
+          result = { ok: false, error: "canSelfEdit is false on active profile" };
+        } else {
+          result = await this.createAgent(args, runCtx, workerModel);
+        }
       } else if (name === "update_agent") {
-        result = await this.updateAgent(args, runCtx);
+        if (runCtx?.resolvedProfile && !runCtx.resolvedProfile.canSelfEdit) {
+          result = { ok: false, error: "canSelfEdit is false on active profile" };
+        } else {
+          result = await this.updateAgent(args, runCtx);
+        }
       } else if (name === "list_agents") {
         result = await this.listAgents(runCtx);
       } else if (name === "spawn_subagent") {

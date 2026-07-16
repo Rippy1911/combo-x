@@ -1,5 +1,6 @@
 import {
   PageExtensionStore,
+  isOverbroadPattern,
   runPageExtensionInMainWorld,
   urlMatches,
   type PageExtension,
@@ -20,6 +21,26 @@ function bridgeAllowed(
 
 const store = new PageExtensionStore();
 
+/** tabId:scriptId → bridgeToken for this navigation */
+const liveTokens = new Map<string, string>();
+
+function tokenKey(tabId: number | undefined, scriptId: string): string {
+  return `${tabId ?? "na"}:${scriptId}`;
+}
+
+function newBridgeToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function clearTokensForTab(tabId: number): void {
+  const prefix = `${tabId}:`;
+  for (const k of [...liveTokens.keys()]) {
+    if (k.startsWith(prefix)) liveTokens.delete(k);
+  }
+}
+
 function payloadBytes(value: unknown): number {
   try {
     return new TextEncoder().encode(JSON.stringify(value ?? null)).length;
@@ -31,12 +52,16 @@ function payloadBytes(value: unknown): number {
 export async function injectPageExtensionsForTab(opts: {
   tabId: number;
   scriptIds?: string[];
+  /** When true (auto-nav), only extensions with autoInject=true */
+  autoOnly?: boolean;
 }): Promise<{ ok: boolean; injected: string[]; errors: string[] }> {
   const tab = await chrome.tabs.get(opts.tabId);
   const url = tab.url ?? "";
   if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://")) {
     return { ok: false, injected: [], errors: ["unsupported url"] };
   }
+
+  clearTokensForTab(opts.tabId);
 
   let targets: PageExtension[] = [];
   if (opts.scriptIds?.length) {
@@ -46,6 +71,9 @@ export async function injectPageExtensionsForTab(opts: {
     }
   } else {
     targets = await store.listInjectableForUrl(url);
+    if (opts.autoOnly) {
+      targets = targets.filter((e) => e.autoInject === true);
+    }
   }
 
   const injected: string[] = [];
@@ -60,6 +88,11 @@ export async function injectPageExtensionsForTab(opts: {
       errors.push(`${ext.id}: url mismatch`);
       continue;
     }
+    if (ext.match.patterns.some(isOverbroadPattern)) {
+      errors.push(`${ext.id}: overbroad pattern blocked`);
+      continue;
+    }
+    const bridgeToken = newBridgeToken();
     try {
       const [{ result } = { result: undefined }] = await chrome.scripting.executeScript({
         target: { tabId: opts.tabId },
@@ -72,6 +105,7 @@ export async function injectPageExtensionsForTab(opts: {
             source: ext.source,
             exportChannels: ext.bridge?.exportChannels ?? [],
             allowStorage: !!ext.bridge?.allowStorage,
+            bridgeToken,
           },
         ],
       });
@@ -79,6 +113,7 @@ export async function injectPageExtensionsForTab(opts: {
       if (r && r.ok === false) {
         errors.push(`${ext.id}: ${r.error ?? "inject failed"}`);
       } else {
+        liveTokens.set(tokenKey(opts.tabId, ext.id), bridgeToken);
         injected.push(ext.id);
         await store.markInjected(ext.id, url, opts.tabId);
       }
@@ -98,6 +133,7 @@ export async function handlePageExtBridge(msg: {
   reqId?: string;
   pageUrl?: string;
   tabId?: number;
+  bridgeToken?: string;
 }): Promise<{
   ok: boolean;
   value?: unknown;
@@ -107,6 +143,10 @@ export async function handlePageExtBridge(msg: {
 }> {
   const ext = await store.get(msg.scriptId);
   if (!ext) return { ok: false, error: "unknown extension", reqId: msg.reqId };
+  const expected = liveTokens.get(tokenKey(msg.tabId, msg.scriptId));
+  if (!expected || !msg.bridgeToken || msg.bridgeToken !== expected) {
+    return { ok: false, error: "invalid bridge token", reqId: msg.reqId };
+  }
   const gate = bridgeAllowed(ext, msg.pageUrl);
   if (!gate.ok) return { ok: false, error: gate.error, reqId: msg.reqId };
   const bridge = ext.bridge!;

@@ -2,7 +2,7 @@
 
 Local-first **browser agent** Chrome extension (MV3).
 
-**Current: v1.2.0** — page extensions (MAIN-world userscripts, isolated store + agent bridge), agentic control, sub-agents, usage/tasks, Budget scrape, REST/MCP.
+**Current: v1.3.0** — browser preview, turn edit, last-session restore, stream/full badges + context inspect, `save_memory`, page-ext bridge tokens, nav overflow.
 
 **Architecture:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — mermaid diagrams for loop, tools, sub-agents, memories, usage.
 
@@ -15,7 +15,9 @@ Local-first **browser agent** Chrome extension (MV3).
 | **Sub-agents** (depth 1; UI strip; results to parent) | ✅ |
 | **Usage charts** (models/providers/tokens/actions/messages) | ✅ |
 | **Task tracking** (session + global) | ✅ |
-| **Page extensions** (MAIN inject, isolated IDB, bridge + audit) | ✅ |
+| **Page extensions** (MAIN inject, bridge token, autoInject opt-in) | ✅ |
+| **Browser preview** (polled tab mirror) | ✅ |
+| **Turn edit / context inspect / stream badge** | ✅ |
 | **REST + remote MCP connectors** | ✅ |
 | **Screenshots + tab recording** | ✅ |
 | **Progressive scrape tables** (Views IDB) | ✅ |

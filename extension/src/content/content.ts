@@ -20,12 +20,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 /**
  * Page extensions run in MAIN world and talk only via window.postMessage.
- * This isolated content script is the sole chrome.runtime speaker — pages never get chrome.*.
+ * bridgeToken is required — forgeable scriptId alone is rejected by the SW.
  */
 window.addEventListener("message", (ev) => {
   if (ev.source !== window || ev.origin !== location.origin) return;
   const d = ev.data;
   if (!d || d.source !== "combo-x-page-ext" || typeof d.scriptId !== "string") return;
+  if (typeof d.bridgeToken !== "string" || !d.bridgeToken) return;
   const kind = d.kind as string;
   if (
     kind !== "export" &&
@@ -48,6 +49,7 @@ window.addEventListener("message", (ev) => {
       type: "page_ext_bridge",
       kind,
       scriptId: d.scriptId,
+      bridgeToken: d.bridgeToken,
       channel: String(d.channel ?? ""),
       payload: d.payload,
       reqId,

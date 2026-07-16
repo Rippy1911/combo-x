@@ -28,6 +28,7 @@ export const BrowserToolNameSchema = z.enum([
   "list_attachments",
   "read_attachment",
   "remember",
+  "save_memory",
   "recall",
   "memory_list",
   "list_tabs",
@@ -224,10 +225,15 @@ export const RuntimeMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("page_ext_bridge"),
     kind: z.enum(["export", "storage_get", "storage_set", "storage_delete", "storage_list", "log"]),
     scriptId: z.string().min(1),
+    bridgeToken: z.string().min(1),
     channel: z.string(),
     payload: z.unknown().optional(),
     reqId: z.string().optional(),
     pageUrl: z.string().optional(),
+    tabId: z.number().int().optional(),
+  }),
+  z.object({
+    type: z.literal("preview_frame"),
     tabId: z.number().int().optional(),
   }),
 ]);

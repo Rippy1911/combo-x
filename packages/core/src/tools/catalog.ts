@@ -237,6 +237,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   rag_search: "memory",
   rag_read_file: "memory",
   remember: "memory",
+  save_memory: "memory",
   recall: "memory",
   memory_list: "memory",
   save_site_profile: "connectors",

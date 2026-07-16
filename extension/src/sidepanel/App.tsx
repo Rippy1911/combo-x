@@ -39,6 +39,7 @@ import {
   type LlmUsage,
   type ProfileStore,
   type RagMeta,
+  type RunContextSnapshot,
   type SessionMessage,
   type SiteProfile,
   type SubagentEvent,
@@ -46,6 +47,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { BrowserPreview } from "./BrowserPreview";
 import { copyText, shortConversationId } from "./chatClipboard";
 import { MarkdownView } from "./MarkdownView";
 import { MessageToolbar } from "./MessageToolbar";
@@ -72,6 +74,7 @@ const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
 const BUDGET_KEY = "combo_x_budget_mode";
 const RAG_EXCLUDE_KEY = "combo_x_rag_exclude";
+const LAST_SESSION_KEY = "combo_x_last_session_id";
 
 type TabId =
   | "chat"
@@ -85,6 +88,16 @@ type TabId =
   | "vault"
   | "tools"
   | "mcp";
+
+const PRIMARY_TABS: TabId[] = ["chat", "sessions", "views", "activity", "usage"];
+const MORE_TABS: Array<{ id: TabId; label: string }> = [
+  { id: "tasks", label: "Tasks" },
+  { id: "pageext", label: "Page ext" },
+  { id: "settings", label: "Settings" },
+  { id: "vault", label: "Vault" },
+  { id: "tools", label: "Tools" },
+  { id: "mcp", label: "Workspace" },
+];
 
 async function getActiveTabMeta(): Promise<{
   url?: string;
@@ -109,6 +122,10 @@ type UiTurn = {
   attachments?: Array<{ id: string; name: string; kind: string }>;
   tools?: ToolChipData[];
   usage?: LlmUsage;
+  /** stream = chatStreaming; full = non-stream chat */
+  delivery?: "stream" | "full";
+  /** System + memories + tools attached to this user turn (not mid-stream). */
+  runContext?: RunContextSnapshot;
 };
 
 const ALL_TOOL_NAMES = AGENT_TOOLS.map((t) => t.function.name);
@@ -235,6 +252,9 @@ export function App() {
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [subagentRuns, setSubagentRuns] = useState<SubagentRun[]>([]);
   const [usageSessionFilter, setUsageSessionFilter] = useState<"all" | "session">("all");
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  const [inspectTurnId, setInspectTurnId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ChatMessage[]>([]);
@@ -393,6 +413,7 @@ export function App() {
       };
       await sessions.save(updated);
       setCurrentSession(updated);
+      localStorage.setItem(LAST_SESSION_KEY, updated.id);
       await refreshSessions();
     },
     [refreshSessions, sessions],
@@ -428,8 +449,37 @@ export function App() {
     setAgentList(await agentProfiles.list());
     setConnectorCount((await connectorStore.list()).length);
     if (!currentSession) {
-      const s = await sessions.create("New chat");
-      setCurrentSession(s);
+      const lastId = localStorage.getItem(LAST_SESSION_KEY);
+      const last = lastId ? await sessions.get(lastId) : null;
+      if (last) {
+        setCurrentSession(last);
+        setTurns(
+          last.messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({
+              id: m.id,
+              role: m.role as "user" | "assistant",
+              content: m.content,
+              createdAt: m.createdAt,
+              bookmarked: m.bookmarked,
+              tools: m.tools as ToolChipData[] | undefined,
+              usage: m.usage,
+            })),
+        );
+        historyRef.current = last.messages
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+        setSessionUsage({
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: last.totalTokens,
+          estimatedCostUsd: last.estimatedCostUsd,
+        });
+      } else {
+        const s = await sessions.create("New chat");
+        setCurrentSession(s);
+        localStorage.setItem(LAST_SESSION_KEY, s.id);
+      }
     }
     setStatus("Unlocked");
   }, [agentProfiles, connectorStore, currentSession, rag, refreshVaultLabels, sessions, vault]);
@@ -463,9 +513,12 @@ export function App() {
   const newChat = useCallback(async () => {
     abortRef.current?.abort();
     const s = await sessions.create("New chat");
+    localStorage.setItem(LAST_SESSION_KEY, s.id);
     setCurrentSession(s);
     setTurns([]);
     historyRef.current = [];
+    setEditingTurnId(null);
+    setInspectTurnId(null);
     setPendingAttachments([]);
     setAttachMsg("");
     setSessionUsage(ZERO);
@@ -558,6 +611,7 @@ export function App() {
   const loadSession = useCallback(async (id: string) => {
     const s = await sessions.get(id);
     if (!s) return;
+    localStorage.setItem(LAST_SESSION_KEY, s.id);
     setCurrentSession(s);
     setTurns(
       s.messages
@@ -620,8 +674,18 @@ export function App() {
       const pendingIds = pending.map((p) => p.id);
       setPendingAttachments([]);
       const nowIso = new Date().toISOString();
+      const editId = editingTurnId;
+      setEditingTurnId(null);
+      let baseTurns = turns;
+      if (editId) {
+        const idx = turns.findIndex((t) => t.id === editId && t.role === "user");
+        if (idx >= 0) {
+          baseTurns = turns.slice(0, idx);
+          historyRef.current = historyRef.current.slice(0, idx);
+        }
+      }
       const userTurn: UiTurn = {
-        id: crypto.randomUUID(),
+        id: editId && baseTurns.length < turns.length ? editId : crypto.randomUUID(),
         role: "user",
         content: displayText,
         createdAt: nowIso,
@@ -629,9 +693,15 @@ export function App() {
       };
       const assistantId = crypto.randomUUID();
       let nextTurns = [
-        ...turns,
+        ...baseTurns,
         userTurn,
-        { id: assistantId, role: "assistant" as const, content: "", createdAt: nowIso },
+        {
+          id: assistantId,
+          role: "assistant" as const,
+          content: "",
+          createdAt: nowIso,
+          delivery: "stream" as const,
+        },
       ];
       setTurns(nextTurns);
       setRunning(true);
@@ -813,9 +883,25 @@ export function App() {
             });
           })();
         }
+        if (event.type === "run_context" && event.runContext) {
+          const ctx = event.runContext;
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === userTurn.id
+                ? { ...t, runContext: ctx }
+                : t.id === assistantId
+                  ? { ...t, delivery: ctx.transport }
+                  : t,
+            ),
+          );
+        }
         if (event.type === "assistant_delta" && event.message != null) {
           setTurns((prev) =>
-            prev.map((t) => (t.id === assistantId ? { ...t, content: event.message ?? "" } : t)),
+            prev.map((t) =>
+              t.id === assistantId
+                ? { ...t, content: event.message ?? "", delivery: t.delivery ?? "stream" }
+                : t,
+            ),
           );
         }
         if (event.type === "error" && event.message) setStatus(event.message);
@@ -1024,36 +1110,51 @@ export function App() {
             ["views", "Views"],
             ["activity", "Activity"],
             ["usage", "Usage"],
-            ["tasks", "Tasks"],
-            ["pageext", "Page ext"],
-            ["settings", "Settings"],
-            ["vault", "Vault"],
-            ["tools", "Tools"],
-            ["mcp", "Workspace"],
           ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            className={tab === id ? "tab active" : "tab"}
-            onClick={() => {
-              setTab(id);
-              if (id === "sessions") void refreshSessions();
-              if (id === "vault") void refreshVaultLabels();
-              if (id === "settings" || id === "mcp") {
-                void connectorStore.list().then((list) => setConnectorCount(list.length));
-                void agentProfiles.list().then(setAgentList);
-              }
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        )
+          .filter(([id]) => PRIMARY_TABS.includes(id))
+          .map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={tab === id ? "tab active" : "tab"}
+              onClick={() => {
+                setTab(id);
+                if (id === "sessions") void refreshSessions();
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        <select
+          className="tab-more"
+          aria-label="More tabs"
+          value={MORE_TABS.some((t) => t.id === tab) ? tab : ""}
+          onChange={(e) => {
+            const id = e.target.value as TabId;
+            if (!id) return;
+            setTab(id);
+            if (id === "vault") void refreshVaultLabels();
+            if (id === "settings" || id === "mcp") {
+              void connectorStore.list().then((list) => setConnectorCount(list.length));
+              void agentProfiles.list().then(setAgentList);
+            }
+          }}
+        >
+          <option value="">More…</option>
+          {MORE_TABS.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+        </select>
       </nav>
 
       {tab === "chat" ? (
         <>
-          <div className={`chat-main${preview ? " chat-main-split" : ""}`}>
+          <div
+            className={`chat-main${preview || browserOpen ? " chat-main-split" : ""}`}
+          >
             <div className="messages">
               {currentSession ? (
                 <div className="conv-bar">
@@ -1077,6 +1178,14 @@ export function App() {
                       }}
                     >
                       {idCopied ? "Copied id" : "Copy id"}
+                    </button>
+                    <button
+                      type="button"
+                      className={browserOpen ? "msg-action active" : "msg-action"}
+                      title="Toggle browser preview (Nanobrowser-style tab mirror)"
+                      onClick={() => setBrowserOpen((v) => !v)}
+                    >
+                      Browser
                     </button>
                   </div>
                   <button
@@ -1168,12 +1277,60 @@ export function App() {
                       bookmarked={t.bookmarked}
                       onToggleBookmark={() => toggleMessageBookmark(t.id)}
                     />
+                    <div className="msg-extra-actions">
+                      {t.role === "assistant" && t.delivery ? (
+                        <span
+                          className={
+                            t.delivery === "stream" ? "delivery-pill stream" : "delivery-pill full"
+                          }
+                          title={
+                            t.delivery === "stream"
+                              ? "Orchestrator used streaming (chatStreaming)"
+                              : "Orchestrator used a full non-stream call"
+                          }
+                        >
+                          {t.delivery === "stream" ? "stream" : "full call"}
+                        </span>
+                      ) : null}
+                      {t.role === "user" ? (
+                        <button
+                          type="button"
+                          className="msg-action"
+                          disabled={running}
+                          title="Edit and resend from here (drops later turns)"
+                          onClick={() => {
+                            setEditingTurnId(t.id);
+                            setInput(t.content);
+                          }}
+                        >
+                          {editingTurnId === t.id ? "Editing…" : "Edit"}
+                        </button>
+                      ) : null}
+                      {t.role === "user" ? (
+                        <button
+                          type="button"
+                          className="msg-action"
+                          title="Inspect system context + memories for this turn"
+                          disabled={!t.runContext}
+                          onClick={() =>
+                            setInspectTurnId((id) => (id === t.id ? null : t.id))
+                          }
+                        >
+                          Context
+                        </button>
+                      ) : null}
+                    </div>
                     {t.usage && t.role === "assistant" ? (
                       <div className="turn-usage">
                         {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
                       </div>
                     ) : null}
                   </div>
+                  {inspectTurnId === t.id && t.runContext ? (
+                    <pre className="context-inspect">
+                      {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (injected once per turn, not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
+                    </pre>
+                  ) : null}
                 </div>
               ))}
               {pendingApproval ? (
@@ -1213,6 +1370,7 @@ export function App() {
               }
               onGoViews={() => setTab("views")}
             />
+            <BrowserPreview open={browserOpen} onClose={() => setBrowserOpen(false)} />
           </div>
           <div className="composer">
             <div className="row">
@@ -1336,6 +1494,14 @@ export function App() {
                 e.target.value = "";
               }}
             />
+            {editingTurnId ? (
+              <p className="hint">
+                Editing a prior turn — Send will truncate later messages.{" "}
+                <button type="button" className="linkish" onClick={() => setEditingTurnId(null)}>
+                  Cancel edit
+                </button>
+              </p>
+            ) : null}
             <div className="row">
               <button
                 type="button"
@@ -1344,6 +1510,21 @@ export function App() {
                 title="Attach PDF, CSV, XLSX, txt, images"
               >
                 {attachBusy ? "…" : "Attach"}
+              </button>
+              <button
+                type="button"
+                disabled={running || !input.trim()}
+                title="Save current input as a durable memory (injected on next turn)"
+                onClick={() => {
+                  void (async () => {
+                    const text = input.trim();
+                    if (!text) return;
+                    await memory.remember({ text, tags: ["manual"], kind: "note" });
+                    setStatus("Memory saved — will inject on the next send");
+                  })();
+                }}
+              >
+                Save memory
               </button>
               <button
                 type="button"

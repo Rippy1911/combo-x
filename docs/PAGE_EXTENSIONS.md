@@ -38,7 +38,7 @@ flowchart TB
 | Approve is human-only | Agent `approve_page_extension` returns error; UI Approve sets `approvedBy: user` |
 | Bridge ops require live match | SW rejects unless approved + enabled + `urlMatches(pageUrl)` |
 
-**Known gap (P0 remaining):** bridge messages trust caller-supplied `scriptId` without a per-injection capability token. Same-origin page JS that learns an id can forge storage/export until a token is added. Do **not** store passwords in page-ext storage — use Combo Vault + `login`.
+**Hardening (v1.3):** each inject mints a `bridgeToken`; content forwards it; SW rejects mismatches. Auto-nav inject only when `autoInject: true`. Overbroad patterns (`*`, `https://*/*`) rejected at create/update. Do **not** store passwords in page-ext storage — use Combo Vault + `login` (storage values still arrive in MAIN via postMessage).
 
 ## Lifecycle
 

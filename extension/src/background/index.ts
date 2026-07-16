@@ -12,7 +12,11 @@ import {
   startRecording,
   stopRecording,
 } from "../lib/media-bridge.js";
-import { handlePageExtBridge, injectPageExtensionsForTab } from "../lib/page-ext-inject.js";
+import {
+  clearTokensForTab,
+  handlePageExtBridge,
+  injectPageExtensionsForTab,
+} from "../lib/page-ext-inject.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -249,17 +253,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case "page_ext_bridge": {
+        if (!sender.tab?.id) {
+          sendResponse({ ok: false, error: "bridge requires tab sender" });
+          break;
+        }
         sendResponse(
           await handlePageExtBridge({
             kind: parsed.data.kind,
             scriptId: parsed.data.scriptId,
+            bridgeToken: parsed.data.bridgeToken,
             channel: parsed.data.channel,
             payload: parsed.data.payload,
             reqId: parsed.data.reqId,
             pageUrl: parsed.data.pageUrl,
-            tabId: parsed.data.tabId ?? sender.tab?.id,
+            tabId: parsed.data.tabId ?? sender.tab.id,
           }),
         );
+        break;
+      }
+      case "preview_frame": {
+        const tabId = parsed.data.tabId ?? (await activeTabId());
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no active tab" });
+          break;
+        }
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId!, {
+            format: "jpeg",
+            quality: 72,
+          });
+          sendResponse({
+            ok: true,
+            dataUrl,
+            tabId,
+            url: tab.url ?? "",
+            title: tab.title ?? "",
+          });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
         break;
       }
       default:
@@ -270,13 +306,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-/** Auto-inject approved+enabled page extensions on navigation. */
+/** Auto-inject only extensions with autoInject=true on navigation. */
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete" || !tab.url) return;
   if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) return;
-  void injectPageExtensionsForTab({ tabId }).catch(() => {
+  void injectPageExtensionsForTab({ tabId, autoOnly: true }).catch(() => {
     /* ignore */
   });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearTokensForTab(tabId);
 });
 
 const artifacts = new ArtifactStore();

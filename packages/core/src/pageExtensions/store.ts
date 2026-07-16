@@ -4,6 +4,7 @@
  */
 
 import { sha256Hex } from "./hash.js";
+import { isOverbroadPattern } from "./inject.js";
 import type {
   PageExtAuditAction,
   PageExtAuditEntry,
@@ -12,6 +13,16 @@ import type {
   PageExtension,
 } from "./types.js";
 import { urlMatches } from "./match.js";
+
+function assertPatterns(patterns: string[]): void {
+  if (!patterns.length) throw new Error("at least one match pattern required");
+  const bad = patterns.filter(isOverbroadPattern);
+  if (bad.length) {
+    throw new Error(
+      `overbroad pattern blocked (${bad.join(", ")}). Use a host-specific glob e.g. https://allegro.pl/*`,
+    );
+  }
+}
 
 const DB_NAME = "combo_x_page_ext";
 const DB_VERSION = 1;
@@ -140,14 +151,15 @@ export class PageExtensionStore {
   }): Promise<PageExtension> {
     if (!input.source.trim()) throw new Error("source required");
     if (input.source.length > MAX_SOURCE) throw new Error(`source exceeds ${MAX_SOURCE} chars`);
-    if (!input.patterns.length) throw new Error("at least one match pattern required");
+    const patterns = input.patterns.map((p) => p.trim()).filter(Boolean);
+    assertPatterns(patterns);
     const now = new Date().toISOString();
     const row: PageExtension = {
       id: crypto.randomUUID(),
       name: input.name.trim() || "Untitled extension",
       description: input.description?.trim(),
       source: input.source,
-      match: { patterns: input.patterns.map((p) => p.trim()).filter(Boolean) },
+      match: { patterns },
       enabled: input.enabled ?? false,
       runAt: input.runAt ?? "document_idle",
       world: "MAIN",
@@ -158,6 +170,7 @@ export class PageExtensionStore {
       createdBy: input.createdBy ?? "agent",
       createdInSessionId: input.sessionId,
       bridge: null,
+      autoInject: false,
       sourceHash: await sha256Hex(input.source),
     };
     await this.getDb();
@@ -181,6 +194,7 @@ export class PageExtensionStore {
       patterns: string[];
       runAt: PageExtension["runAt"];
       enabled: boolean;
+      autoInject: boolean;
     }>,
     meta?: { actor?: "agent" | "user"; sessionId?: string },
   ): Promise<PageExtension> {
@@ -190,16 +204,19 @@ export class PageExtensionStore {
       throw new Error(`source exceeds ${MAX_SOURCE} chars`);
     }
     const sourceChanged = patch.source != null && patch.source !== cur.source;
+    const patterns = patch.patterns
+      ? patch.patterns.map((p) => p.trim()).filter(Boolean)
+      : cur.match.patterns;
+    assertPatterns(patterns);
     const next: PageExtension = {
       ...cur,
       name: patch.name?.trim() || cur.name,
       description: patch.description !== undefined ? patch.description.trim() : cur.description,
       source: patch.source ?? cur.source,
-      match: patch.patterns
-        ? { patterns: patch.patterns.map((p) => p.trim()).filter(Boolean) }
-        : cur.match,
+      match: { patterns },
       runAt: patch.runAt ?? cur.runAt,
       enabled: patch.enabled ?? cur.enabled,
+      autoInject: patch.autoInject ?? cur.autoInject,
       version: sourceChanged ? cur.version + 1 : cur.version,
       updatedAt: new Date().toISOString(),
       sourceHash: patch.source != null ? await sha256Hex(patch.source) : cur.sourceHash,
@@ -208,7 +225,6 @@ export class PageExtensionStore {
       approvedAt: sourceChanged ? undefined : cur.approvedAt,
       approvedBy: sourceChanged ? undefined : cur.approvedBy,
     };
-    if (!next.match.patterns.length) throw new Error("at least one match pattern required");
     await this.getDb();
     await idbReq(this.store(EXT_STORE, "readwrite").put(next));
     await this.audit({

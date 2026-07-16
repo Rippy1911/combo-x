@@ -10,6 +10,8 @@ export type PageExtInjectArgs = {
   /** Channels allowed to export (empty = export no-ops / throws). */
   exportChannels: string[];
   allowStorage: boolean;
+  /** Per-injection capability token — required on every bridge postMessage. */
+  bridgeToken: string;
 };
 
 /**
@@ -18,10 +20,27 @@ export type PageExtInjectArgs = {
  */
 export function runPageExtensionInMainWorld(args: PageExtInjectArgs): { ok: boolean; error?: string } {
   try {
-    const FLAG = `__combo_x_page_ext_${args.scriptId}`;
+    if (!args.bridgeToken) return { ok: false, error: "missing bridgeToken" };
+    // Non-enumerable so page scripts cannot discover scriptIds via Object.keys
+    const flagKey = `__combo_x_inj`;
     const g = globalThis as unknown as Record<string, unknown>;
-    if (g[FLAG]) return { ok: true }; // already injected this navigation
-    g[FLAG] = true;
+    const prev = g[flagKey];
+    const seen =
+      prev && typeof prev === "object" && prev !== null
+        ? (prev as Record<string, boolean>)
+        : Object.create(null) as Record<string, boolean>;
+    if (seen[args.scriptId]) return { ok: true };
+    seen[args.scriptId] = true;
+    try {
+      Object.defineProperty(g, flagKey, {
+        value: seen,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    } catch {
+      g[flagKey] = seen;
+    }
 
     const post = (kind: string, channel: string, payload: unknown) => {
       try {
@@ -30,6 +49,7 @@ export function runPageExtensionInMainWorld(args: PageExtInjectArgs): { ok: bool
             source: "combo-x-page-ext",
             kind,
             scriptId: args.scriptId,
+            bridgeToken: args.bridgeToken,
             channel,
             payload,
           },
@@ -110,4 +130,13 @@ export function runPageExtensionInMainWorld(args: PageExtInjectArgs): { ok: bool
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Reject over-broad match patterns that would inject on nearly every page. */
+export function isOverbroadPattern(pattern: string): boolean {
+  const p = pattern.trim();
+  if (!p) return true;
+  if (p === "*" || p === "*://" || p === "*://*") return true;
+  if (p === "*://*/*" || p === "https://*/*" || p === "http://*/*") return true;
+  return false;
 }

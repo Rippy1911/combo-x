@@ -252,6 +252,23 @@ export function PageExtensionsPanel({
                 </button>
                 <button
                   type="button"
+                  className={selected.autoInject ? "msg-action active" : "msg-action"}
+                  title="Auto-inject on matching navigations (off by default)"
+                  onClick={() => {
+                    void (async () => {
+                      await store.update(
+                        selected.id,
+                        { autoInject: !selected.autoInject },
+                        { actor: "user", sessionId },
+                      );
+                      await refresh();
+                    })();
+                  }}
+                >
+                  {selected.autoInject ? "Auto-inject on" : "Auto-inject off"}
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     void (async () => {
                       await store.setBridge(

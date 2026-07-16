@@ -25,7 +25,9 @@ Combo-X keeps the single loop + approvals; does **not** clone LangChain Executor
 | In-tab navigate / go_back / close_tab | yes | `navigate` / `go_back` / `close_tab` | **P0** |
 | Batch CSS extract | weak | `query_all` + tables | **P0** |
 | Full Planner↔Navigator executor | yes | no | P1 |
-| Vision screenshots | optional | no | P2 |
+| Vision screenshots | optional | capture tools + attachments; auto vision loop P2 | P2 |
+| Side-panel browser mirror | chat only | **v1.3 Browser preview** (polled `captureVisibleTab`) | P0 shipped |
+| Live tabCapture video in panel | — | not yet (P1) | P1 |
 | URL firewall | yes | no | P1 |
 | Session replay | yes | no | P2 |
 | Per-action approval | no | yes | keep |

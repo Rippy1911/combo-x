@@ -40,6 +40,8 @@ export type PageExtension = {
   bridge?: PageExtBridgeSpec | null;
   /** SHA-256 hex of source at last approve (traceability). */
   sourceHash?: string;
+  /** When true, SW auto-injects on matching navigations (default false). */
+  autoInject?: boolean;
 };
 
 export type PageExtAuditAction =

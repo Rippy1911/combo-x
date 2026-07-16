@@ -540,6 +540,23 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "save_memory",
+      description:
+        "Alias of remember — persist a fact into local memory (injected into the next user turn's system context, not mid-stream).",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "recall",
       description: "Search local memory for relevant notes.",
       parameters: {

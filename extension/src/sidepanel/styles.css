@@ -72,7 +72,96 @@ body {
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
-  overflow-x: auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  overflow: hidden;
+}
+
+.tabs .tab {
+  flex: 0 0 auto;
+}
+
+.tab-more {
+  margin-left: auto;
+  max-width: 120px;
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.browser-preview {
+  flex: 1 1 42%;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.browser-preview-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.browser-preview-img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+.delivery-pill {
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.delivery-pill.stream {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--accent);
+}
+
+.delivery-pill.full {
+  border-color: color-mix(in srgb, #e6a23c 55%, var(--border));
+  color: #e6a23c;
+}
+
+.msg-extra-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.context-inspect {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 10px;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg) 80%, #000);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
 }
 
 .settings-panel h3 {
