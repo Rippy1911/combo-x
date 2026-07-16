@@ -3,6 +3,8 @@
  * Combo Phase B had stream/chat only — no tools. That blocked a real agent.
  */
 
+import { modalitySupportsVision } from "../vision/capability.js";
+
 /** OpenAI/OpenRouter multimodal content parts (text + image_url). */
 export type ContentPart =
   | { type: "text"; text: string }
@@ -70,6 +72,8 @@ export interface OpenRouterModelInfo {
   promptPrice?: number;
   /** USD per token (OpenRouter pricing.completion). */
   completionPrice?: number;
+  /** true when architecture lists image input; undefined if unknown. */
+  supportsVision?: boolean;
 }
 
 type RawUsage = {
@@ -182,6 +186,7 @@ export class OpenRouterClient {
         name?: string;
         context_length?: number;
         pricing?: { prompt?: string; completion?: string };
+        architecture?: { modality?: string; input_modalities?: string[] };
       }>;
     };
     try {
@@ -195,12 +200,14 @@ export class OpenRouterClient {
       const promptPrice = row.pricing?.prompt != null ? Number(row.pricing.prompt) : undefined;
       const completionPrice =
         row.pricing?.completion != null ? Number(row.pricing.completion) : undefined;
+      const supportsVision = modalitySupportsVision(row.architecture);
       out.push({
         id: row.id,
         name: row.name ?? row.id,
         contextLength: row.context_length,
         promptPrice: Number.isFinite(promptPrice) ? promptPrice : undefined,
         completionPrice: Number.isFinite(completionPrice) ? completionPrice : undefined,
+        ...(supportsVision !== undefined ? { supportsVision } : {}),
       });
     }
     return out.sort((a, b) => a.id.localeCompare(b.id));

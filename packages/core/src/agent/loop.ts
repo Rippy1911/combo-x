@@ -62,6 +62,21 @@ import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
 import type { SessionStore } from "../sessions/store.js";
 import { AGENT_TOOLS, parseToolArguments, rowsToCsv, toolArgsToContentRequest } from "../browser/tools.js";
+import {
+  resolveVisionCapability,
+  UX_VISION_WORKER_SYSTEM,
+} from "../vision/capability.js";
+import {
+  promoteScreenshotToVision,
+  screenshotToolStub,
+  visionPartsFromPending,
+  type PendingVision,
+} from "../vision/promote.js";
+import {
+  mergeVisionSettings,
+  type ImageDetail,
+  type VisionSettings,
+} from "../vision/settings.js";
 
 export type ApprovalMode = "ask" | "auto_llm" | "auto_all";
 
@@ -131,6 +146,21 @@ export type RunContextSnapshot = {
   transport: "stream" | "full";
 };
 
+/** In-chat / drawer preview payload (open_preview + screenshot auto-preview). */
+export type ChatPreviewPayload = {
+  kind: "table" | "html" | "text" | "image" | "compare";
+  title: string;
+  headers?: string[];
+  rows?: string[][];
+  html?: string;
+  text?: string;
+  src?: string;
+  beforeSrc?: string;
+  afterSrc?: string;
+  /** html only — scripts allowed when true (sandbox never includes allow-same-origin). */
+  interactive?: boolean;
+};
+
 export interface AgentEvent {
   type:
     | "status"
@@ -142,7 +172,8 @@ export interface AgentEvent {
     | "error"
     | "usage"
     | "run_context"
-    | "tools_unlocked";
+    | "tools_unlocked"
+    | "preview";
   message?: string;
   tool?: string;
   args?: Record<string, unknown>;
@@ -150,7 +181,7 @@ export interface AgentEvent {
   usage?: LlmUsage;
   toolCallId?: string;
   /** orchestrator | worker | approval */
-  usageSource?: "orchestrator" | "worker" | "approval";
+  usageSource?: "orchestrator" | "worker" | "approval" | "vision_worker";
   resolve?: (allow: boolean) => void;
   /** Present on tool_result after the approval gate */
   approvalMode?: ApprovalMode;
@@ -162,6 +193,8 @@ export interface AgentEvent {
   skillId?: string;
   unlockedTools?: string[];
   activeTools?: string[];
+  /** open_preview / auto screenshot surface */
+  preview?: ChatPreviewPayload;
 }
 
 /** Runtime for dynamic REST/MCP connectors (no hardcoded hosts). */
@@ -219,6 +252,13 @@ export interface AgentRunOptions {
   attachments?: AttachmentStore;
   /** Attachment ids included with this user turn */
   pendingAttachmentIds?: string[];
+  /** UX Vision Lab settings (OOTB defaults if omitted). */
+  vision?: Partial<VisionSettings>;
+  /**
+   * Optional map from OpenRouter listModels (id → supportsVision).
+   * Unknown models without a preset flag use the vision worker.
+   */
+  openRouterVision?: ReadonlyMap<string, boolean> | Record<string, boolean>;
   /** Named Views (Views tab / save_view) */
   views?: ViewStore;
   /** Minimize steps/tokens — prefer page_digest + worker parse */
@@ -257,6 +297,7 @@ SKILLS vs MEMORY:
 - Use skill_save to create/update playbooks when that tool is enabled. Use custom_tool_save / list_custom_tools for user-defined tools when enabled.
 - If a tool is marked [LOCKED until skill_read], skill_search → skill_read the matching skill (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media).
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
+UX Vision Lab: ux_critique (always-on) captures + vision-attaches a screenshot for the next turn. Prefer it for design feedback. open_preview shows HTML/image prototypes inside chat. Raw screenshot_* tools need combo-media. Tool results are stubs (attachmentId) — never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 Rules:
 - Prefer page_digest over full get_page dumps.
@@ -373,6 +414,9 @@ interface RunContext {
   approvalModel?: string;
   systemPrompt?: string;
   history?: ChatMessage[];
+  pendingVision: PendingVision | null;
+  visionSettings: VisionSettings;
+  openRouterVision?: ReadonlyMap<string, boolean> | Record<string, boolean>;
 }
 
 export class AgentLoop {
@@ -514,6 +558,7 @@ export class AgentLoop {
       },
     });
 
+    const visionSettings = mergeVisionSettings(options.vision);
     const runCtx: RunContext = {
       nestingDepth,
       runId,
@@ -549,6 +594,9 @@ export class AgentLoop {
       approvalModel: options.approvalModel,
       systemPrompt: options.systemPrompt ?? resolvedProfile?.systemPrompt,
       history: options.history,
+      pendingVision: null,
+      visionSettings,
+      openRouterVision: options.openRouterVision,
     };
     // Point rebuild at runCtx so unlocks sync both arrays.
     runCtx.rebuildTools = () => {
@@ -570,6 +618,11 @@ export class AgentLoop {
         type: "status",
         message: `Working… turn ${step + 1} (limit ${maxSteps})`,
       });
+
+      // Flush pending screenshot vision once (M1) before the next orchestrator call.
+      await this.flushPendingVision(messages, runCtx, emit, (u) => {
+        usage = sumUsage(usage, u);
+      }, logUsage);
 
       let result: ChatResult;
       try {
@@ -823,6 +876,273 @@ export class AgentLoop {
     } catch {
       return "";
     }
+  }
+
+  /**
+   * Inject pending screenshot vision exactly once (M1).
+   * Vision orchestrator → role:user image_url; else vision worker → text crumb.
+   */
+  private async flushPendingVision(
+    messages: ChatMessage[],
+    runCtx: RunContext,
+    emit: (e: AgentEvent) => void,
+    onUsage: (u: LlmUsage) => void,
+    logUsage: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
+  ): Promise<void> {
+    const pending = runCtx.pendingVision;
+    if (!pending || pending.consumed) return;
+    pending.consumed = true;
+    runCtx.pendingVision = null;
+
+    const cap = resolveVisionCapability(runCtx.model, {
+      settings: runCtx.visionSettings,
+      openRouterVision: runCtx.openRouterVision,
+    });
+
+    if (cap.orchestratorHasVision) {
+      messages.push({
+        role: "user",
+        content: visionPartsFromPending(pending),
+      });
+      emit({
+        type: "status",
+        message: `Vision attached (${cap.source}) for orchestrator`,
+      });
+      return;
+    }
+
+    emit({
+      type: "status",
+      message: `Vision worker (${runCtx.visionSettings.visionWorkerModel}) — orchestrator lacks vision (${cap.source})`,
+    });
+    const critique = await this.runVisionWorker(pending, runCtx, emit, onUsage, logUsage);
+    messages.push({
+      role: "user",
+      content: [
+        pending.attachmentId
+          ? `[Vision worker critique; attachmentId=${pending.attachmentId}]`
+          : "[Vision worker critique]",
+        critique,
+      ].join("\n\n"),
+    });
+  }
+
+  private async runVisionWorker(
+    pending: PendingVision,
+    runCtx: RunContext,
+    emit: (e: AgentEvent) => void,
+    onUsage: (u: LlmUsage) => void,
+    logUsage: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
+  ): Promise<string> {
+    const model = runCtx.visionSettings.visionWorkerModel;
+    const parts = visionPartsFromPending(pending);
+    const result = await this.llm.chat({
+      model,
+      messages: [
+        { role: "system", content: UX_VISION_WORKER_SYSTEM },
+        { role: "user", content: parts },
+      ],
+      temperature: 0.2,
+      maxTokens: 1200,
+    });
+    onUsage(result.usage);
+    emit({ type: "usage", usage: result.usage, usageSource: "vision_worker" });
+    await logUsage({
+      kind: "llm",
+      model,
+      provider: providerFromModel(model),
+      promptTokens: result.usage.promptTokens,
+      completionTokens: result.usage.completionTokens,
+      totalTokens: result.usage.totalTokens,
+      estimatedCostUsd: result.usage.estimatedCostUsd,
+    });
+    return (result.content ?? "").trim() || "(vision worker returned empty critique)";
+  }
+
+  private async finalizeScreenshotCapture(
+    shot: { ok: boolean; dataUrl?: string; error?: string; note?: string },
+    label: string,
+    runCtx: RunContext | undefined,
+    emit: (e: AgentEvent) => void,
+    detailOverride?: ImageDetail,
+  ): Promise<Record<string, unknown>> {
+    if (!shot.ok || !shot.dataUrl) {
+      return screenshotToolStub({
+        ok: false,
+        visionAttached: false,
+        error: shot.error ?? "capture failed",
+        note: shot.note,
+      });
+    }
+
+    const settings = runCtx?.visionSettings ?? mergeVisionSettings();
+    const detail = detailOverride ?? settings.critiqueImageDetail;
+    const promoted = await promoteScreenshotToVision(shot.dataUrl, {
+      maxBytes: settings.maxVisionBytes,
+      detail,
+    });
+
+    let attachmentId: string | undefined;
+    if (runCtx?.attachments && runCtx.sessionId) {
+      attachmentId = crypto.randomUUID();
+      await runCtx.attachments.put({
+        id: attachmentId,
+        sessionId: runCtx.sessionId,
+        name: `screenshot-${label}-${Date.now()}.jpg`,
+        mime: promoted.dataUrl.startsWith("data:image/jpeg")
+          ? "image/jpeg"
+          : "image/png",
+        kind: "image",
+        size: promoted.bytes,
+        text: "",
+        dataUrl: promoted.dataUrl,
+        meta: { vision: true, source: label, downscaled: promoted.downscaled },
+        truncated: false,
+        createdAt: Date.now(),
+      });
+    }
+
+    const visionAttached = Boolean(settings.autoAttachScreenshots && runCtx);
+    if (visionAttached && runCtx) {
+      runCtx.pendingVision = {
+        dataUrl: promoted.dataUrl,
+        detail: promoted.detail,
+        attachmentId,
+        consumed: false,
+      };
+    }
+
+    emit({
+      type: "preview",
+      preview: {
+        kind: "image",
+        title: `Screenshot · ${label}`,
+        src: promoted.dataUrl,
+      },
+    });
+
+    return screenshotToolStub({
+      ok: true,
+      attachmentId,
+      bytes: promoted.bytes,
+      visionAttached,
+      note:
+        shot.note ??
+        (visionAttached
+          ? "Vision queued for next model turn (image not in tool JSON)."
+          : "Stored; autoAttachScreenshots is off."),
+    });
+  }
+
+  private async handleUxCritique(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+    emit: (e: AgentEvent) => void,
+  ): Promise<Record<string, unknown>> {
+    const scope =
+      args.scope === "element" || args.scope === "full" ? args.scope : "viewport";
+    const detail =
+      args.detail === "auto" || args.detail === "low" || args.detail === "high"
+        ? args.detail
+        : undefined;
+    const focus =
+      typeof args.focus === "string" && args.focus.trim() ? args.focus.trim() : undefined;
+
+    let shot: { ok: boolean; dataUrl?: string; error?: string; note?: string };
+    if (scope === "viewport") {
+      if (!this.browser.captureViewport) {
+        return { ok: false, error: "capture unavailable" };
+      }
+      shot = await this.browser.captureViewport(
+        typeof args.windowId === "number" ? args.windowId : undefined,
+      );
+    } else if (scope === "full") {
+      if (!this.browser.captureFullPage) {
+        return { ok: false, error: "capture unavailable" };
+      }
+      const tabs = await this.browser.listTabs();
+      const tabId = typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+      shot = await this.browser.captureFullPage(tabId);
+    } else {
+      if (!this.browser.captureElement) {
+        return { ok: false, error: "capture unavailable" };
+      }
+      const tabs = await this.browser.listTabs();
+      const tabId = typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+      shot = await this.browser.captureElement(tabId, {
+        selector: typeof args.selector === "string" ? args.selector : undefined,
+        index: typeof args.index === "number" ? args.index : undefined,
+      });
+    }
+
+    const stub = await this.finalizeScreenshotCapture(
+      shot,
+      `ux-${scope}`,
+      runCtx,
+      emit,
+      detail,
+    );
+    return {
+      ...stub,
+      focus: focus ?? null,
+      hint: focus
+        ? `Focus critique on: ${focus}. Image vision-attached for next turn.`
+        : "Image vision-attached for next turn. Apply UX rubric from combo-ux-critique skill.",
+    };
+  }
+
+  private handleOpenPreview(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+    emit: (e: AgentEvent) => void,
+  ): Record<string, unknown> {
+    const kindRaw = String(args.kind ?? "text");
+    const allowedKinds = new Set(["table", "html", "text", "image", "compare"]);
+    const kind = allowedKinds.has(kindRaw)
+      ? (kindRaw as ChatPreviewPayload["kind"])
+      : "text";
+    const interactiveSetting =
+      runCtx?.visionSettings.interactivePreviewScripts ?? true;
+    const interactive =
+      kind === "html"
+        ? args.interactive === false
+          ? false
+          : args.interactive === true
+            ? true
+            : interactiveSetting
+        : false;
+
+    const preview: ChatPreviewPayload = {
+      kind,
+      title: String(args.title ?? "Preview"),
+      headers: Array.isArray(args.headers)
+        ? (args.headers as unknown[]).map(String)
+        : undefined,
+      rows: Array.isArray(args.rows)
+        ? (args.rows as unknown[]).map((r) =>
+            Array.isArray(r) ? r.map(String) : [String(r)],
+          )
+        : undefined,
+      html: typeof args.html === "string" ? args.html : undefined,
+      text: typeof args.text === "string" ? args.text : undefined,
+      src: typeof args.src === "string" ? args.src : undefined,
+      beforeSrc: typeof args.beforeSrc === "string" ? args.beforeSrc : undefined,
+      afterSrc: typeof args.afterSrc === "string" ? args.afterSrc : undefined,
+      interactive,
+    };
+
+    // Hard cap HTML size to avoid sidepanel OOM
+    if (preview.html && preview.html.length > 400_000) {
+      return { ok: false, error: "html too large (max 400KB)" };
+    }
+
+    emit({ type: "preview", preview });
+    return {
+      ok: true,
+      opened: preview.kind,
+      title: preview.title,
+      interactive: preview.interactive ?? false,
+    };
   }
 
   private async buildUserContent(
@@ -1409,22 +1729,29 @@ export class AgentLoop {
         result = await this.runMcpList(args, connectors);
       } else if (name === "mcp_call") {
         result = await this.runMcpCall(args, connectors);
+      } else if (name === "ux_critique") {
+        result = await this.handleUxCritique(args, runCtx, emit);
+      } else if (name === "open_preview") {
+        result = this.handleOpenPreview(args, runCtx, emit);
       } else if (name === "screenshot_viewport") {
         if (!this.browser.captureViewport) result = { ok: false, error: "capture unavailable" };
-        else
-          result = await this.browser.captureViewport(
+        else {
+          const shot = await this.browser.captureViewport(
             typeof args.windowId === "number" ? args.windowId : undefined,
           );
+          result = await this.finalizeScreenshotCapture(shot, "viewport", runCtx, emit);
+        }
       } else if (name === "screenshot_element") {
         if (!this.browser.captureElement) result = { ok: false, error: "capture unavailable" };
         else {
           const tabs = await this.browser.listTabs();
           const tabId =
             typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
-          result = await this.browser.captureElement(tabId, {
+          const shot = await this.browser.captureElement(tabId, {
             selector: typeof args.selector === "string" ? args.selector : undefined,
             index: typeof args.index === "number" ? args.index : undefined,
           });
+          result = await this.finalizeScreenshotCapture(shot, "element", runCtx, emit);
         }
       } else if (name === "screenshot_full") {
         if (!this.browser.captureFullPage) result = { ok: false, error: "capture unavailable" };
@@ -1432,7 +1759,8 @@ export class AgentLoop {
           const tabs = await this.browser.listTabs();
           const tabId =
             typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
-          result = await this.browser.captureFullPage(tabId);
+          const shot = await this.browser.captureFullPage(tabId);
+          result = await this.finalizeScreenshotCapture(shot, "full", runCtx, emit);
         }
       } else if (name === "start_recording") {
         if (!this.browser.startRecording) result = { ok: false, error: "recording unavailable" };

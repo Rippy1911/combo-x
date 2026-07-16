@@ -918,8 +918,72 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ux_critique",
+      description:
+        "Capture the current page (or a component) and attach it for vision UX critique. Always-on — does not require combo-media. Prefer this over raw screenshot_* for design feedback. Runtime attaches the image for the next model turn (or a vision worker if the orchestrator lacks vision).",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: {
+            type: "string",
+            enum: ["viewport", "element", "full"],
+            description: "What to capture (default viewport)",
+          },
+          selector: { type: "string", description: "CSS selector when scope=element" },
+          index: { type: "number", description: "Interactive index when scope=element" },
+          focus: {
+            type: "string",
+            description: "Optional critique focus, e.g. hero CTA, mobile nav, form density",
+          },
+          detail: {
+            type: "string",
+            enum: ["auto", "low", "high"],
+            description: "Image detail for vision (default from settings, usually low)",
+          },
+          tabId: { type: "number" },
+          windowId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_preview",
+      description:
+        "Show a non-blocking preview inside chat (and side drawer): table, HTML prototype, text, image, or before/after compare. Use after UX critique to display an interactive HTML redesign (sandbox allow-scripts) or a mock image.",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["table", "html", "text", "image", "compare"],
+          },
+          title: { type: "string" },
+          headers: { type: "array", items: { type: "string" } },
+          rows: { type: "array", items: { type: "array" } },
+          html: { type: "string", description: "HTML/CSS/JS prototype for kind=html" },
+          text: { type: "string" },
+          src: { type: "string", description: "image src (data: or https:)" },
+          beforeSrc: { type: "string", description: "before image for kind=compare" },
+          afterSrc: { type: "string", description: "after image for kind=compare" },
+          interactive: {
+            type: "boolean",
+            description: "For html: allow scripts in sandbox (default from settings)",
+          },
+        },
+        required: ["kind", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "screenshot_viewport",
-      description: "Capture visible tab screenshot (PNG data URL).",
+      description:
+        "Capture visible tab screenshot. Image is stored and vision-attached for the next model turn (not returned as base64 in the tool result). Unlock via skill_read combo-media, or prefer ux_critique.",
       parameters: {
         type: "object",
         properties: { windowId: { type: "number" } },

@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OpenRouterClient } from "../llm/openrouter.js";
+import type { ChatMessage, OpenRouterClient } from "../llm/openrouter.js";
 import { ViewStore } from "../local/views.js";
 import { MemoryStore } from "../memory/store.js";
 import { SessionStore } from "../sessions/store.js";
 import { AgentProfileStore } from "../agents/profiles.js";
 import { UsageStore } from "../usage/store.js";
+import { AttachmentStore } from "../attachments/store.js";
 import { AGENT_TOOLS } from "../browser/tools.js";
 import * as pickToolsMod from "../tools/pickTools.js";
+import { ALWAYS_ON_TOOL_NAMES } from "../tools/gating.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -16,11 +18,15 @@ function mockLlm(
     toolCalls?: Array<{ id: string; name: string; args: string }>;
     model?: string;
   }>,
-  onChat?: (model: string) => void,
+  onChat?: (model: string, messages?: ChatMessage[]) => void,
 ) {
   let i = 0;
-  const next = async (opts: { model: string; onDelta?: (s: string) => void }) => {
-    onChat?.(opts.model);
+  const next = async (opts: {
+    model: string;
+    messages?: ChatMessage[];
+    onDelta?: (s: string) => void;
+  }) => {
+    onChat?.(opts.model, opts.messages);
     const step = sequence[i] ?? sequence[sequence.length - 1]!;
     i += 1;
     const content = step.content;
@@ -43,11 +49,27 @@ function mockLlm(
     };
   };
   return {
-    chat: vi.fn(async (opts: { model: string }) => next(opts)),
-    chatStreaming: vi.fn(async (opts: { model: string; onDelta?: (s: string) => void }) =>
-      next(opts),
+    chat: vi.fn(async (opts: { model: string; messages?: ChatMessage[] }) => next(opts)),
+    chatStreaming: vi.fn(
+      async (opts: {
+        model: string;
+        messages?: ChatMessage[];
+        onDelta?: (s: string) => void;
+      }) => next(opts),
     ),
   } as unknown as OpenRouterClient;
+}
+
+const TINY_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+function messagesHaveImageUrl(messages: ChatMessage[] | undefined): boolean {
+  if (!messages) return false;
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    if (m.content.some((p) => p.type === "image_url")) return true;
+  }
+  return false;
 }
 
 function stubBrowser(overrides: Partial<BrowserBridge> = {}): BrowserBridge {
@@ -903,6 +925,141 @@ describe("AgentLoop", () => {
     expect(saved[0]?.toolAllowlist).toContain("create_task");
     expect(saved[0]?.toolAllowlist).toContain("spawn_subagent");
     pickSpy.mockRestore();
+  });
+
+  it("screenshot vision-attaches once for vision orchestrator (M1)", async () => {
+    const calls: Array<{ model: string; hasImage: boolean }> = [];
+    const llm = mockLlm(
+      [
+        {
+          content: null,
+          toolCalls: [{ id: "1", name: "screenshot_viewport", args: "{}" }],
+        },
+        { content: "Looks fine." },
+        { content: "Still fine." },
+      ],
+      (model, messages) => {
+        calls.push({ model, hasImage: messagesHaveImageUrl(messages) });
+      },
+    );
+    const browser = stubBrowser({
+      captureViewport: vi.fn(async () => ({ ok: true, dataUrl: TINY_PNG })),
+    });
+    const attachments = new AttachmentStore(`att_${crypto.randomUUID()}`);
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const toolResults: unknown[] = [];
+    await agent.run({
+      model: "x-ai/grok-4.5",
+      userMessage: "critique the UI",
+      sessionId: "sess-vision",
+      attachments,
+      enabledTools: AGENT_TOOLS.map((t) => t.function.name),
+      toolMode: "static",
+      maxSteps: 3,
+      onEvent: (e) => {
+        if (e.type === "tool_result") toolResults.push(e.result);
+      },
+    });
+
+    // First call: tool request (no image yet). Second: vision attached. Third would be if more turns.
+    expect(calls.some((c) => c.hasImage)).toBe(true);
+    expect(calls.filter((c) => c.hasImage)).toHaveLength(1);
+    const stub = toolResults[0] as { dataUrl?: string; attachmentId?: string; visionAttached?: boolean };
+    expect(stub.dataUrl).toBeUndefined();
+    expect(stub.visionAttached).toBe(true);
+    expect(stub.attachmentId).toBeTruthy();
+    const row = await attachments.get(String(stub.attachmentId));
+    expect(row?.dataUrl?.startsWith("data:image")).toBe(true);
+  });
+
+  it("non-vision orchestrator uses vision worker then text crumb", async () => {
+    const models: string[] = [];
+    const orchImages: boolean[] = [];
+    const llm = mockLlm(
+      [
+        {
+          content: null,
+          toolCalls: [{ id: "1", name: "ux_critique", args: '{"scope":"viewport"}' }],
+        },
+        { content: "Hierarchy is weak; enlarge the CTA." },
+      ],
+      (model, messages) => {
+        models.push(model);
+        if (model === "text-only/no-vision") {
+          orchImages.push(messagesHaveImageUrl(messages));
+        }
+      },
+    );
+    const browser = stubBrowser({
+      captureViewport: vi.fn(async () => ({ ok: true, dataUrl: TINY_PNG })),
+    });
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "text-only/no-vision",
+      userMessage: "UX feedback",
+      sessionId: "sess-nv",
+      attachments: new AttachmentStore(`att_${crypto.randomUUID()}`),
+      enabledTools: AGENT_TOOLS.map((t) => t.function.name),
+      toolMode: "static",
+      vision: { visionWorkerModel: "google/gemini-3.5-flash" },
+    });
+    expect(models).toContain("google/gemini-3.5-flash");
+    expect(models).toContain("text-only/no-vision");
+    // Orchestrator never receives image_url
+    expect(orchImages.every((v) => v === false)).toBe(true);
+  });
+
+  it("ux_critique is ALWAYS_ON; open_preview emits preview event", async () => {
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("ux_critique");
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("open_preview");
+
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "open_preview",
+            args: JSON.stringify({
+              kind: "html",
+              title: "Hero redesign",
+              html: "<button>Buy</button>",
+              interactive: true,
+            }),
+          },
+        ],
+      },
+      { content: "Preview opened." },
+    ]);
+    const previews: unknown[] = [];
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "x-ai/grok-4.5",
+      userMessage: "show mock",
+      toolMode: "static",
+      enabledTools: AGENT_TOOLS.map((t) => t.function.name),
+      onEvent: (e) => {
+        if (e.type === "preview") previews.push(e.preview);
+      },
+    });
+    expect(previews).toHaveLength(1);
+    expect(previews[0]).toMatchObject({
+      kind: "html",
+      title: "Hero redesign",
+      interactive: true,
+    });
   });
 
   it("usageLog append on user, llm, tool, assistant (T-V11-usage)", async () => {

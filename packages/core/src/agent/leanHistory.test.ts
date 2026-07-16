@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../llm/openrouter.js";
-import { historyFromUiTurns, leanHistory } from "./leanHistory.js";
+import { historyFromUiTurns, leanHistory, scrubDataUrls } from "./leanHistory.js";
 
 describe("leanHistory (T-LEAN-1)", () => {
   it("drops tool rows and keeps assistant crumbs", () => {
@@ -96,5 +96,39 @@ describe("leanHistory (T-LEAN-1)", () => {
     expect(String(msgs[1]?.content)).toContain("[redacted]");
     expect(String(msgs[1]?.content)).not.toContain("nope");
     expect(String(msgs[1]?.content)).toContain("ok");
+  });
+
+  it("scrubs megabase64 data URLs from crumbs", () => {
+    const b64 = "A".repeat(200);
+    const raw = `screenshot_viewport: {"ok":true,"dataUrl":"data:image/png;base64,${b64}"}`;
+    expect(scrubDataUrls(raw)).toContain("data:image…[redacted]");
+    expect(scrubDataUrls(raw)).not.toContain(b64);
+
+    const history: ChatMessage[] = [
+      { role: "user", content: "shot" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "1",
+            type: "function",
+            function: { name: "screenshot_viewport", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "1",
+        name: "screenshot_viewport",
+        content: JSON.stringify({
+          ok: true,
+          dataUrl: `data:image/png;base64,${b64}`,
+        }),
+      },
+    ];
+    const lean = leanHistory(history);
+    const joined = lean.map((m) => String(m.content)).join("\n");
+    expect(joined).not.toContain(b64);
   });
 });

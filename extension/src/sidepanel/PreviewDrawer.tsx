@@ -1,3 +1,4 @@
+import { chatArtifactSandbox } from "@combo-x/core";
 import { MarkdownView } from "./MarkdownView";
 import { DataTable } from "./DataTable";
 import {
@@ -8,9 +9,13 @@ import {
 
 export type PreviewPayload = {
   title: string;
-  kind: "table" | "csv" | "json" | "text" | "markdown" | "image";
+  kind: "table" | "csv" | "json" | "text" | "markdown" | "image" | "html" | "compare";
   body: string;
   rows?: string[][];
+  html?: string;
+  beforeSrc?: string;
+  afterSrc?: string;
+  interactive?: boolean;
 };
 
 export { parseCsv, rowsFromMarkdownTables };
@@ -134,8 +139,26 @@ export function PreviewDrawer({
         </button>
       </div>
       <div className="preview-body">
-        {preview.kind === "image" ? (
+        {preview.kind === "image" && preview.body ? (
           <img src={preview.body} alt={preview.title} className="preview-img" />
+        ) : null}
+        {preview.kind === "html" && preview.html ? (
+          <iframe
+            title={preview.title}
+            srcDoc={preview.html}
+            sandbox={chatArtifactSandbox(Boolean(preview.interactive))}
+            className="preview-html-frame"
+          />
+        ) : null}
+        {preview.kind === "compare" ? (
+          <div className="preview-compare">
+            {preview.beforeSrc ? (
+              <img src={preview.beforeSrc} alt="Before" className="preview-img" />
+            ) : null}
+            {preview.afterSrc ? (
+              <img src={preview.afterSrc} alt="After" className="preview-img" />
+            ) : null}
+          </div>
         ) : null}
         {rows && rows.length > 0 ? (
           <DataTable

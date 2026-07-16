@@ -43,6 +43,7 @@ export const TOOL_GROUPS = {
     "get_view",
   ],
   Media: [
+    "ux_critique",
     "screenshot_viewport",
     "screenshot_element",
     "screenshot_full",
@@ -62,6 +63,7 @@ export const TOOL_GROUPS = {
     "save_bookmark",
     "set_reminder",
     "create_report",
+    "open_preview",
     "search_sessions",
   ],
   Connectors: ["rest_request", "mcp_list_tools", "mcp_call"],

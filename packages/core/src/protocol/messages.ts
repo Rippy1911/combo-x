@@ -56,6 +56,8 @@ export const BrowserToolNameSchema = z.enum([
   "rest_request",
   "mcp_list_tools",
   "mcp_call",
+  "ux_critique",
+  "open_preview",
   "screenshot_viewport",
   "screenshot_element",
   "screenshot_full",

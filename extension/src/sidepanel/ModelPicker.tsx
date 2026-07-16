@@ -1,7 +1,7 @@
 import { MODEL_PRESETS, OpenRouterClient, type OpenRouterModelInfo } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const CACHE_KEY = "combo_x_or_models_cache_v1";
+const CACHE_KEY = "combo_x_or_models_cache_v2";
 const CACHE_TTL_MS = 1000 * 60 * 60 * 6;
 
 type CacheBlob = { at: number; models: OpenRouterModelInfo[] };
@@ -158,6 +158,8 @@ export function ModelPicker({
               const price = [formatPricePerM(m.promptPrice), formatPricePerM(m.completionPrice)]
                 .filter(Boolean)
                 .join(" / ");
+              const presetVision = MODEL_PRESETS.find((p) => p.id === m.id)?.vision;
+              const vision = m.supportsVision ?? presetVision;
               return (
                 <li key={m.id}>
                   <button
@@ -169,7 +171,15 @@ export function ModelPicker({
                       setQuery("");
                     }}
                   >
-                    <span className="model-picker-item-name">{m.name}</span>
+                    <span className="model-picker-item-name">
+                      {m.name}
+                      {vision ? (
+                        <span className="model-vision-badge" title="Vision / image input">
+                          {" "}
+                          · vision
+                        </span>
+                      ) : null}
+                    </span>
                     <span className="model-picker-item-id">{m.id}</span>
                     {price ? <span className="model-picker-item-price">{price}</span> : null}
                   </button>

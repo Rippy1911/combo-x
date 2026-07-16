@@ -97,6 +97,24 @@ const CURATED: Record<string, CatalogMeta> = {
     whenToUse: "Fact should survive chat turns and be searchable via recall.",
     whenNotToUse: "Ephemeral step output — put in tool result or scrape table instead.",
   },
+  ux_critique: {
+    group: "media",
+    useCases: [
+      "Visual UX critique of the current page or a component",
+      "Attach screenshot for vision without unlocking raw media tools",
+    ],
+    whenToUse: "User asks for design/UX feedback or a redesign mock.",
+    whenNotToUse: "Text-only page facts — use page_digest.",
+  },
+  open_preview: {
+    group: "meta",
+    useCases: [
+      "Show interactive HTML prototype inside chat",
+      "Before/after image compare after a redesign mock",
+    ],
+    whenToUse: "Surface a table, HTML mock, or image without leaving chat.",
+    whenNotToUse: "Only need a short text answer.",
+  },
   screenshot_viewport: {
     group: "media",
     useCases: [
@@ -104,7 +122,7 @@ const CURATED: Record<string, CatalogMeta> = {
       "Quick visual proof of UI state",
     ],
     whenToUse: "Need PNG of current viewport; user approved capture.",
-    whenNotToUse: "Text fields suffice — prefer page_digest/extract to save tokens.",
+    whenNotToUse: "Text fields suffice — prefer page_digest/extract to save tokens. Prefer ux_critique for UX feedback.",
   },
   upsert_scrape_rows: {
     group: "data",
@@ -249,6 +267,8 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   rest_request: "connectors",
   mcp_list_tools: "connectors",
   mcp_call: "connectors",
+  ux_critique: "media",
+  open_preview: "meta",
   screenshot_viewport: "media",
   screenshot_element: "media",
   screenshot_full: "media",

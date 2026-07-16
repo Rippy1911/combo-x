@@ -125,12 +125,29 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       name: "combo-media",
       description: "Screenshots and tab recording",
       body: `MEDIA PLAYBOOK
+- Prefer ux_critique for UX feedback (always-on; no skill unlock needed)
 - screenshot_viewport for quick vision; screenshot_full for long pages
 - start_recording / stop_recording for demos
-- Prefer page_digest when text is enough`,
+- Prefer page_digest when text is enough
+- Screenshots are vision-attached by the runtime — tool results are stubs (attachmentId), not base64`,
       tags: [...nowTag, "media"],
       scope: "global",
       toolHints: [...TOOL_PACKS.media],
+    },
+    {
+      name: "combo-ux-critique",
+      description: "Visual UX critique + in-chat HTML prototype playbook",
+      body: `UX VISION LAB PLAYBOOK
+1) Call ux_critique({ scope, focus?, selector? }) — always-on; captures + vision-attaches
+2) Critique with rubric: hierarchy, contrast, CTA, density, mobile, a11y, copy
+3) Propose fixes, then open_preview({ kind:"html", title, html, interactive:true }) for an interactive redesign in chat
+4) For before/after images: open_preview({ kind:"compare", beforeSrc, afterSrc })
+5) Do NOT unlock combo-media unless you need raw screenshot_* / recording tools
+6) Never paste base64 into chat — the runtime attaches images`,
+      tags: [...nowTag, "ux", "vision", "design"],
+      scope: "global",
+      // M6: do not duplicate combo-media unlock — ux_critique/open_preview are ALWAYS_ON
+      toolHints: [],
     },
   ];
 }
@@ -163,17 +180,17 @@ export class SkillStore {
     await this.getDb();
     if (!this.skipSeed) {
       const all = await idbReq<Skill[]>(this.store("readonly").getAll());
-      if (all.length === 0) {
-        const now = new Date().toISOString();
-        for (const def of seedSkillDefinitions()) {
-          const row: Skill = {
-            ...def,
-            id: crypto.randomUUID(),
-            createdAt: now,
-            updatedAt: now,
-          };
-          await idbReq(this.store("readwrite").put(row));
-        }
+      const byName = new Map(all.map((s) => [s.name, s]));
+      const now = new Date().toISOString();
+      for (const def of seedSkillDefinitions()) {
+        if (byName.has(def.name)) continue;
+        const row: Skill = {
+          ...def,
+          id: crypto.randomUUID(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        await idbReq(this.store("readwrite").put(row));
       }
     }
     this.seeded = true;

@@ -21,8 +21,10 @@ import {
   getProtocolVersion,
   historyFromUiTurns,
   leanHistory,
+  loadVisionSettingsFromStorage,
   normalizeModelId,
   parseAttachment,
+  persistVisionSettings,
   resultError,
   resultOk,
   summarizeResult,
@@ -36,6 +38,7 @@ import {
   type ApprovalMode,
   type AttachmentRecord,
   type ChatMessage,
+  type ChatPreviewPayload,
   type ChatSession,
   type LlmUsage,
   type ProfileStore,
@@ -44,18 +47,21 @@ import {
   type SessionMessage,
   type SiteProfile,
   type SubagentEvent,
+  type VisionSettings,
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { BrowserPreview } from "./BrowserPreview";
 import { copyText, shortConversationId } from "./chatClipboard";
+import { ChatArtifact, type ChatArtifactPayload } from "./ChatArtifact";
 import { MarkdownView } from "./MarkdownView";
 import { MessageToolbar } from "./MessageToolbar";
 import {
   PreviewDrawer,
   buildPreviewFromAttachment,
   buildPreviewFromMarkdown,
+  buildPreviewFromTool,
   type PreviewPayload,
 } from "./PreviewDrawer";
 import { ToolChip, type ToolChipData } from "./ToolChip";
@@ -127,12 +133,46 @@ type UiTurn = {
   bookmarked?: boolean;
   attachments?: Array<{ id: string; name: string; kind: string }>;
   tools?: ToolChipData[];
+  artifacts?: ChatArtifactPayload[];
   usage?: LlmUsage;
   /** stream = chatStreaming; full = non-stream chat */
   delivery?: "stream" | "full";
   /** System + memories + tools attached to this user turn (not mid-stream). */
   runContext?: RunContextSnapshot;
 };
+
+function chatPreviewToDrawer(p: ChatPreviewPayload): PreviewPayload {
+  if (p.kind === "html") {
+    return {
+      title: p.title,
+      kind: "html",
+      body: "",
+      html: p.html,
+      interactive: p.interactive,
+    };
+  }
+  if (p.kind === "compare") {
+    return {
+      title: p.title,
+      kind: "compare",
+      body: "",
+      beforeSrc: p.beforeSrc,
+      afterSrc: p.afterSrc,
+    };
+  }
+  if (p.kind === "image") {
+    return { title: p.title, kind: "image", body: p.src ?? "" };
+  }
+  if (p.kind === "table" && p.rows) {
+    return {
+      title: p.title,
+      kind: "table",
+      body: p.rows.map((r) => r.join("\t")).join("\n"),
+      rows: p.rows,
+    };
+  }
+  return { title: p.title, kind: "text", body: p.text ?? "" };
+}
 
 const ALL_TOOL_NAMES = AGENT_TOOLS.map((t) => t.function.name);
 const ZERO: LlmUsage = {
@@ -238,6 +278,13 @@ export function App() {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [workerModel, setWorkerModel] = useState(DEFAULT_WORKER_MODEL);
+  const [visionSettings, setVisionSettingsState] = useState<VisionSettings>(() =>
+    loadVisionSettingsFromStorage(),
+  );
+  const setVisionSettings = useCallback((next: VisionSettings) => {
+    setVisionSettingsState(next);
+    persistVisionSettings(next);
+  }, []);
   const [customModel, setCustomModel] = useState("");
   const [customWorkerModel, setCustomWorkerModel] = useState("");
   const [tab, setTab] = useState<TabId>("chat");
@@ -1018,6 +1065,20 @@ export function App() {
             ),
           );
         }
+        if (event.type === "preview" && event.preview) {
+          const p = event.preview;
+          setPreview(chatPreviewToDrawer(p));
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === assistantId
+                ? {
+                    ...t,
+                    artifacts: [...(t.artifacts ?? []), p as ChatArtifactPayload],
+                  }
+                : t,
+            ),
+          );
+        }
         if (event.type === "error" && event.message) setStatus(event.message);
         if (event.type === "done") setStreamingId(null);
       };
@@ -1057,6 +1118,7 @@ export function App() {
           attachments,
           views,
           pendingAttachmentIds: pendingIds,
+          vision: visionSettings,
           onEvent,
         });
         historyRef.current = leanHistory(
@@ -1124,6 +1186,7 @@ export function App() {
       model,
       pendingAttachments,
       workerModel,
+      visionSettings,
       persistSession,
       profiles,
       rag,
@@ -1369,7 +1432,30 @@ export function App() {
                         {showActions && t.tools && t.tools.length > 0 ? (
                           <div className="chips">
                             {t.tools.map((tool) => (
-                              <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
+                              <ToolChip
+                                key={tool.id}
+                                tool={tool}
+                                onPreview={setPreview}
+                                onPreviewTool={async (chip) => {
+                                  const r = chip.result as {
+                                    attachmentId?: string;
+                                    dataUrl?: string;
+                                  } | null;
+                                  if (r?.attachmentId) {
+                                    const row = await attachments.get(r.attachmentId);
+                                    if (row?.dataUrl) {
+                                      setPreview({
+                                        title: chip.name,
+                                        kind: "image",
+                                        body: row.dataUrl,
+                                      });
+                                      return;
+                                    }
+                                  }
+                                  const p = buildPreviewFromTool(chip.name, chip.result);
+                                  if (p) setPreview(p);
+                                }}
+                              />
                             ))}
                           </div>
                         ) : null}
@@ -1378,6 +1464,9 @@ export function App() {
                         ) : (
                           <div className="bubble-plain">{t.content}</div>
                         )}
+                        {t.artifacts?.map((a, i) => (
+                          <ChatArtifact key={`art-${t.id}-${i}`} artifact={a} />
+                        ))}
                         {showActions && t.role === "assistant" && t.content.includes("|") ? (
                           <button
                             type="button"
@@ -1784,6 +1873,8 @@ export function App() {
           setCustomModel={setCustomModel}
           customWorkerModel={customWorkerModel}
           setCustomWorkerModel={setCustomWorkerModel}
+          visionSettings={visionSettings}
+          setVisionSettings={setVisionSettings}
           approvalMode={approvalMode}
           setApprovalMode={setApprovalMode}
           budgetMode={budgetMode}

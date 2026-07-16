@@ -83,9 +83,39 @@ export type {
   ProfileStore,
   SubagentEvent,
   RunContextSnapshot,
+  ChatPreviewPayload,
 } from "./agent/loop.js";
-export { leanHistory, historyFromUiTurns, redactToolResultSnippet } from "./agent/leanHistory.js";
+export {
+  leanHistory,
+  historyFromUiTurns,
+  redactToolResultSnippet,
+  scrubDataUrls,
+} from "./agent/leanHistory.js";
 export type { UiHistoryTurn } from "./agent/leanHistory.js";
+
+export {
+  DEFAULT_VISION_SETTINGS,
+  VISION_STORAGE_KEYS,
+  mergeVisionSettings,
+  loadVisionSettingsFromStorage,
+  persistVisionSettings,
+} from "./vision/settings.js";
+export type { VisionSettings, ImageDetail } from "./vision/settings.js";
+export {
+  promoteScreenshotToVision,
+  screenshotToolStub,
+  visionPartsFromPending,
+  dataUrlByteLength,
+} from "./vision/promote.js";
+export type { PendingVision, PromoteResult } from "./vision/promote.js";
+export {
+  resolveVisionCapability,
+  modalitySupportsVision,
+  presetVisionFlag,
+  UX_VISION_WORKER_SYSTEM,
+} from "./vision/capability.js";
+export type { VisionCapability } from "./vision/capability.js";
+export { chatArtifactSandbox, isSafeChatArtifactSandbox } from "./vision/sandbox.js";
 
 export { RagStore } from "./rag/store.js";
 export type { RagChunkRow, RagMeta, IndexedFile } from "./rag/store.js";
@@ -196,6 +226,7 @@ export {
   MODEL_PRESETS,
   normalizeModelId,
 } from "./models.js";
+export type { ModelPreset } from "./models.js";
 
 export { SessionStore } from "./sessions/store.js";
 export type { ChatSession, SessionMessage } from "./sessions/store.js";

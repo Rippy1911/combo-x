@@ -48,6 +48,9 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "create_agent",
   "update_agent",
   "spawn_subagent",
+  /** UX Vision Lab — capture+attach without unlocking raw screenshot tools */
+  "ux_critique",
+  "open_preview",
 ];
 
 export const TOOL_PACKS = {

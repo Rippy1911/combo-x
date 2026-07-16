@@ -16,6 +16,7 @@ import {
   type RagMeta,
   type RagStore,
   type Vault,
+  type VisionSettings,
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { mcpConnectorFromSanitized } from "./connectorHelpers";
@@ -40,6 +41,8 @@ export type SettingsPanelProps = {
   setCustomModel: (v: string) => void;
   customWorkerModel: string;
   setCustomWorkerModel: (v: string) => void;
+  visionSettings: VisionSettings;
+  setVisionSettings: (v: VisionSettings) => void;
   approvalMode: ApprovalMode;
   setApprovalMode: (v: ApprovalMode) => void;
   budgetMode: AgentBudgetMode;
@@ -82,6 +85,8 @@ export function SettingsPanel({
   setCustomModel,
   customWorkerModel,
   setCustomWorkerModel,
+  visionSettings,
+  setVisionSettings,
   approvalMode,
   setApprovalMode,
   budgetMode,
@@ -778,6 +783,99 @@ export function SettingsPanel({
           Lock vault
         </button>
       </div>
+
+      <h3>UX Vision Lab</h3>
+      <p className="hint wrap">
+        Screenshots attach as vision for the next model turn. Non-vision orchestrators use the
+        vision worker. Defaults work out of the box.
+      </p>
+      <label className="hint">Vision worker model</label>
+      <ModelPicker
+        value={visionSettings.visionWorkerModel}
+        apiKey={apiKey}
+        onChange={(id) =>
+          setVisionSettings({ ...visionSettings, visionWorkerModel: id })
+        }
+      />
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.autoAttachScreenshots}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              autoAttachScreenshots: e.target.checked,
+            })
+          }
+        />
+        Auto-attach screenshots to the next model turn
+      </label>
+      <label className="hint">Critique image detail</label>
+      <select
+        value={visionSettings.critiqueImageDetail}
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            critiqueImageDetail: e.target.value as VisionSettings["critiqueImageDetail"],
+          })
+        }
+      >
+        <option value="low">low (cheap, default)</option>
+        <option value="auto">auto</option>
+        <option value="high">high</option>
+      </select>
+      <label className="hint">Max vision bytes</label>
+      <input
+        type="number"
+        min={50_000}
+        max={8_000_000}
+        step={50_000}
+        value={visionSettings.maxVisionBytes}
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            maxVisionBytes: Number(e.target.value) || 1_500_000,
+          })
+        }
+      />
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.interactivePreviewScripts}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              interactivePreviewScripts: e.target.checked,
+            })
+          }
+        />
+        Interactive HTML previews (sandbox allow-scripts only)
+      </label>
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.enableGenerateMock}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              enableGenerateMock: e.target.checked,
+            })
+          }
+        />
+        Enable generate_mock tool (P1 — off by default)
+      </label>
+      <label className="hint">Force vision on model id (override)</label>
+      <input
+        type="text"
+        value={visionSettings.visionModelOverride}
+        placeholder="e.g. openai/gpt-5.6-luna"
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            visionModelOverride: e.target.value.trim(),
+          })
+        }
+      />
 
       <h3>Advanced</h3>
       <label className="hint">Global approval mode</label>
