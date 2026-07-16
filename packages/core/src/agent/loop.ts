@@ -17,6 +17,7 @@ import {
   type AgentProfileStore,
 } from "../agents/profiles.js";
 import type { TaskStore } from "../tasks/store.js";
+import { formatOpenTasksBlock } from "../tasks/inject.js";
 import { providerFromModel, type UsageEvent, type UsageStore } from "../usage/store.js";
 import { TOOL_CATALOG } from "../tools/catalog.js";
 import {
@@ -108,6 +109,8 @@ export interface ProfileStore {
 export type RunContextSnapshot = {
   systemPrompt: string;
   memoryBlock: string;
+  /** Open conversation + global tasks prepended each turn (empty if none). */
+  taskBlock: string;
   toolNames: string[];
   model: string;
   /** How the first orchestrator call was delivered */
@@ -405,10 +408,12 @@ export class AgentLoop {
     const userContent = await this.buildUserContent(options);
     let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
     if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
-    // Memories loaded once per user turn (not re-fetched during streaming deltas).
+    // Memories + open tasks loaded once per user turn (not mid-stream).
     const memBlock = await this.formatMemoryInject(options.agentId);
+    const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
+    const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
     const messages: ChatMessage[] = [
-      { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
+      { role: "system", content: systemParts.join("\n\n") },
       ...leanHistory(options.history ?? []),
       { role: "user", content: userContent },
     ];
@@ -457,6 +462,7 @@ export class AgentLoop {
       runContext: {
         systemPrompt: systemBase,
         memoryBlock: memBlock,
+        taskBlock,
         toolNames: tools.map((t) => t.function.name),
         model: orchestratorModel,
         transport: preferStream ? "stream" : "full",
@@ -739,6 +745,20 @@ export class AgentLoop {
         return `${i + 1}. [${tag}] ${m.text.slice(0, 400)}`;
       });
       return `AGENT MEMORIES (local; always prepended each turn; prefer these over inventing facts):\n${lines.join("\n")}`;
+    } catch {
+      return "";
+    }
+  }
+
+  /** First-call inject: open session + global tasks (ns-agent Conversation Tasks parity). */
+  private async formatTaskInject(
+    sessionId: string | undefined,
+    tasks: AgentRunOptions["tasks"],
+  ): Promise<string> {
+    if (!tasks) return "";
+    try {
+      const rows = await tasks.list({});
+      return formatOpenTasksBlock(rows, sessionId);
     } catch {
       return "";
     }

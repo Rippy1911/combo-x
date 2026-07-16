@@ -115,7 +115,7 @@ sequenceDiagram
   participant Bridge as ChromeBridge
 
   UI->>Loop: run(userMessage,history,enabledTools,...)
-  Loop->>Loop: buildUserContent + memoryInject + leanHistory
+  Loop->>Loop: buildUserContent + memoryInject + taskInject + leanHistory
   loop EachStep_until_done_or_limit
     Loop->>LLM: chatStreaming(messages,filteredTools)
     LLM-->>Loop: content + toolCalls + usage
@@ -218,15 +218,20 @@ Full catalog: [`docs/TOOLS.md`](./TOOLS.md).
 
 ## Memory inject + lean history
 
-### Memory inject (first turn only)
+### Memory + open-task inject (once per user turn)
 
-Before the first orchestrator call, `formatMemoryInject()` loads the top 8 recent memories from `MemoryStore` and appends a `USER MEMORIES` block to the system prompt. Same store as `remember` / `recall` / `memory_list` tools.
+Before the first orchestrator call each `run()`:
+
+- `formatMemoryInject()` — top memories (global + active agent) via `listForInject`
+- `formatTaskInject()` — open session + global tasks (`formatOpenTasksBlock`, cap 10) so the model tracks the board without calling `list_tasks` first (ns-agent Conversation Tasks parity for *prompt* inject; UI board remains the Tasks tab)
 
 ```typescript
 // packages/core/src/agent/loop.ts
-const memBlock = await this.formatMemoryInject();
+const memBlock = await this.formatMemoryInject(options.agentId);
+const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
+const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
 messages = [
-  { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
+  { role: "system", content: systemParts.join("\n\n") },
   ...leanHistory(options.history ?? []),
   { role: "user", content: userContent },
 ];
@@ -238,9 +243,9 @@ Memory scoring: keyword + recency (`packages/core/src/memory/store.ts`).
 
 `leanHistory()` (`packages/core/src/agent/leanHistory.ts`) prepares prior chat for the next LLM call:
 
-- Drops `role: tool` messages entirely
+- Drops `role: tool` as standalone rows (snippets folded into the prior assistant crumb)
 - Drops prior `role: system` rows
-- Assistant rows with `tool_calls` → short crumb (`[tools: click, page_digest, …]`)
+- Assistant rows with `tool_calls` → crumb (`[tools: …]` or text) **plus** truncated result lines (`Results:`) so "continue" keeps page/tab facts
 - Trims from the **front** until under **24 000** chars (keeps newest)
 
 After each run, `App.tsx` persists `leanHistory(stripImageParts(result.messages))` into `historyRef` for the next turn — images are stripped from history to save tokens.
@@ -249,7 +254,7 @@ After each run, `App.tsx` persists `leanHistory(stripImageParts(result.messages)
 flowchart TD
   FullHistory["Session_messages_full"]
   Lean["leanHistory_24k_cap"]
-  Inject["memory_list_top8"]
+  Inject["memory_plus_open_tasks"]
   System["systemPrompt_plus_BUDGET_addon"]
   User["userMessage_plus_attachments"]
   OR["OpenRouter_messages"]

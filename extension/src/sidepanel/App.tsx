@@ -1287,6 +1287,14 @@ export function App() {
                         key={t.id}
                         className={`bubble ${t.role}${t.bookmarked ? " bookmarked" : ""}`}
                       >
+                        {/* Tools ran first chronologically — render chips above final text. */}
+                        {showActions && t.tools && t.tools.length > 0 ? (
+                          <div className="chips">
+                            {t.tools.map((tool) => (
+                              <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
+                            ))}
+                          </div>
+                        ) : null}
                         {t.role === "assistant" ? (
                           <MarkdownView content={t.content} streaming={streamingId === t.id} />
                         ) : (
@@ -1330,13 +1338,6 @@ export function App() {
                                   ↗
                                 </button>
                               </span>
-                            ))}
-                          </div>
-                        ) : null}
-                        {showActions && t.tools && t.tools.length > 0 ? (
-                          <div className="chips">
-                            {t.tools.map((tool) => (
-                              <ToolChip key={tool.id} tool={tool} onPreview={setPreview} />
                             ))}
                           </div>
                         ) : null}
@@ -1403,7 +1404,7 @@ export function App() {
                         </div>
                         {inspectTurnId === t.id && t.runContext ? (
                           <pre className="context-inspect">
-                            {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}`}
+                            {`model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}\n\n--- OPEN TASKS (session + global; always prepended once per turn) ---\n${t.runContext.taskBlock || "(none)"}`}
                           </pre>
                         ) : null}
                       </div>

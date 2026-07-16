@@ -179,6 +179,7 @@ export type {
 
 export { TaskStore } from "./tasks/store.js";
 export type { Task, TaskStatus, TaskListOptions } from "./tasks/store.js";
+export { formatOpenTasksBlock, pickOpenTasksForInject } from "./tasks/inject.js";
 
 export {
   DEFAULT_MODEL,

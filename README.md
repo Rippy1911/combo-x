@@ -2,7 +2,7 @@
 
 Local-first **browser agent** Chrome extension (MV3).
 
-**Current: v1.4.1** — Virtualized chat (50-msg window), max-turns picker, hide actions, auto-allow pill + one-click ask, Tool access picker (attached vs skill-locked), skills scope filters; v1.4 Libraries + skill gating + LIVE llm-eval.
+**Current: v1.4.2** — Tools-before-text in chat bubbles; open conversation tasks prepended each turn (like memories); leanHistory keeps tool-result snippets so "continue" does not re-browse blind; MarkdownView memo. v1.4.1: virtualized chat, Turns picker, Tool access picker.
 
 **Architecture:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — mermaid diagrams for loop, tools, sub-agents, memories, usage.
 

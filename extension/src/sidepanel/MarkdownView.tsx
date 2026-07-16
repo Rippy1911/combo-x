@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -31,7 +31,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
   );
 }
 
-export function MarkdownView({
+export const MarkdownView = memo(function MarkdownView({
   content,
   streaming,
 }: {
@@ -57,4 +57,4 @@ export function MarkdownView({
       {streaming ? <span className="md-cursor" aria-hidden /> : null}
     </div>
   );
-}
+});

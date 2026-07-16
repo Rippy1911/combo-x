@@ -27,9 +27,12 @@ describe("leanHistory (T-LEAN-1)", () => {
     ];
     const lean = leanHistory(history);
     expect(lean.every((m) => m.role !== "tool")).toBe(true);
-    expect(lean.some((m) => m.role === "assistant" && String(m.content).includes("tools:"))).toBe(
-      true,
+    const toolCrumb = lean.find(
+      (m) => m.role === "assistant" && String(m.content).includes("tools:"),
     );
+    expect(toolCrumb).toBeTruthy();
+    expect(String(toolCrumb?.content)).toContain("Results:");
+    expect(String(toolCrumb?.content)).toContain("Huge page");
     expect(lean[lean.length - 1]?.content).toBe("Done scraping.");
   });
 
