@@ -5,8 +5,10 @@
  * Tool *results* used to be dropped entirely — after "continue" the model only
  * saw `[tools: navigate, …]` and re-browsed. We now attach truncated result
  * snippets so continue keeps page/tab facts without replaying full JSON.
+ * Snippets are deep-redacted before fold-in (no password/token keys to OpenRouter).
  */
 
+import { redactSensitiveDeep } from "../local/views.js";
 import {
   messageContentAsText,
   type ChatMessage,
@@ -29,6 +31,21 @@ function snippet(content: string, max = RESULT_SNIPPET): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+/** Redact sensitive keys then truncate for lean crumbs. */
+export function redactToolResultSnippet(raw: unknown, max = RESULT_SNIPPET): string {
+  let text: string;
+  if (typeof raw === "string") {
+    try {
+      text = JSON.stringify(redactSensitiveDeep(JSON.parse(raw)));
+    } catch {
+      text = raw;
+    }
+  } else {
+    text = JSON.stringify(redactSensitiveDeep(raw));
+  }
+  return snippet(text, max);
+}
+
 function collectToolResultLines(
   history: ChatMessage[],
   startIdx: number,
@@ -43,7 +60,7 @@ function collectToolResultLines(
       (row.tool_call_id ? byId.get(row.tool_call_id) : undefined) ??
       row.name ??
       "tool";
-    lines.push(`${name}: ${snippet(messageContentAsText(row.content))}`);
+    lines.push(`${name}: ${redactToolResultSnippet(messageContentAsText(row.content))}`);
     if (lines.length >= MAX_RESULT_LINES) break;
   }
   return lines;
@@ -52,7 +69,7 @@ function collectToolResultLines(
 /**
  * Prepare prior turns for the next OpenRouter call:
  * - drop `role: tool` as standalone rows
- * - assistants with tool_calls keep text crumb + short result snippets
+ * - assistants with tool_calls keep text crumb + short redacted result snippets
  * - trim from the front until under maxChars (keep newest)
  */
 export function leanHistory(
@@ -96,4 +113,43 @@ export function leanHistory(
   }
   kept.reverse();
   return kept;
+}
+
+/** UI/session turns used to rebuild LLM history after reload or edit-truncate. */
+export type UiHistoryTurn = {
+  role: "user" | "assistant";
+  content: string;
+  tools?: Array<{ name: string; result?: unknown }>;
+};
+
+/**
+ * Rebuild lean ChatMessages from persisted UI turns (1:1 with visible bubbles).
+ * Prefer this over slicing historyRef by UI index (indices do not align).
+ */
+export function historyFromUiTurns(turns: UiHistoryTurn[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const t of turns) {
+    if (t.role === "user") {
+      out.push({ role: "user", content: t.content });
+      continue;
+    }
+    const tools = t.tools ?? [];
+    if (!tools.length) {
+      out.push({ role: "assistant", content: t.content });
+      continue;
+    }
+    const names = tools.map((x) => x.name).slice(0, 8);
+    const more = tools.length > 8 ? ` +${tools.length - 8}` : "";
+    const crumb =
+      t.content.trim() || `[tools: ${names.join(", ")}${more}]`;
+    const results = tools
+      .filter((x) => x.result != null)
+      .slice(0, MAX_RESULT_LINES)
+      .map((x) => `${x.name}: ${redactToolResultSnippet(x.result)}`);
+    out.push({
+      role: "assistant",
+      content: results.length ? `${crumb}\nResults:\n${results.join("\n")}` : crumb,
+    });
+  }
+  return out;
 }

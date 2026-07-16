@@ -18,6 +18,7 @@ import {
   type AgentToolMode,
   extractTargetUrl,
   getProtocolVersion,
+  historyFromUiTurns,
   leanHistory,
   normalizeModelId,
   parseAttachment,
@@ -498,9 +499,15 @@ export function App() {
               usage: m.usage,
             })),
         );
-        historyRef.current = last.messages
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+        historyRef.current = historyFromUiTurns(
+          last.messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({
+              role: m.role as "user" | "assistant",
+              content: m.content,
+              tools: m.tools,
+            })),
+        );
         setSessionUsage({
           promptTokens: 0,
           completionTokens: 0,
@@ -658,9 +665,15 @@ export function App() {
           usage: m.usage,
         })),
     );
-    historyRef.current = s.messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    historyRef.current = historyFromUiTurns(
+      s.messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          tools: m.tools,
+        })),
+    );
     setSessionUsage({
       promptTokens: 0,
       completionTokens: 0,
@@ -712,8 +725,9 @@ export function App() {
       if (editId) {
         const idx = turns.findIndex((t) => t.id === editId && t.role === "user");
         if (idx >= 0) {
+          // UI turns ≠ lean history rows (multi-step crumbs). Rebuild from UI prefix.
           baseTurns = turns.slice(0, idx);
-          historyRef.current = historyRef.current.slice(0, idx);
+          historyRef.current = historyFromUiTurns(baseTurns);
         }
       }
       const userTurn: UiTurn = {
@@ -1065,6 +1079,7 @@ export function App() {
       views,
       bridge,
       currentSession,
+      editingTurnId,
       enabledTools,
       input,
       memory,

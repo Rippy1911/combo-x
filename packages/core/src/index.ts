@@ -84,7 +84,8 @@ export type {
   SubagentEvent,
   RunContextSnapshot,
 } from "./agent/loop.js";
-export { leanHistory } from "./agent/leanHistory.js";
+export { leanHistory, historyFromUiTurns, redactToolResultSnippet } from "./agent/leanHistory.js";
+export type { UiHistoryTurn } from "./agent/leanHistory.js";
 
 export { RagStore } from "./rag/store.js";
 export type { RagChunkRow, RagMeta, IndexedFile } from "./rag/store.js";
