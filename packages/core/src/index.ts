@@ -1,3 +1,17 @@
+export type {
+  CropRect,
+  ParsedDataUrl,
+  RecordingSession,
+  ScreenshotResult,
+} from "./media/capture.js";
+export {
+  blobToDataUrl,
+  buildDataUrl,
+  cropDataUrl,
+  parseDataUrl,
+  stitchTilesVertically,
+} from "./media/capture.js";
+
 export { getProtocolVersion, PROTOCOL_VERSION, SENSITIVE_TOOLS } from "./protocol/messages.js";
 export type {
   BrowserToolName,
@@ -85,6 +99,9 @@ export {
   resolveMaxSteps,
   defaultGetPageMaxChars,
   BUDGET_SYSTEM_ADDON,
+  shouldRejectGetPageFull,
+  preferPageDigest,
+  rewriteGetPageArgs,
 } from "./agent/budget.js";
 export type { AgentBudgetMode } from "./agent/budget.js";
 export {
@@ -96,10 +113,27 @@ export type { PageTemplateEntry } from "./agent/pageTemplateCache.js";
 export { chunkText, RAG_DEFAULT_CHUNK_SIZE } from "./rag/chunk.js";
 export { hybridScore, mockVector, tokenize } from "./rag/embed.js";
 
-export { ideaforgeSearch, clearIdeaForgeTokenCache } from "./connectors/ideaforge.js";
-export type { IdeaForgeConfig, IdeaForgeSearchHit } from "./connectors/ideaforge.js";
-export { githubSearchCode, githubGetFile } from "./connectors/github.js";
-export type { GitHubConfig, GitHubCodeHit } from "./connectors/github.js";
+export { ConnectorStore } from "./connectors/store.js";
+export type {
+  Connector,
+  RestConnector,
+  McpConnector,
+  RestToolSpec,
+  SecretRef,
+} from "./connectors/store.js";
+export { parseMcpDefinition } from "./connectors/secrets.js";
+export type { ParsedSecret, ParseMcpDefinitionResult } from "./connectors/secrets.js";
+export { resolveHeaders, restRequest } from "./connectors/rest.js";
+export type { GetSecretFn, RestRequestOptions } from "./connectors/rest.js";
+export { mcpListTools, mcpCall } from "./connectors/mcp.js";
+export { githubRestTemplate } from "./connectors/templates.js";
+
+export { AgentProfileStore } from "./agents/profiles.js";
+export type {
+  AgentProfile,
+  ToolAllowlist,
+  ApprovalMode as AgentProfileApprovalMode,
+} from "./agents/profiles.js";
 
 export {
   DEFAULT_MODEL,
@@ -120,6 +154,8 @@ export type { Bookmark, Reminder, ReportArtifact } from "./local/artifacts.js";
 
 export {
   ViewStore,
+  ensureView,
+  upsertRows,
   redactSensitiveFields,
   redactSensitiveDeep,
   siteProfileLabelName,

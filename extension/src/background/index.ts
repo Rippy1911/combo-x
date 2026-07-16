@@ -5,6 +5,13 @@ import {
   type ContentRequest,
   type ContentResponse,
 } from "@combo-x/core";
+import {
+  captureElement,
+  captureFullPage,
+  captureViewport,
+  startRecording,
+  stopRecording,
+} from "../lib/media-bridge.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -190,6 +197,40 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       case "content": {
         sendResponse(await runContent(parsed.data.request, parsed.data.tabId));
+        break;
+      }
+      case "capture_viewport": {
+        sendResponse(await captureViewport(parsed.data.windowId));
+        break;
+      }
+      case "capture_element": {
+        if (parsed.data.selector == null && parsed.data.index == null) {
+          sendResponse({ ok: false, error: "selector or index required" });
+          break;
+        }
+        sendResponse(
+          await captureElement(parsed.data.tabId, {
+            selector: parsed.data.selector,
+            index: parsed.data.index,
+          }),
+        );
+        break;
+      }
+      case "capture_full_page": {
+        sendResponse(await captureFullPage(parsed.data.tabId));
+        break;
+      }
+      case "start_recording": {
+        sendResponse(await startRecording(parsed.data.tabId));
+        break;
+      }
+      case "stop_recording": {
+        sendResponse(
+          await stopRecording({
+            download: parsed.data.download,
+            filename: parsed.data.filename,
+          }),
+        );
         break;
       }
       default:

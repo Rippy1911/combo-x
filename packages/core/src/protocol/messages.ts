@@ -25,9 +25,6 @@ export const BrowserToolNameSchema = z.enum([
   "rag_search",
   "rag_read_file",
   "rag_status",
-  "ideaforge_search",
-  "github_search_code",
-  "github_get_file",
   "list_attachments",
   "read_attachment",
   "remember",
@@ -48,6 +45,18 @@ export const BrowserToolNameSchema = z.enum([
   "scrape_catalog",
   "save_site_profile",
   "get_site_profile",
+  "ensure_scrape_table",
+  "upsert_scrape_rows",
+  "get_scrape_table",
+  "scrape_pdps",
+  "rest_request",
+  "mcp_list_tools",
+  "mcp_call",
+  "screenshot_viewport",
+  "screenshot_element",
+  "screenshot_full",
+  "start_recording",
+  "stop_recording",
 ]);
 export type BrowserToolName = z.infer<typeof BrowserToolNameSchema>;
 
@@ -112,6 +121,12 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     limit: z.number().int().positive().max(200).optional(),
     attributes: z.array(z.string()).optional(),
   }),
+  z.object({
+    op: z.literal("element_rect"),
+    selector: z.string().min(1).optional(),
+    index: z.number().int().nonnegative().optional(),
+  }),
+  z.object({ op: z.literal("page_metrics") }),
 ]);
 export type ContentRequest = z.infer<typeof ContentRequestSchema>;
 
@@ -158,6 +173,29 @@ export const RuntimeMessageSchema = z.discriminatedUnion("type", [
     mime: z.string().optional(),
   }),
   z.object({ type: z.literal("ping") }),
+  z.object({
+    type: z.literal("capture_viewport"),
+    windowId: z.number().int().optional(),
+  }),
+  z.object({
+    type: z.literal("capture_element"),
+    tabId: z.number().int(),
+    selector: z.string().min(1).optional(),
+    index: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
+    type: z.literal("capture_full_page"),
+    tabId: z.number().int(),
+  }),
+  z.object({
+    type: z.literal("start_recording"),
+    tabId: z.number().int(),
+  }),
+  z.object({
+    type: z.literal("stop_recording"),
+    download: z.boolean().optional(),
+    filename: z.string().min(1).optional(),
+  }),
 ]);
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
 
@@ -178,4 +216,9 @@ export const SENSITIVE_TOOLS = new Set([
   "close_tab",
   "login",
   "scrape_catalog",
+  "scrape_pdps",
+  "rest_request",
+  "mcp_call",
+  "start_recording",
+  "stop_recording",
 ]);

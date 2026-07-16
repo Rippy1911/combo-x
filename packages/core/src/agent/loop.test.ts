@@ -92,7 +92,7 @@ describe("AgentLoop", () => {
     expect(events).toContain("done");
   });
 
-  it("budget mode defaults get_page to snippet + maxChars", async () => {
+  it("budget mode rewrites bare get_page to page_digest", async () => {
     const llm = mockLlm([
       {
         content: null,
@@ -112,8 +112,80 @@ describe("AgentLoop", () => {
       budgetMode: "budget",
     });
     expect(browser.runContent).toHaveBeenCalledWith(
-      expect.objectContaining({ op: "get_page", mode: "snippet", maxChars: 2_200 }),
+      expect.objectContaining({ op: "page_digest" }),
     );
+  });
+
+  it("scrape_pdps upserts rows without get_page full", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "scrape_pdps",
+            args: JSON.stringify({
+              saps: ["29597", "29605"],
+              baseUrl: "https://b2b.example.com",
+              viewName: "ean-map",
+            }),
+          },
+        ],
+      },
+      { content: "done" },
+    ]);
+    let nav = 0;
+    const browser = stubBrowser({
+      runContent: vi.fn(async (req) => {
+        if (req.op === "page_digest") {
+          nav += 1;
+          const n = String(nav);
+          return {
+            ok: true,
+            data: {
+              title: `PDP ${n}`,
+              url: `https://b2b.example.com/s/${n}`,
+              labelHits: [
+                { label: "EAN", value: `590074961092${n}` },
+                { label: "EAN Opakowanie zbiorcze", value: `590074961192${n}` },
+                { label: "Numer katalogowy", value: n === "1" ? "29597" : "29605" },
+              ],
+              eans: [`590074961092${n}`, `590074961192${n}`],
+            },
+          };
+        }
+        return { ok: true, data: {} };
+      }),
+      navigate: vi.fn(async (url) => ({ ok: true, url })),
+      listTabs: vi.fn(async () => [
+        { id: 1, title: "B2B", url: "https://b2b.example.com/" },
+      ]),
+    });
+    const views = new ViewStore(`views_${crypto.randomUUID()}`);
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "scrape",
+      budgetMode: "budget",
+      approvalMode: "auto_all",
+      views,
+      maxSteps: 4,
+    });
+    const getPageFull = (browser.runContent as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0]?.op === "get_page" && c[0]?.mode === "full",
+    );
+    expect(getPageFull).toHaveLength(0);
+    const digestCalls = (browser.runContent as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0]?.op === "page_digest",
+    );
+    expect(digestCalls.length).toBeGreaterThanOrEqual(2);
+    const table = await views.get("ean-map");
+    expect(table).toBeTruthy();
+    expect((table!.rows?.length ?? 0) - 1).toBeGreaterThanOrEqual(2);
   });
 
   it("respects abort signal", async () => {

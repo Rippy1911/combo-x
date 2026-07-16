@@ -27,9 +27,9 @@ const TOOL_NAMES = [
   "rag_search",
   "rag_read_file",
   "rag_status",
-  "ideaforge_search",
-  "github_search_code",
-  "github_get_file",
+  "rest_request",
+  "mcp_list_tools",
+  "mcp_call",
   "list_attachments",
   "read_attachment",
   "export_csv",
@@ -87,9 +87,9 @@ const TOOL_BLURB: Record<string, string> = {
   rag_search: "Search granted local folder index.",
   rag_read_file: "Read a path from the local RAG index.",
   rag_status: "Folder grant + index stats.",
-  ideaforge_search: "Search IdeaForge knowledge (vault creds).",
-  github_search_code: "GitHub code search (PAT).",
-  github_get_file: "Read a GitHub file (PAT).",
+  rest_request: "Call a configured REST connector.",
+  mcp_list_tools: "List tools from an MCP connector.",
+  mcp_call: "Call a tool on an MCP connector.",
   list_attachments: "List uploaded chat files.",
   read_attachment: "Read parsed text from an upload.",
   save_view: "Save table snapshot to Views tab.",
@@ -142,7 +142,7 @@ function render() {
     const approval = document.getElementById("approval") as HTMLSelectElement;
     approval.value = "auto_llm";
     document.querySelectorAll<HTMLInputElement>("#connectors input").forEach((c) => {
-      c.checked = true;
+      c.checked = c.value === "local_rag";
     });
   });
 
@@ -167,7 +167,7 @@ function render() {
     const msg = document.getElementById("msg")!;
     try {
       await chrome.storage.local.set({ combo_x_setup_payload: payload });
-      msg.textContent = `Sent — ${payload.tools.length} tools, approval=${payload.approvalMode}. Folder RAG stays in Settings. Open the Combo-X side panel.`;
+      msg.textContent = `Sent — ${payload.tools.length} tools, approval=${payload.approvalMode}. Open the Combo-X side panel.`;
     } catch (e) {
       msg.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
     }

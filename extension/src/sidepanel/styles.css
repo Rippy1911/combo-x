@@ -75,6 +75,82 @@ body {
   overflow-x: auto;
 }
 
+.settings-panel h3 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.settings-panel h4 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tool-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-group h3,
+.tool-group h4 {
+  margin: 0 0 6px;
+}
+
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip-toggle.on {
+  border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.chip-toggle input {
+  margin: 0;
+}
+
+.tool-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-pick {
+  max-width: 120px;
+  font-size: 11px;
+}
+
+.agent-editor {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.connector-forms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.list.compact li {
+  margin-bottom: 4px;
+}
+
 .tab {
   border: none;
   background: transparent;

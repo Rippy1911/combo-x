@@ -158,3 +158,82 @@ export class ViewStore {
     }
   }
 }
+
+/** Ensure a named view exists with the given column headers. */
+export async function ensureView(
+  store: ViewStore,
+  input: { name: string; columns: string[]; keyColumns?: string[] },
+): Promise<SavedView> {
+  const existing = await store.get(input.name);
+  const note =
+    input.keyColumns && input.keyColumns.length > 0
+      ? `keyColumns:${input.keyColumns.join(",")}`
+      : undefined;
+  if (existing) {
+    return store.save({
+      id: existing.id,
+      name: input.name,
+      source: existing.source ?? "manual",
+      columns: input.columns,
+      rows: existing.rows?.length
+        ? [input.columns, ...existing.rows.slice(1)]
+        : [input.columns],
+      note: note ?? existing.note,
+    });
+  }
+  return store.save({
+    name: input.name,
+    source: "manual",
+    columns: input.columns,
+    rows: [input.columns],
+    note,
+  });
+}
+
+function keyIndices(columns: string[], keyColumns: string[]): number[] {
+  const lower = columns.map((c) => c.toLowerCase());
+  return keyColumns.map((k) => lower.indexOf(k.toLowerCase())).filter((i) => i >= 0);
+}
+
+function rowKey(row: string[], indices: number[]): string {
+  return indices.map((i) => row[i] ?? "").join("\u0000");
+}
+
+/** Merge rows into a view by key column header names (upsert on match). */
+export async function upsertRows(
+  store: ViewStore,
+  viewId: string,
+  rows: string[][],
+  keyColumns: string[],
+): Promise<SavedView> {
+  const view = await store.get(viewId);
+  if (!view) throw new Error(`view not found: ${viewId}`);
+  const header = view.rows?.[0] ?? view.columns ?? [];
+  if (header.length === 0) throw new Error("view has no columns");
+  const indices = keyIndices(header, keyColumns);
+  if (indices.length === 0) throw new Error(`key columns not found in header: ${keyColumns.join(", ")}`);
+
+  const existing = view.rows ?? [header];
+  const dataRows = existing.slice(1);
+  const byKey = new Map<string, string[]>();
+  for (const row of dataRows) {
+    byKey.set(rowKey(row, indices), row);
+  }
+  for (const row of rows) {
+    if (row.length === 0) continue;
+    const padded = [...row];
+    while (padded.length < header.length) padded.push("");
+    byKey.set(rowKey(padded, indices), padded.slice(0, header.length));
+  }
+  const merged = [header, ...Array.from(byKey.values())];
+  return store.save({
+    id: view.id,
+    name: view.name,
+    source: view.source,
+    columns: header,
+    rows: merged,
+    filter: view.filter,
+    chart: view.chart,
+    note: view.note,
+  });
+}

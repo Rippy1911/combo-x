@@ -353,58 +353,6 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "ideaforge_search",
-      description:
-        "Read-only search IdeaForge knowledge (Notes / ProjectDocuments) via admin session. Requires IdeaForge credentials in Settings.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          limit: { type: "number" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "github_search_code",
-      description:
-        "Read-only GitHub code search (needs github_token in vault). Optional repo owner/name filter.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          repo: { type: "string", description: "owner/name" },
-          limit: { type: "number" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "github_get_file",
-      description: "Read a file from GitHub (owner/name + path). Read-only.",
-      parameters: {
-        type: "object",
-        properties: {
-          repo: { type: "string" },
-          path: { type: "string" },
-          ref: { type: "string" },
-        },
-        required: ["repo", "path"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "list_attachments",
       description:
         "List files the user uploaded in chat (PDF, CSV, XLSX, txt, images). Prefer read_attachment for full text.",
@@ -699,6 +647,214 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           maxPages: { type: "number", description: "Cap (1-100, default 20)" },
         },
         required: ["selector", "intent"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ensure_scrape_table",
+      description:
+        "Create or open a durable scrape table in Views (IndexedDB). Call BEFORE navigating PDPs so rows persist each step.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "View name e.g. foodwell-ean-map" },
+          columns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Header columns e.g. ean,packagedEan,sap,name,qty_per_box",
+          },
+          keyColumns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Columns used for upsert merge (default first column)",
+          },
+        },
+        required: ["name", "columns"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "upsert_scrape_rows",
+      description: "Merge rows into a scrape table by key columns. Call after every successful PDP.",
+      parameters: {
+        type: "object",
+        properties: {
+          viewId: { type: "string", description: "View id or name" },
+          rows: {
+            type: "array",
+            items: { type: "array", items: { type: "string" } },
+            description: "Data rows (no header) matching ensure_scrape_table columns",
+          },
+          keyColumns: { type: "array", items: { type: "string" } },
+        },
+        required: ["viewId", "rows"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_scrape_table",
+      description: "Read current scrape table rows (progress check).",
+      parameters: {
+        type: "object",
+        properties: {
+          viewId: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["viewId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "scrape_pdps",
+      description:
+        "Batch scrape product pages in ONE tool turn: for each SAP or URL → navigate → page_digest → upsert row. Prefer over N× get_page. Creates the view if missing.",
+      parameters: {
+        type: "object",
+        properties: {
+          saps: { type: "array", items: { type: "string" }, description: "Catalog/SAP codes → /s/{sap}" },
+          urls: { type: "array", items: { type: "string" } },
+          baseUrl: {
+            type: "string",
+            description: "Origin for /s/{sap} (default current tab origin)",
+          },
+          viewName: { type: "string", description: "Default scrape-pdps" },
+          columns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Default ean,packagedEan,sap,title,url",
+          },
+          keyColumns: { type: "array", items: { type: "string" } },
+          waitMs: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rest_request",
+      description:
+        "Call a configured REST connector (Settings → Connectors). Headers resolve vault secret refs. No hardcoded hosts.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectorId: { type: "string" },
+          method: { type: "string" },
+          path: { type: "string" },
+          query: { type: "object", additionalProperties: { type: "string" } },
+          body: {},
+        },
+        required: ["connectorId", "path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_list_tools",
+      description: "List tools from a remote MCP connector (HTTP transport).",
+      parameters: {
+        type: "object",
+        properties: { connectorId: { type: "string" } },
+        required: ["connectorId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_call",
+      description: "Call a tool on a remote MCP connector.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectorId: { type: "string" },
+          tool: { type: "string" },
+          arguments: { type: "object", additionalProperties: true },
+        },
+        required: ["connectorId", "tool"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_viewport",
+      description: "Capture visible tab screenshot (PNG data URL).",
+      parameters: {
+        type: "object",
+        properties: { windowId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_element",
+      description: "Capture + crop an element by CSS selector or interactive index.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string" },
+          index: { type: "number" },
+          tabId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_full",
+      description: "Best-effort full-page screenshot (scroll-stitch, capped).",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "start_recording",
+      description: "Start tab screen recording (webm). Requires recent user gesture/approval.",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_recording",
+      description: "Stop tab recording; download webm and/or return data URL.",
+      parameters: {
+        type: "object",
+        properties: {
+          download: { type: "boolean" },
+          filename: { type: "string" },
+        },
         additionalProperties: false,
       },
     },

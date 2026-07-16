@@ -3,16 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Combo-X — Healthtree workspace</title>
+    <title>Combo-X — Workspace setup</title>
     <link rel="stylesheet" href="./setup.css" />
   </head>
   <body>
     <main class="wrap">
-      <h1>Healthtree workspace</h1>
+      <h1>Combo-X workspace setup</h1>
       <p class="sub">
-        Sebastian / Healthtree defaults for FoodWell B2B (carton→retail EAN), invoice PDFs, IdeaForge +
-        GitHub. Folder grant &amp; exclude filters are in the side panel <strong>Settings</strong> (not
-        here). This page only syncs tool allowlist + approval + connector flags into the extension.
+        Sync tool allowlist, approval mode, and connector flags into the extension. Folder grant and
+        exclude filters live in the side panel <strong>Settings → Device RAG</strong>.
       </p>
 
       <section>
@@ -27,7 +26,7 @@
       <section>
         <h2>Tool presets</h2>
         <p class="hint">
-          Defaults favor scrape + attachments + RAG. Toggle freely, then Send.
+          Defaults favor browser scrape + attachments + RAG. Toggle freely, then Send.
         </p>
         <div class="row">
           <button type="button" id="all-on">Enable all</button>
@@ -38,18 +37,18 @@
       </section>
 
       <section>
-        <h2>Read-only connectors</h2>
+        <h2>Connectors</h2>
         <ul id="connectors" class="tools">
           <li>
             <label>
-              <input type="checkbox" value="ideaforge:read" checked /> IdeaForge —
-              <code>ideaforge_search</code> (vault email/password in Settings)
+              <input type="checkbox" value="connectors:rest" checked /> REST connectors —
+              <code>rest_request</code> (configure in Settings)
             </label>
           </li>
           <li>
             <label>
-              <input type="checkbox" value="github:read" checked /> GitHub —
-              <code>github_search_code</code> / <code>github_get_file</code> (PAT in Settings)
+              <input type="checkbox" value="connectors:mcp" checked /> MCP connectors —
+              <code>mcp_list_tools</code> / <code>mcp_call</code>
             </label>
           </li>
           <li>
@@ -59,7 +58,7 @@
           </li>
         </ul>
         <p class="hint">
-          Grant folders + set exclude dirs (<code>node_modules</code> etc.) in Settings → Device RAG.
+          Add REST/MCP connectors and vault secrets in Settings → Connectors.
         </p>
       </section>
 

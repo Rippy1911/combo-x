@@ -205,6 +205,49 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         });
         return { ok: true, data: { items, count: items.length } };
       }
+      case "element_rect": {
+        let el: Element | null = null;
+        if (request.selector) {
+          el = doc.querySelector(request.selector);
+        } else if (request.index != null) {
+          const map = interactiveMaps.get(doc);
+          el = map?.[request.index] ?? null;
+        }
+        if (!el || !(el instanceof HTMLElement)) {
+          return { ok: false, error: "element not found" };
+        }
+        const rect = el.getBoundingClientRect();
+        const dpr = doc.defaultView?.devicePixelRatio ?? 1;
+        return {
+          ok: true,
+          data: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            dpr,
+            tag: el.tagName.toLowerCase(),
+          },
+        };
+      }
+      case "page_metrics": {
+        const view = doc.defaultView;
+        const root =
+          (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement ?? doc.body;
+        const dpr = view?.devicePixelRatio ?? 1;
+        return {
+          ok: true,
+          data: {
+            scrollWidth: root?.scrollWidth ?? 0,
+            scrollHeight: root?.scrollHeight ?? 0,
+            clientWidth: root?.clientWidth ?? view?.innerWidth ?? 0,
+            clientHeight: root?.clientHeight ?? view?.innerHeight ?? 0,
+            scrollX: view?.scrollX ?? root?.scrollLeft ?? 0,
+            scrollY: view?.scrollY ?? root?.scrollTop ?? 0,
+            dpr,
+          },
+        };
+      }
       default:
         return { ok: false, error: "unknown op" };
     }

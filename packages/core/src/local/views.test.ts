@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ViewStore,
+  ensureView,
+  upsertRows,
   redactSensitiveFields,
   siteProfileLabelName,
 } from "./views.js";
@@ -25,6 +27,36 @@ describe("ViewStore", () => {
     expect(byName?.rows?.[1]?.[0]).toBe("A");
     expect(await store.delete(saved.id)).toBe(true);
     expect(await store.get(saved.id)).toBeNull();
+  });
+});
+
+describe("ensureView + upsertRows", () => {
+  it("ensureView creates then upsertRows merges by key columns", async () => {
+    const store = new ViewStore(`views_upsert_${crypto.randomUUID()}`);
+    const view = await ensureView(store, {
+      name: "Catalog",
+      columns: ["sku", "name", "price"],
+      keyColumns: ["sku"],
+    });
+    await upsertRows(
+      store,
+      view.id,
+      [
+        ["A1", "Widget", "10"],
+        ["B2", "Gadget", "20"],
+      ],
+      ["sku"],
+    );
+    const updated = await upsertRows(
+      store,
+      view.id,
+      [["A1", "Widget Pro", "12"]],
+      ["sku"],
+    );
+    const rows = updated.rows ?? [];
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toEqual(["A1", "Widget Pro", "12"]);
+    expect(rows[2]).toEqual(["B2", "Gadget", "20"]);
   });
 });
 

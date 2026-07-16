@@ -1,12 +1,14 @@
 import {
   ArtifactStore,
   AttachmentStore,
+  ConnectorStore,
   INSPECTABLE_DBS,
   MemoryStore,
   RagStore,
   SessionStore,
   ViewStore,
   inspectStore,
+  restRequest,
   siteProfileLabelName,
   type RagMeta,
   type SavedView,
@@ -36,8 +38,7 @@ export function ViewsPanel({
   memory,
   artifacts,
   vaultUnlocked,
-  ideaforgeConfigured,
-  githubConfigured,
+  connectorStore,
   onExport,
 }: {
   vault: Vault;
@@ -48,8 +49,7 @@ export function ViewsPanel({
   memory: MemoryStore;
   artifacts: ArtifactStore;
   vaultUnlocked: boolean;
-  ideaforgeConfigured: boolean;
-  githubConfigured: boolean;
+  connectorStore: ConnectorStore;
   onExport: (filename: string, text: string, mime: string) => void | Promise<void>;
 }) {
   const [sub, setSub] = useState<SubNav>("library");
@@ -61,6 +61,7 @@ export function ViewsPanel({
   const [msg, setMsg] = useState("");
   const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
   const [attachCount, setAttachCount] = useState(0);
+  const [connectorCount, setConnectorCount] = useState(0);
   const [probeMsg, setProbeMsg] = useState("");
   const [inspDb, setInspDb] = useState(INSPECTABLE_DBS[0]!.name);
   const [inspStore, setInspStore] = useState(INSPECTABLE_DBS[0]!.stores[0]!);
@@ -195,8 +196,9 @@ export function ViewsPanel({
     void (async () => {
       setRagMeta(await rag.getMeta());
       setAttachCount((await attachments.list()).length);
+      setConnectorCount((await connectorStore.list()).length);
     })();
-  }, [sub, rag, attachments]);
+  }, [sub, rag, attachments, connectorStore]);
 
   const openView = async (v: SavedView) => {
     if (v.rows?.length) {
@@ -230,6 +232,30 @@ export function ViewsPanel({
     () => INSPECTABLE_DBS.find((d) => d.name === inspDb)?.stores ?? [],
     [inspDb],
   );
+
+  const probeRest = async () => {
+    const list = await connectorStore.list();
+    const rest = list.find((c) => c.kind === "rest");
+    if (!rest || rest.kind !== "rest") {
+      setProbeMsg(
+        list.length
+          ? `${list.length} connector(s) — none are REST`
+          : "No connectors — add REST in Settings",
+      );
+      return;
+    }
+    const path = rest.id === "github-rest" ? "/zen" : "/";
+    const out = await restRequest(
+      rest,
+      { path, method: "GET" },
+      (label) => vault.getByLabel(label),
+    );
+    setProbeMsg(
+      out.ok
+        ? `REST probe OK — ${rest.name} ${path}`
+        : `REST probe failed: ${out.error}`,
+    );
+  };
 
   return (
     <div className="panel views-panel">
@@ -363,8 +389,7 @@ export function ViewsPanel({
                 ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
                 : "not indexed"}
             </li>
-            <li>IdeaForge credentials: {ideaforgeConfigured ? "configured" : "missing"}</li>
-            <li>GitHub PAT: {githubConfigured ? "configured" : "missing"}</li>
+            <li>Connectors: {connectorCount} configured</li>
             <li>Attachments: {attachCount}</li>
             <li>Saved views: {library.length}</li>
           </ul>
@@ -378,36 +403,15 @@ export function ViewsPanel({
                   setProbeMsg(
                     m?.chunkCount
                       ? `RAG OK — ${m.chunkCount} chunks`
-                      : "RAG empty — grant folder in Setup",
+                      : "RAG empty — grant folder in Settings",
                   );
                 })()
               }
             >
               Test RAG
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                setProbeMsg(
-                  ideaforgeConfigured
-                    ? "IdeaForge labels present (not calling API — secrets stay in vault)"
-                    : "Set IdeaForge email/password in Settings",
-                )
-              }
-            >
-              Probe IdeaForge
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setProbeMsg(
-                  githubConfigured
-                    ? "GitHub token label present (not calling API)"
-                    : "Set github_token in Settings",
-                )
-              }
-            >
-              Probe GitHub
+            <button type="button" onClick={() => void probeRest()}>
+              Probe REST
             </button>
           </div>
           {probeMsg ? <p className="hint wrap">{probeMsg}</p> : null}

@@ -11,7 +11,7 @@ Durable tables and local-data browser for the side panel **Views** tab (v0.7+).
 | UC-Chart | Simple SVG bar/line from a numeric column (no chart library) |
 | UC-Export | Downloads via `downloadText` |
 | UC-CopilotView | Agent tools `save_view` / `list_views` / `get_view` |
-| UC-Integrations | Status cards (vault, RAG meta, IdeaForge/GH configured flags, attachment count) — Test probes never dump secrets |
+| UC-Integrations | Status cards (vault, RAG meta, connector count, attachment count) — Test probes never dump secrets |
 | UC-Inspector | Advanced read-only IDB inspector; vault = labels + ciphertext marker only |
 | UC-Privacy | Never show vault plaintext or site-profile passwords in Views |
 

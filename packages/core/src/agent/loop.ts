@@ -1,5 +1,3 @@
-import { githubGetFile, githubSearchCode, type GitHubConfig } from "../connectors/github.js";
-import { ideaforgeSearch, type IdeaForgeConfig } from "../connectors/ideaforge.js";
 import { ArtifactStore, buildReportHtml } from "../local/artifacts.js";
 import type { AttachmentStore } from "../attachments/store.js";
 import {
@@ -7,10 +5,15 @@ import {
   formatAttachmentInventory,
 } from "../attachments/parse.js";
 import type { ViewChartSpec, ViewStore } from "../local/views.js";
+import { ensureView, upsertRows } from "../local/views.js";
+import type { ConnectorStore } from "../connectors/store.js";
+import { restRequest } from "../connectors/rest.js";
+import { mcpCall, mcpListTools } from "../connectors/mcp.js";
 import {
   BUDGET_SYSTEM_ADDON,
-  defaultGetPageMaxChars,
+  preferPageDigest,
   resolveMaxSteps,
+  rewriteGetPageArgs,
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
@@ -43,6 +46,19 @@ export interface BrowserBridge {
   goBack(tabId?: number): Promise<{ ok: boolean }>;
   closeTab(tabId: number): Promise<{ ok: boolean }>;
   downloadText(filename: string, text: string, mime?: string): Promise<{ ok: boolean }>;
+  captureViewport?(windowId?: number): Promise<import("../media/capture.js").ScreenshotResult>;
+  captureElement?(
+    tabId: number,
+    target: { selector?: string; index?: number },
+  ): Promise<import("../media/capture.js").ScreenshotResult>;
+  captureFullPage?(tabId: number): Promise<import("../media/capture.js").ScreenshotResult>;
+  startRecording?(
+    tabId: number,
+  ): Promise<{ ok: boolean; session?: import("../media/capture.js").RecordingSession; error?: string }>;
+  stopRecording?(opts?: {
+    download?: boolean;
+    filename?: string;
+  }): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
 }
 
 /** A saved site login + scrape recipe, stored encrypted in the vault as `site_profile:<name>`. */
@@ -92,10 +108,16 @@ export interface AgentEvent {
   approvalDecision?: "allowed" | "denied" | "auto_all" | "auto_llm" | "n/a";
 }
 
-export interface ConnectorBundle {
-  ideaforge?: IdeaForgeConfig | null;
-  github?: GitHubConfig | null;
-}
+/** Runtime for dynamic REST/MCP connectors (no hardcoded hosts). */
+export type ConnectorRuntime = {
+  store: ConnectorStore;
+  getSecret: (label: string) => Promise<string | null>;
+  /** If set, only these connector ids are callable */
+  allowedIds?: string[];
+};
+
+/** @deprecated use ConnectorRuntime */
+export type ConnectorBundle = ConnectorRuntime;
 
 export interface AgentRunOptions {
   model: string;
@@ -117,8 +139,8 @@ export interface AgentRunOptions {
   onEvent?: (event: AgentEvent) => void;
   /** Local folder RAG index (IndexedDB) */
   rag?: RagStore;
-  /** Live read-only connectors */
-  connectors?: ConnectorBundle;
+  /** Dynamic REST/MCP connectors */
+  connectors?: ConnectorRuntime;
   /** Chat attachments (PDF/CSV/images/…) */
   attachments?: AttachmentStore;
   /** Attachment ids included with this user turn */
@@ -141,18 +163,20 @@ export interface AgentRunResult {
 const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and close_tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
-For catalogs/scrapes: scroll + query_all or scrape_tables, then parse_data (cheap worker LLM) to structure rows, then export_csv or save_view (durable table in Views tab).
-For a WHOLE catalog in one call: scrape_catalog (paginates all pages, calls the worker per page, dedupes, returns rows) — then export_csv or save_view.
-Use list_views / get_view to reopen saved tables.
-Login + recipe reuse without re-entering: save_site_profile once (name, loginUrl, username, password, selectors, selector, nextSelector|nextText, intent) — then login {profile} and scrape_catalog {profile} reuse it. Use get_site_profile to recall a recipe.
-For codebase questions: rag_search / rag_read_file against the granted local folder; ideaforge_search for portfolio knowledge; github_search_code / github_get_file when a GitHub token is configured.
-For uploaded chat files (PDF/CSV/XLSX/txt/images): list_attachments / read_attachment. Images may be attached as vision parts on the user turn.
-Durable notes: remember / recall / memory_list — top memories are also injected into the system prompt each run.
+SCRAPE WORKFLOW (mandatory for multi-item scrapes):
+1) ensure_scrape_table with columns BEFORE first navigate
+2) Prefer scrape_pdps({ saps|urls }) OR page_digest per PDP — never dump get_page full
+3) upsert_scrape_rows after each success (scrape_pdps does this for you)
+4) export_csv / save_view when done
+For catalogs: scrape_catalog OR scroll + query_all + parse_data (cheap worker).
+Login: prefer login {profile} / save_site_profile — not manual password typing loops.
+Connectors: rest_request / mcp_list_tools / mcp_call against user-configured connectors only.
+Media: screenshot_viewport|element|full; start_recording / stop_recording for tab webm.
+Local files: rag_search / rag_read_file; attachments via list_attachments / read_attachment.
+Durable notes: remember / recall / memory_list.
 Rules:
-- Prefer get_interactive or query_all over dumping huge get_page text into your own context.
-- Prefer rag_search over inventing file contents.
-- Prefer read_attachment over inventing uploaded file contents.
-- Prefer USER MEMORIES / recall over inventing user facts.
+- Prefer page_digest / scrape_pdps over get_page.
+- Prefer rag_search / read_attachment / USER MEMORIES over inventing facts.
 - After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
 - Be concise in the final answer.`;
@@ -515,7 +539,7 @@ export class AgentLoop {
     workerModel: string,
     onUsage: (u: LlmUsage) => void,
     rag?: RagStore,
-    connectors?: ConnectorBundle,
+    connectors?: ConnectorRuntime,
     attachments?: AttachmentStore,
     views?: ViewStore,
     approvalMeta?: {
@@ -593,42 +617,6 @@ export class AgentLoop {
           result = file
             ? { ok: true, ...file }
             : { ok: false, error: `path not in index: ${path}` };
-        }
-      } else if (name === "ideaforge_search") {
-        const cfg = connectors?.ideaforge;
-        if (!cfg?.email || !cfg?.password) {
-          result = {
-            ok: false,
-            error: "IdeaForge credentials missing — set email+password in Settings (vault)",
-          };
-        } else {
-          result = await ideaforgeSearch(
-            cfg,
-            String(args.query ?? ""),
-            typeof args.limit === "number" ? args.limit : 10,
-          );
-        }
-      } else if (name === "github_search_code") {
-        const cfg = connectors?.github;
-        if (!cfg?.token) {
-          result = { ok: false, error: "github_token missing in vault (Settings)" };
-        } else {
-          result = await githubSearchCode(cfg, String(args.query ?? ""), {
-            repo: typeof args.repo === "string" ? args.repo : undefined,
-            limit: typeof args.limit === "number" ? args.limit : 10,
-          });
-        }
-      } else if (name === "github_get_file") {
-        const cfg = connectors?.github;
-        if (!cfg?.token) {
-          result = { ok: false, error: "github_token missing in vault (Settings)" };
-        } else {
-          result = await githubGetFile(
-            cfg,
-            String(args.repo ?? ""),
-            String(args.path ?? ""),
-            typeof args.ref === "string" ? args.ref : undefined,
-          );
         }
       } else if (name === "list_attachments") {
         if (!attachments) result = { ok: false, error: "attachment store unavailable" };
@@ -786,21 +774,147 @@ export class AgentLoop {
         result = await this.loginWithProfile(args, emit);
       } else if (name === "scrape_catalog") {
         result = await this.scrapeCatalog(args, workerModel, emit, onUsage);
-      } else {
-        let toolArgs = args;
-        if (name === "get_page" && budgetMode === "budget") {
-          toolArgs = {
-            ...args,
-            mode: args.mode ?? "snippet",
-            maxChars:
-              typeof args.maxChars === "number"
-                ? args.maxChars
-                : defaultGetPageMaxChars(budgetMode),
+      } else if (name === "ensure_scrape_table") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const columns = Array.isArray(args.columns) ? args.columns.map(String) : [];
+          const keyColumns = Array.isArray(args.keyColumns)
+            ? args.keyColumns.map(String)
+            : columns.slice(0, 1);
+          const view = await ensureView(views, {
+            name: String(args.name ?? "scrape"),
+            columns,
+            keyColumns,
+          });
+          result = {
+            ok: true,
+            id: view.id,
+            name: view.name,
+            columns,
+            keyColumns,
+            rowCount: Math.max(0, (view.rows?.length ?? 1) - 1),
           };
         }
-        const req = toolArgsToContentRequest(name, toolArgs);
+      } else if (name === "upsert_scrape_rows") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const viewId = String(args.viewId ?? "");
+          const rows = Array.isArray(args.rows)
+            ? (args.rows as unknown[]).map((r) =>
+                Array.isArray(r) ? r.map((c) => String(c ?? "")) : [String(r)],
+              )
+            : [];
+          let keyColumns = Array.isArray(args.keyColumns) ? args.keyColumns.map(String) : [];
+          const existing = await views.get(viewId);
+          if (!existing) result = { ok: false, error: `view not found: ${viewId}` };
+          else {
+            if (!keyColumns.length) {
+              const note = existing.note ?? "";
+              const m = note.match(/keyColumns:([^|]+)/);
+              keyColumns = m
+                ? m[1]!.split(",").map((s) => s.trim()).filter(Boolean)
+                : (existing.rows?.[0] ?? existing.columns ?? []).slice(0, 1);
+            }
+            const saved = await upsertRows(views, existing.id, rows, keyColumns);
+            result = {
+              ok: true,
+              id: saved.id,
+              name: saved.name,
+              rowCount: Math.max(0, (saved.rows?.length ?? 1) - 1),
+            };
+          }
+        }
+      } else if (name === "get_scrape_table") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const v = await views.get(String(args.viewId ?? ""));
+          const limit = clampInt(args.limit, 200, 1, 500);
+          result = v
+            ? {
+                ok: true,
+                id: v.id,
+                name: v.name,
+                rows: v.rows?.slice(0, limit + 1),
+                rowCount: Math.max(0, (v.rows?.length ?? 1) - 1),
+              }
+            : { ok: false, error: "view not found" };
+        }
+      } else if (name === "scrape_pdps") {
+        result = await this.scrapePdps(args, views, pageTemplates, emit);
+      } else if (name === "rest_request") {
+        result = await this.runRestRequest(args, connectors);
+      } else if (name === "mcp_list_tools") {
+        result = await this.runMcpList(args, connectors);
+      } else if (name === "mcp_call") {
+        result = await this.runMcpCall(args, connectors);
+      } else if (name === "screenshot_viewport") {
+        if (!this.browser.captureViewport) result = { ok: false, error: "capture unavailable" };
+        else
+          result = await this.browser.captureViewport(
+            typeof args.windowId === "number" ? args.windowId : undefined,
+          );
+      } else if (name === "screenshot_element") {
+        if (!this.browser.captureElement) result = { ok: false, error: "capture unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.captureElement(tabId, {
+            selector: typeof args.selector === "string" ? args.selector : undefined,
+            index: typeof args.index === "number" ? args.index : undefined,
+          });
+        }
+      } else if (name === "screenshot_full") {
+        if (!this.browser.captureFullPage) result = { ok: false, error: "capture unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.captureFullPage(tabId);
+        }
+      } else if (name === "start_recording") {
+        if (!this.browser.startRecording) result = { ok: false, error: "recording unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.startRecording(tabId);
+        }
+      } else if (name === "stop_recording") {
+        if (!this.browser.stopRecording) result = { ok: false, error: "recording unavailable" };
+        else
+          result = await this.browser.stopRecording({
+            download: args.download !== false,
+            filename: typeof args.filename === "string" ? args.filename : undefined,
+          });
+      } else {
+        let toolName = name;
+        let toolArgs = args;
+        if (name === "get_page") {
+          if (preferPageDigest(budgetMode, name, args)) {
+            toolName = "page_digest";
+            toolArgs = {};
+          } else {
+            const rewritten = rewriteGetPageArgs(budgetMode, args);
+            if ("error" in rewritten) {
+              result = { ok: false, error: rewritten.error };
+              emit({
+                type: "tool_result",
+                tool: name,
+                args,
+                result,
+                toolCallId: call.id,
+                approvalMode: approvalMeta?.approvalMode,
+                approvalDecision: approvalMeta?.approvalDecision,
+              });
+              return result;
+            }
+            toolArgs = rewritten;
+          }
+        }
+        const req = toolArgsToContentRequest(toolName, toolArgs);
         if (!req) {
-          result = { ok: false, error: `invalid args for ${name}` };
+          result = { ok: false, error: `invalid args for ${toolName}` };
         } else {
           result = await this.browser.runContent(req);
           if (
@@ -808,8 +922,8 @@ export class AgentLoop {
             result &&
             typeof result === "object" &&
             (result as { ok?: boolean }).ok &&
-            (name === "page_digest" ||
-              (name === "get_page" && toolArgs.mode === "structure"))
+            (toolName === "page_digest" ||
+              (toolName === "get_page" && toolArgs.mode === "structure"))
           ) {
             const data = (result as { data?: unknown }).data;
             if (data && typeof data === "object") {
@@ -1057,5 +1171,163 @@ export class AgentLoop {
     }
 
     return { ok: true, pages, count: allRows.length, rows: allRows, notes: notes.join("; ") || undefined };
+  }
+
+  private async scrapePdps(
+    args: Record<string, unknown>,
+    views: ViewStore | undefined,
+    pageTemplates: PageTemplateCache | undefined,
+    emit: (e: AgentEvent) => void,
+  ): Promise<unknown> {
+    if (!views) return { ok: false, error: "view store unavailable" };
+    const saps = Array.isArray(args.saps) ? args.saps.map(String).filter(Boolean) : [];
+    const urls = Array.isArray(args.urls) ? args.urls.map(String).filter(Boolean) : [];
+    const columns = Array.isArray(args.columns)
+      ? args.columns.map(String)
+      : ["ean", "packagedEan", "sap", "title", "url"];
+    const keyColumns = Array.isArray(args.keyColumns)
+      ? args.keyColumns.map(String)
+      : [columns[0] ?? "ean"];
+    const viewName = String(args.viewName ?? "scrape-pdps");
+    const waitMs = clampInt(args.waitMs, 500, 100, 5_000);
+    let baseUrl = strOpt(args.baseUrl) ?? "";
+    if (!baseUrl) {
+      const tabs = await this.browser.listTabs();
+      try {
+        baseUrl = tabs[0]?.url ? new URL(tabs[0].url).origin : "";
+      } catch {
+        baseUrl = "";
+      }
+    }
+    const targets: Array<{ url: string; sap: string }> = [];
+    for (const sap of saps) {
+      if (!baseUrl) return { ok: false, error: "baseUrl required when using saps" };
+      targets.push({ sap, url: `${baseUrl.replace(/\/$/, "")}/s/${sap}` });
+    }
+    for (const url of urls) targets.push({ sap: "", url });
+    if (!targets.length) return { ok: false, error: "scrape_pdps needs saps or urls" };
+
+    const view = await ensureView(views, { name: viewName, columns, keyColumns });
+    const rowsOut: string[][] = [];
+    const errors: string[] = [];
+
+    for (let i = 0; i < targets.length; i += 1) {
+      const t = targets[i]!;
+      emit({ type: "status", message: `PDP ${i + 1}/${targets.length}: ${t.sap || t.url}` });
+      try {
+        await this.browser.navigate(t.url);
+        await wait(waitMs);
+        let digest = await this.browser.runContent({ op: "page_digest" });
+        if (!digest.ok) {
+          errors.push(`${t.sap || t.url}: digest failed`);
+          continue;
+        }
+        let data = (digest.data ?? {}) as Record<string, unknown>;
+        if (pageTemplates) data = pageTemplates.annotate(data);
+        const labelHits = Array.isArray(data.labelHits)
+          ? (data.labelHits as Array<{ label?: string; value?: string }>)
+          : [];
+        const eans = Array.isArray(data.eans) ? data.eans.map(String) : [];
+        const findLabel = (re: RegExp) =>
+          labelHits.find((h) => re.test(String(h.label ?? "")))?.value ?? "";
+        const retail =
+          findLabel(/^EAN(?!.*zbior)/i) ||
+          findLabel(/^EAN\b/i) ||
+          eans[0] ||
+          "";
+        const carton =
+          findLabel(/zbiorcze|opakowanie|carton|packaged/i) ||
+          eans.find((e) => e !== retail) ||
+          eans[1] ||
+          "";
+        const sap =
+          t.sap ||
+          findLabel(/katalog|catalog|Materiał|sap/i) ||
+          "";
+        const title = String(data.title ?? "");
+        const rowMap: Record<string, string> = {
+          ean: retail,
+          packagedEan: carton,
+          sap,
+          title,
+          url: String(data.url ?? t.url),
+        };
+        const row = columns.map((c) => rowMap[c] ?? "");
+        await upsertRows(views, view.id, [row], keyColumns);
+        rowsOut.push(row);
+      } catch (e) {
+        errors.push(`${t.sap || t.url}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    const refreshed = await views.get(view.id);
+    return {
+      ok: true,
+      viewId: view.id,
+      viewName: view.name,
+      done: rowsOut.length,
+      total: targets.length,
+      rows: rowsOut,
+      rowCount: Math.max(0, (refreshed?.rows?.length ?? 1) - 1),
+      errors: errors.length ? errors : undefined,
+    };
+  }
+
+  private async runRestRequest(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "rest") return { ok: false, error: `REST connector not found: ${id}` };
+    return restRequest(
+      conn,
+      {
+        method: typeof args.method === "string" ? args.method : "GET",
+        path: String(args.path ?? "/"),
+        query:
+          args.query && typeof args.query === "object"
+            ? (args.query as Record<string, string>)
+            : undefined,
+        body: args.body,
+      },
+      connectors.getSecret,
+    );
+  }
+
+  private async runMcpList(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "mcp") return { ok: false, error: `MCP connector not found: ${id}` };
+    return mcpListTools(conn, connectors.getSecret);
+  }
+
+  private async runMcpCall(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "mcp") return { ok: false, error: `MCP connector not found: ${id}` };
+    const toolArgs =
+      args.arguments && typeof args.arguments === "object"
+        ? (args.arguments as Record<string, unknown>)
+        : {};
+    return mcpCall(conn, String(args.tool ?? ""), toolArgs, connectors.getSecret);
   }
 }

@@ -2,8 +2,10 @@ import {
   AGENT_TOOLS,
   ActionLogStore,
   AgentLoop,
+  AgentProfileStore,
   ArtifactStore,
   AttachmentStore,
+  ConnectorStore,
   DEFAULT_MODEL,
   DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
@@ -16,17 +18,16 @@ import {
   ViewStore,
   extractTargetUrl,
   getProtocolVersion,
-  grantAndIndex,
   leanHistory,
   normalizeModelId,
   parseAttachment,
-  reindexSaved,
   resultError,
   resultOk,
   summarizeResult,
   stripImageParts,
   type AgentBudgetMode,
   type AgentEvent,
+  type AgentProfile,
   type ApprovalMode,
   type AttachmentRecord,
   type ChatMessage,
@@ -49,14 +50,13 @@ import {
 } from "./PreviewDrawer";
 import { ToolChip, type ToolChipData } from "./ToolChip";
 import { ActivityPanel } from "./ActivityPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { ViewsPanel } from "./ViewsPanel";
+import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const KEY_LABEL = "openrouter_api_key";
 const MODEL_LABEL = "openrouter_model";
 const WORKER_MODEL_LABEL = "openrouter_worker_model";
-const IF_EMAIL_LABEL = "ideaforge_email";
-const IF_PASS_LABEL = "ideaforge_password";
-const GH_TOKEN_LABEL = "github_token";
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const APPROVAL_KEY = "combo_x_approval_mode";
 const BUDGET_KEY = "combo_x_budget_mode";
@@ -150,6 +150,8 @@ export function App() {
   const views = useMemo(() => new ViewStore(), []);
   const artifacts = useMemo(() => new ArtifactStore(), []);
   const actionLog = useMemo(() => new ActionLogStore(), []);
+  const agentProfiles = useMemo(() => new AgentProfileStore(), []);
+  const connectorStore = useMemo(() => new ConnectorStore(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profiles = useMemo<ProfileStore>(
     () => ({
@@ -184,13 +186,12 @@ export function App() {
   const [turns, setTurns] = useState<UiTurn[]>([]);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("");
-  const [settingsMsg, setSettingsMsg] = useState("");
   const [vaultLabels, setVaultLabels] = useState<string[]>([]);
   const [enabledTools, setEnabledTools] = useState<Set<string>>(() => loadEnabledTools());
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => loadApproval());
   const [budgetMode, setBudgetMode] = useState<AgentBudgetMode>(() => {
     const v = localStorage.getItem(BUDGET_KEY);
-    return v === "budget" ? "budget" : "normal";
+    return v === "normal" ? "normal" : "budget";
   });
   const [ragExclude, setRagExclude] = useState(
     () => localStorage.getItem(RAG_EXCLUDE_KEY) ?? DEFAULT_SKIP_DIRS.join(", "),
@@ -241,7 +242,7 @@ export function App() {
   const [ragPathHint, setRagPathHint] = useState(
     () => localStorage.getItem("combo_x_rag_path_hint") ?? "",
   );
-  const [connectors, setConnectors] = useState<string[]>(() => {
+  const [, setConnectors] = useState<string[]>(() => {
     try {
       return JSON.parse(localStorage.getItem("combo_x_connectors") ?? "[]") as string[];
     } catch {
@@ -249,11 +250,9 @@ export function App() {
     }
   });
   const [ragMeta, setRagMeta] = useState<RagMeta | null>(null);
-  const [ragMsg, setRagMsg] = useState("");
-  const [ragBusy, setRagBusy] = useState(false);
-  const [ideaforgeEmail, setIdeaforgeEmail] = useState("");
-  const [ideaforgePass, setIdeaforgePass] = useState("");
-  const [githubToken, setGithubToken] = useState("");
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
+  const [agentList, setAgentList] = useState<AgentProfile[]>([]);
+  const [connectorCount, setConnectorCount] = useState(0);
 
   const applySetupPayload = useCallback((payload: unknown, opts?: { syncApproval?: boolean }) => {
     if (!payload || typeof payload !== "object") return false;
@@ -284,12 +283,16 @@ export function App() {
       localStorage.setItem("combo_x_connectors", JSON.stringify(p.connectors));
       setEnabledTools((prev) => {
         const next = new Set(prev);
-        if (p.connectors!.includes("ideaforge:read") || p.connectors!.includes("ideaforge_search")) {
-          next.add("ideaforge_search");
+        if (
+          p.connectors!.includes("rest") ||
+          p.connectors!.includes("github:read") ||
+          p.connectors!.includes("connectors:rest")
+        ) {
+          next.add("rest_request");
         }
-        if (p.connectors!.includes("github:read") || p.connectors!.includes("github_search_code")) {
-          next.add("github_search_code");
-          next.add("github_get_file");
+        if (p.connectors!.includes("mcp") || p.connectors!.includes("connectors:mcp")) {
+          next.add("mcp_list_tools");
+          next.add("mcp_call");
         }
         if (p.ragPathHint || p.connectors!.includes("local_rag")) {
           next.add("rag_search");
@@ -392,19 +395,19 @@ export function App() {
     const storedWorker = await vault.getByLabel(WORKER_MODEL_LABEL);
     setWorkerModel(storedWorker ? normalizeModelId(storedWorker) : DEFAULT_WORKER_MODEL);
     if (key) setApiKey(key);
-    setIdeaforgeEmail((await vault.getByLabel(IF_EMAIL_LABEL)) ?? "");
-    setIdeaforgePass((await vault.getByLabel(IF_PASS_LABEL)) ?? "");
-    setGithubToken((await vault.getByLabel(GH_TOKEN_LABEL)) ?? "");
     setNeedsOnboarding(!key);
     setLocked(false);
     await refreshVaultLabels();
     setRagMeta(await rag.getMeta());
+    setActiveAgentId(await agentProfiles.getActiveId());
+    setAgentList(await agentProfiles.list());
+    setConnectorCount((await connectorStore.list()).length);
     if (!currentSession) {
       const s = await sessions.create("New chat");
       setCurrentSession(s);
     }
     setStatus("Unlocked");
-  }, [currentSession, rag, refreshVaultLabels, sessions, vault]);
+  }, [agentProfiles, connectorStore, currentSession, rag, refreshVaultLabels, sessions, vault]);
 
   const unlockExisting = useCallback(async () => {
     const ok = await vault.unlock(passphrase);
@@ -579,6 +582,19 @@ export function App() {
       abortRef.current = controller;
       const llm = new OpenRouterClient({ apiKey: key });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
+      const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
+      const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
+      const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
+      const runBudget = activeProfile?.budgetMode ?? budgetMode;
+      const runApproval = activeProfile?.approvalMode ?? approvalModeRef.current;
+      const runTools =
+        activeProfile?.toolAllowlist === "all"
+          ? ALL_TOOL_NAMES
+          : activeProfile?.toolAllowlist?.length
+            ? activeProfile.toolAllowlist
+            : [...enabledTools];
+      const connectorAllowlist =
+        activeProfile?.connectorIds?.length ? activeProfile.connectorIds : undefined;
       let turnUsage = ZERO;
       const toolMap = new Map<string, ToolChipData>();
       const runId = crypto.randomUUID();
@@ -672,29 +688,27 @@ export function App() {
       };
 
       try {
-        const ifEmail = ideaforgeEmail || (await vault.getByLabel(IF_EMAIL_LABEL));
-        const ifPass = ideaforgePass || (await vault.getByLabel(IF_PASS_LABEL));
-        const gh = githubToken || (await vault.getByLabel(GH_TOKEN_LABEL));
         const result = await agent.run({
-          model: normalizeModelId(model),
-          workerModel: normalizeModelId(workerModel),
+          model: runModel,
+          workerModel: runWorker,
           userMessage: text || displayText,
           history: historyRef.current,
           signal: controller.signal,
-          enabledTools: [...enabledTools],
-          approvalMode: approvalModeRef.current,
-          getApprovalMode: () => approvalModeRef.current,
-          approvalModel: normalizeModelId(workerModel),
-          budgetMode,
+          systemPrompt: activeProfile?.systemPrompt,
+          enabledTools: runTools,
+          approvalMode: runApproval,
+          getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
+          approvalModel: runWorker,
+          budgetMode: runBudget,
+          connectors: {
+            store: connectorStore,
+            getSecret: (label) => vault.getByLabel(label),
+            allowedIds: connectorAllowlist,
+          },
           rag,
           attachments,
           views,
           pendingAttachmentIds: pendingIds,
-          connectors: {
-            ideaforge:
-              ifEmail && ifPass ? { email: ifEmail, password: ifPass } : null,
-            github: gh ? { token: gh } : null,
-          },
           onEvent,
         });
         historyRef.current = leanHistory(
@@ -742,17 +756,17 @@ export function App() {
       }
     },
     [
+      activeAgentId,
+      agentProfiles,
       apiKey,
       actionLog,
       attachments,
       budgetMode,
+      connectorStore,
       views,
       bridge,
       currentSession,
       enabledTools,
-      githubToken,
-      ideaforgeEmail,
-      ideaforgePass,
       input,
       memory,
       model,
@@ -875,6 +889,10 @@ export function App() {
               setTab(id);
               if (id === "sessions") void refreshSessions();
               if (id === "vault") void refreshVaultLabels();
+              if (id === "settings" || id === "mcp") {
+                void connectorStore.list().then((list) => setConnectorCount(list.length));
+                void agentProfiles.list().then(setAgentList);
+              }
             }}
           >
             {label}
@@ -994,6 +1012,33 @@ export function App() {
           </div>
           <div className="composer">
             <div className="row">
+              <select
+                className="agent-pick"
+                value={activeAgentId ?? ""}
+                title="Active agent profile"
+                onChange={(e) => {
+                  const id = e.target.value || null;
+                  void (async () => {
+                    await agentProfiles.setActiveId(id);
+                    setActiveAgentId(id);
+                    if (id) {
+                      const p = await agentProfiles.get(id);
+                      if (p && p.toolAllowlist !== "all") {
+                        setEnabledTools(() => new Set(p.toolAllowlist as string[]));
+                      } else if (p?.toolAllowlist === "all") {
+                        setEnabledTools(() => new Set(ALL_TOOL_NAMES));
+                      }
+                    }
+                  })();
+                }}
+              >
+                <option value="">Default agent</option>
+                {agentList.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
               <select
                 className="grow"
                 value={MODEL_PRESETS.some((p) => p.id === model) ? model : "__custom__"}
@@ -1171,8 +1216,7 @@ export function App() {
           memory={memory}
           artifacts={artifacts}
           vaultUnlocked={vault.isUnlocked()}
-          ideaforgeConfigured={Boolean(ideaforgeEmail)}
-          githubConfigured={Boolean(githubToken)}
+          connectorStore={connectorStore}
           onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
         />
       ) : null}
@@ -1185,279 +1229,44 @@ export function App() {
       ) : null}
 
       {tab === "settings" ? (
-        <div className="panel">
-          <h2>Settings</h2>
-          <label className="hint">Approval mode</label>
-          <select
-            value={approvalMode}
-            onChange={(e) => setApprovalMode(e.target.value as ApprovalMode)}
-          >
-            <option value="ask">Ask each sensitive action</option>
-            <option value="auto_llm">Auto (LLM judges intent)</option>
-            <option value="auto_all">Auto-approve all (this browser)</option>
-          </select>
-          <label className="hint">Token budget</label>
-          <select
-            value={budgetMode}
-            onChange={(e) => setBudgetMode(e.target.value as AgentBudgetMode)}
-          >
-            <option value="normal">Normal — full tools / 32 steps</option>
-            <option value="budget">
-              Budget — page_digest + worker parse, 16 steps, short get_page
-            </option>
-          </select>
-          <p className="hint wrap">
-            Budget mode: prefer <code>page_digest</code> / <code>extract</code> /{" "}
-            <code>parse_data</code> (FoodWell PDP EAN pairs, invoice→scrape). Avoid full{" "}
-            <code>get_page</code> dumps.
-          </p>
-          <h3>Device RAG (local folders)</h3>
-          <p className="hint wrap">
-            Grant one or more folders on this Mac. Built-in skips:{" "}
-            <code>node_modules</code>, <code>.git</code>, <code>dist</code>, …. Extra excludes
-            below (comma-separated dir names).
-          </p>
-          <p className="hint wrap">
-            Index:{" "}
-            <code>
-              {ragMeta
-                ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
-                : "(none)"}
-            </code>
-          </p>
-          <label className="hint">Extra exclude dirs</label>
-          <input
-            value={ragExclude}
-            onChange={(e) => setRagExclude(e.target.value)}
-            placeholder="node_modules, .git, dist, coverage"
-          />
-          <div className="row">
-            <button
-              type="button"
-              className="primary"
-              disabled={ragBusy || locked}
-              onClick={() =>
-                void (async () => {
-                  setRagBusy(true);
-                  setRagMsg("Pick a folder…");
-                  try {
-                    const excludeDirs = ragExclude
-                      .split(/[,\n]/)
-                      .map((s) => s.trim())
-                      .filter(Boolean);
-                    const meta = await grantAndIndex(
-                      rag,
-                      (p) => setRagMsg(p.message ?? p.phase),
-                      { append: false, excludeDirs },
-                    );
-                    setRagMeta(meta);
-                    setRagPathHint(meta.folderName);
-                    localStorage.setItem("combo_x_rag_path_hint", meta.folderName);
-                    setEnabledTools((prev) => {
-                      const next = new Set(prev);
-                      next.add("rag_search");
-                      next.add("rag_read_file");
-                      next.add("rag_status");
-                      return next;
-                    });
-                    setRagMsg(`Ready — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
-                  } catch (e) {
-                    setRagMsg(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setRagBusy(false);
-                  }
-                })()
-              }
-            >
-              Grant folder + index
-            </button>
-            <button
-              type="button"
-              disabled={ragBusy || locked}
-              onClick={() =>
-                void (async () => {
-                  setRagBusy(true);
-                  setRagMsg("Add folder…");
-                  try {
-                    const excludeDirs = ragExclude
-                      .split(/[,\n]/)
-                      .map((s) => s.trim())
-                      .filter(Boolean);
-                    const meta = await grantAndIndex(
-                      rag,
-                      (p) => setRagMsg(p.message ?? p.phase),
-                      { append: true, excludeDirs },
-                    );
-                    setRagMeta(meta);
-                    setRagMsg(`Added — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
-                  } catch (e) {
-                    setRagMsg(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setRagBusy(false);
-                  }
-                })()
-              }
-            >
-              Add another folder
-            </button>
-            <button
-              type="button"
-              disabled={ragBusy || locked}
-              onClick={() =>
-                void (async () => {
-                  setRagBusy(true);
-                  setRagMsg("Reindexing…");
-                  try {
-                    const meta = await reindexSaved(rag, (p) => setRagMsg(p.message ?? p.phase));
-                    setRagMeta(meta);
-                    setRagMsg(`Reindexed — ${meta.fileCount} files / ${meta.chunkCount} chunks`);
-                  } catch (e) {
-                    setRagMsg(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setRagBusy(false);
-                  }
-                })()
-              }
-            >
-              Reindex all
-            </button>
-          </div>
-          {ragMeta?.folders?.length ? (
-            <ul className="hint wrap" style={{ listStyle: "none", padding: 0, margin: "8px 0" }}>
-              {ragMeta.folders.map((f) => (
-                <li key={f.id} className="row" style={{ marginBottom: 4 }}>
-                  <code>{f.folderName}</code>
-                  <button
-                    type="button"
-                    disabled={ragBusy || locked}
-                    onClick={() =>
-                      void (async () => {
-                        setRagBusy(true);
-                        try {
-                          await rag.removeHandle(f.id);
-                          const left = await rag.listHandles();
-                          if (left.length) {
-                            const meta = await reindexSaved(rag, (p) =>
-                              setRagMsg(p.message ?? p.phase),
-                            );
-                            setRagMeta(meta);
-                            setRagMsg(`Removed ${f.folderName}; reindexed`);
-                          } else {
-                            await rag.clearChunks();
-                            setRagMeta(await rag.getMeta());
-                            setRagMsg("All folders removed");
-                          }
-                        } catch (e) {
-                          setRagMsg(e instanceof Error ? e.message : String(e));
-                        } finally {
-                          setRagBusy(false);
-                        }
-                      })()
-                    }
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
-          <label className="hint">OpenRouter API key</label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-or-v1-…"
-          />
-          <label className="hint">Orchestrator model</label>
-          <select value={model} onChange={(e) => setModel(e.target.value)}>
-            {MODEL_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label} — {p.id}
-              </option>
-            ))}
-          </select>
-          <input
-            className="mono"
-            value={customModel}
-            onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="custom orchestrator model id"
-          />
-          <label className="hint">Worker model (parse_data / cheap extract)</label>
-          <select value={workerModel} onChange={(e) => setWorkerModel(e.target.value)}>
-            {MODEL_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label} — {p.id}
-              </option>
-            ))}
-          </select>
-          <input
-            className="mono"
-            value={customWorkerModel}
-            onChange={(e) => setCustomWorkerModel(e.target.value)}
-            placeholder="custom worker model id"
-          />
-          <label className="hint">IdeaForge email (read search)</label>
-          <input
-            type="email"
-            value={ideaforgeEmail}
-            onChange={(e) => setIdeaforgeEmail(e.target.value)}
-            placeholder="admin@…"
-          />
-          <label className="hint">IdeaForge password</label>
-          <input
-            type="password"
-            value={ideaforgePass}
-            onChange={(e) => setIdeaforgePass(e.target.value)}
-            placeholder="vault-encrypted"
-          />
-          <label className="hint">GitHub PAT (code search / file read)</label>
-          <input
-            type="password"
-            value={githubToken}
-            onChange={(e) => setGithubToken(e.target.value)}
-            placeholder="ghp_…"
-          />
-          <div className="row">
-            <button
-              type="button"
-              className="primary"
-              onClick={() =>
-                void (async () => {
-                  const m = normalizeModelId(customModel.trim() || model);
-                  const w = normalizeModelId(customWorkerModel.trim() || workerModel);
-                  if (apiKey.trim()) await vault.putByLabel(KEY_LABEL, apiKey.trim());
-                  await vault.putByLabel(MODEL_LABEL, m);
-                  await vault.putByLabel(WORKER_MODEL_LABEL, w);
-                  if (ideaforgeEmail.trim()) await vault.putByLabel(IF_EMAIL_LABEL, ideaforgeEmail.trim());
-                  if (ideaforgePass.trim()) await vault.putByLabel(IF_PASS_LABEL, ideaforgePass.trim());
-                  if (githubToken.trim()) await vault.putByLabel(GH_TOKEN_LABEL, githubToken.trim());
-                  setModel(m);
-                  setWorkerModel(w);
-                  setSettingsMsg(`Saved orch=${m} · worker=${w} · connectors`);
-                  await refreshVaultLabels();
-                })()
-              }
-            >
-              Save
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() =>
-                void (async () => {
-                  abortRef.current?.abort();
-                  await vault.lock();
-                  setLocked(true);
-                  setApiKey("");
-                })()
-              }
-            >
-              Lock vault
-            </button>
-          </div>
-          {settingsMsg ? <p className="hint">{settingsMsg}</p> : null}
-        </div>
+        <SettingsPanel
+          vault={vault}
+          rag={rag}
+          agentProfiles={agentProfiles}
+          connectorStore={connectorStore}
+          locked={locked}
+          apiKey={apiKey}
+          setApiKey={setApiKey}
+          model={model}
+          setModel={setModel}
+          workerModel={workerModel}
+          setWorkerModel={setWorkerModel}
+          customModel={customModel}
+          setCustomModel={setCustomModel}
+          customWorkerModel={customWorkerModel}
+          setCustomWorkerModel={setCustomWorkerModel}
+          approvalMode={approvalMode}
+          setApprovalMode={setApprovalMode}
+          budgetMode={budgetMode}
+          setBudgetMode={setBudgetMode}
+          enabledTools={enabledTools}
+          setEnabledTools={setEnabledTools}
+          activeAgentId={activeAgentId}
+          setActiveAgentId={setActiveAgentId}
+          ragExclude={ragExclude}
+          setRagExclude={setRagExclude}
+          ragMeta={ragMeta}
+          setRagMeta={setRagMeta}
+          onLockVault={() => {
+            void (async () => {
+              abortRef.current?.abort();
+              await vault.lock();
+              setLocked(true);
+              setApiKey("");
+            })();
+          }}
+          onRefreshVaultLabels={() => void refreshVaultLabels()}
+        />
       ) : null}
 
       {tab === "vault" ? (
@@ -1481,6 +1290,11 @@ export function App() {
       {tab === "tools" ? (
         <div className="panel">
           <h2>Tools</h2>
+          <p className="hint wrap">
+            {activeAgentId
+              ? `Synced with agent “${agentList.find((a) => a.id === activeAgentId)?.name ?? activeAgentId}”. Edits update global allowlist.`
+              : "Global tool allowlist — create an agent in Settings to pin per-workflow tools."}
+          </p>
           <div className="row">
             <button type="button" onClick={() => setEnabledTools(new Set(ALL_TOOL_NAMES))}>
               Enable all
@@ -1489,57 +1303,74 @@ export function App() {
               Disable all
             </button>
           </div>
-          <ul className="list tools">
-            {AGENT_TOOLS.map((t) => {
-              const name = t.function.name;
-              return (
-                <li key={name}>
-                  <label className="tool-row">
-                    <input
-                      type="checkbox"
-                      checked={enabledTools.has(name)}
-                      onChange={() =>
-                        setEnabledTools((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(name)) next.delete(name);
-                          else next.add(name);
-                          return next;
-                        })
-                      }
-                    />
-                    <span>
-                      <strong>{name}</strong>
-                      <br />
-                      <span className="hint">{t.function.description}</span>
-                    </span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="tool-groups">
+            {GROUP_ORDER.map((group) => (
+              <div key={group} className="tool-group">
+                <h3>{group}</h3>
+                <ul className="list tools">
+                  {TOOL_GROUPS[group]
+                    .filter((name) => ALL_TOOL_NAMES.includes(name))
+                    .map((name) => {
+                      const t = AGENT_TOOLS.find((x) => x.function.name === name);
+                      if (!t) return null;
+                      return (
+                        <li key={name}>
+                          <label className="tool-row">
+                            <input
+                              type="checkbox"
+                              checked={enabledTools.has(name)}
+                              onChange={() =>
+                                setEnabledTools((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(name)) next.delete(name);
+                                  else next.add(name);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span>
+                              <strong>{name}</strong>
+                              <br />
+                              <span className="hint">{t.function.description}</span>
+                            </span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                </ul>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
       {tab === "mcp" ? (
         <div className="panel">
-          <h2>Healthtree workspace</h2>
+          <h2>Workspace</h2>
           <p className="hint wrap">
-            Your Combo-X profile for FoodWell B2B scrapes, invoice PDF → carton/retail EAN, IdeaForge /
-            GitHub. Folder RAG + excludes live under Settings (Grant / Add folder). Prefer Budget mode
-            for multi-PDP EAN mapping.
+            Local Combo-X status — RAG index, configured connectors, and active agent profile.
           </p>
-          <p className="hint wrap">
-            RAG:{" "}
-            <code>
-              {ragMeta
+          <ul className="list">
+            <li>
+              RAG:{" "}
+              {ragMeta?.chunkCount
                 ? `${ragMeta.folderName || "folder"} · ${ragMeta.fileCount} files / ${ragMeta.chunkCount} chunks`
-                : "(none — grant in Settings)"}
-            </code>
-          </p>
-          {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
+                : "not indexed — grant in Settings → Device RAG"}
+            </li>
+            <li>Connectors: {connectorCount} configured</li>
+            <li>
+              Active agent:{" "}
+              {activeAgentId
+                ? agentList.find((a) => a.id === activeAgentId)?.name ?? activeAgentId
+                : "Default (global)"}
+            </li>
+            <li>
+              Budget: {budgetMode} · Approval: {approvalMode} · Tools enabled: {enabledTools.size}
+            </li>
+          </ul>
           <div className="row">
             <button type="button" className="primary" onClick={() => setTab("settings")}>
-              Open Settings (RAG + Budget)
+              Open Settings
             </button>
             <button
               type="button"
@@ -1548,20 +1379,12 @@ export function App() {
                 void chrome.tabs.create({ url });
               }}
             >
-              Open workspace setup page
+              Open setup page
             </button>
           </div>
           {setupMsg ? <p className="hint wrap">{setupMsg}</p> : null}
           <p className="hint wrap">
-            Label: <code>{ragPathHint || "(none)"}</code>
-            <br />
-            Setup connectors: {connectors.length ? connectors.join(", ") : "(none)"}
-            <br />
-            IdeaForge: {ideaforgeEmail ? "email set" : "missing"} · GitHub:{" "}
-            {githubToken ? "token set" : "missing"}
-          </p>
-          <p className="hint wrap">
-            See <code>docs/LOCAL_RAG.md</code> · <code>docs/BUDGET.md</code>
+            Folder hint: <code>{ragPathHint || "(none)"}</code>
           </p>
         </div>
       ) : null}
