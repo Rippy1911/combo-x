@@ -69,6 +69,11 @@ export interface BrowserBridge {
     download?: boolean;
     filename?: string;
   }): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  /** Inject approved page extensions into a tab (MAIN world). */
+  injectPageExtensions?(opts?: {
+    tabId?: number;
+    scriptIds?: string[];
+  }): Promise<{ ok: boolean; injected?: string[]; errors?: string[]; error?: string }>;
 }
 
 /** A saved site login + scrape recipe, stored encrypted in the vault as `site_profile:<name>`. */
@@ -176,6 +181,8 @@ export interface AgentRunOptions {
   tasks?: TaskStore;
   /** Usage telemetry store. */
   usageLog?: UsageStore;
+  /** Page extensions (userscripts) — isolated from combo sessions/vault. */
+  pageExtensions?: import("../pageExtensions/store.js").PageExtensionStore;
   sessionId?: string;
   runId?: string;
   agentId?: string;
@@ -203,6 +210,9 @@ For catalogs: scrape_catalog OR scroll + query_all + parse_data (cheap worker).
 Login: prefer login {profile} / save_site_profile — not manual password typing loops.
 Connectors: rest_request / mcp_list_tools / mcp_call against user-configured connectors only.
 Media: screenshot_viewport|element|full; start_recording / stop_recording for tab webm.
+Page extensions (MAIN-world userscripts): create_page_extension → approve → enable → inject.
+  Data is isolated (combo_x_page_ext); set_page_extension_bridge is the ONLY path for page→host exports/storage.
+  Extensions cannot access combo DB or control Combo.
 Local files: rag_search / rag_read_file; attachments via list_attachments / read_attachment.
 Durable notes: remember / recall / memory_list.
 Rules:
@@ -295,6 +305,7 @@ interface RunContext {
   agents?: AgentProfileStore;
   tasks?: TaskStore;
   usageLog?: UsageStore;
+  pageExtensions?: import("../pageExtensions/store.js").PageExtensionStore;
   resolvedProfile: ResolvedAgentProfile | null;
   enabledToolNames: string[];
   onSubagent?: (e: SubagentEvent) => void;
@@ -397,6 +408,7 @@ export class AgentLoop {
       agents: options.agents,
       tasks: options.tasks,
       usageLog: options.usageLog,
+      pageExtensions: options.pageExtensions,
       resolvedProfile,
       enabledToolNames,
       onSubagent: options.onSubagent,
@@ -1081,6 +1093,21 @@ export class AgentLoop {
         result = await this.updateTask(args, runCtx);
       } else if (name === "list_tasks") {
         result = await this.listTasks(args, runCtx);
+      } else if (
+        name === "create_page_extension" ||
+        name === "update_page_extension" ||
+        name === "list_page_extensions" ||
+        name === "get_page_extension" ||
+        name === "approve_page_extension" ||
+        name === "revoke_page_extension" ||
+        name === "inject_page_extension" ||
+        name === "set_page_extension_bridge" ||
+        name === "page_ext_data_list" ||
+        name === "page_ext_data_get" ||
+        name === "page_ext_data_clear" ||
+        name === "list_page_extension_audit"
+      ) {
+        result = await this.handlePageExtensionTool(name, args, runCtx);
       } else {
         let toolName = name;
         let toolArgs = args;
@@ -1439,6 +1466,7 @@ export class AgentLoop {
         agents: runCtx.agents,
         tasks: runCtx.tasks,
         usageLog: runCtx.usageLog,
+        pageExtensions: runCtx.pageExtensions,
         sessionId: runCtx.sessionId,
         runId: subagentId,
         agentId: childAgentId,
@@ -1496,6 +1524,166 @@ export class AgentLoop {
         summary: msg,
       });
       return { ok: false, error: msg, summary: msg, subagentId, artifacts: [] };
+    }
+  }
+
+  private async handlePageExtensionTool(
+    name: string,
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    const store = runCtx?.pageExtensions;
+    if (!store) return { ok: false, error: "page extension store unavailable" };
+    const sessionId = runCtx?.sessionId;
+    try {
+      if (name === "create_page_extension") {
+        const patterns = Array.isArray(args.patterns)
+          ? args.patterns.map(String)
+          : typeof args.pattern === "string"
+            ? [args.pattern]
+            : [];
+        const row = await store.create({
+          name: String(args.name ?? "Untitled"),
+          source: String(args.source ?? ""),
+          patterns,
+          description: typeof args.description === "string" ? args.description : undefined,
+          runAt:
+            args.runAt === "document_start" || args.runAt === "document_end"
+              ? args.runAt
+              : "document_idle",
+          createdBy: "agent",
+          sessionId,
+          enabled: false,
+        });
+        return {
+          ok: true,
+          id: row.id,
+          approval: row.approval,
+          version: row.version,
+          sourceHash: row.sourceHash,
+          note: "Created as draft — call approve_page_extension then enable (update enabled:true) then inject",
+        };
+      }
+      if (name === "update_page_extension") {
+        const id = String(args.id ?? "");
+        if (!id) return { ok: false, error: "id required" };
+        const row = await store.update(
+          id,
+          {
+            name: typeof args.name === "string" ? args.name : undefined,
+            description: typeof args.description === "string" ? args.description : undefined,
+            source: typeof args.source === "string" ? args.source : undefined,
+            patterns: Array.isArray(args.patterns) ? args.patterns.map(String) : undefined,
+            runAt:
+              args.runAt === "document_start" ||
+              args.runAt === "document_end" ||
+              args.runAt === "document_idle"
+                ? args.runAt
+                : undefined,
+            enabled: typeof args.enabled === "boolean" ? args.enabled : undefined,
+          },
+          { actor: "agent", sessionId },
+        );
+        return {
+          ok: true,
+          id: row.id,
+          approval: row.approval,
+          version: row.version,
+          enabled: row.enabled,
+          sourceHash: row.sourceHash,
+        };
+      }
+      if (name === "list_page_extensions") {
+        const list = await store.list();
+        return {
+          ok: true,
+          extensions: list.map((e) => ({
+            id: e.id,
+            name: e.name,
+            enabled: e.enabled,
+            approval: e.approval,
+            version: e.version,
+            patterns: e.match.patterns,
+            bridge: e.bridge
+              ? {
+                  exportChannels: e.bridge.exportChannels,
+                  allowStorage: !!e.bridge.allowStorage,
+                }
+              : null,
+            lastInjectedAt: e.lastInjectedAt,
+            lastInjectedUrl: e.lastInjectedUrl,
+          })),
+        };
+      }
+      if (name === "get_page_extension") {
+        const id = String(args.id ?? "");
+        const row = await store.get(id);
+        if (!row) return { ok: false, error: "not found" };
+        return { ok: true, extension: row };
+      }
+      if (name === "approve_page_extension") {
+        const row = await store.approve(String(args.id ?? ""), "agent", sessionId);
+        return { ok: true, id: row.id, approval: row.approval, sourceHash: row.sourceHash };
+      }
+      if (name === "revoke_page_extension") {
+        const row = await store.revoke(String(args.id ?? ""), "agent", sessionId);
+        return { ok: true, id: row.id, approval: row.approval, enabled: row.enabled };
+      }
+      if (name === "set_page_extension_bridge") {
+        const id = String(args.id ?? "");
+        if (args.clear === true || args.bridge === null) {
+          const row = await store.setBridge(id, null, { actor: "agent", sessionId });
+          return { ok: true, id: row.id, bridge: null };
+        }
+        const channels = Array.isArray(args.exportChannels)
+          ? args.exportChannels.map(String)
+          : [];
+        const row = await store.setBridge(
+          id,
+          {
+            exportChannels: channels,
+            allowStorage: Boolean(args.allowStorage),
+            maxPayloadBytes:
+              typeof args.maxPayloadBytes === "number" ? args.maxPayloadBytes : 64_000,
+          },
+          { actor: "agent", sessionId },
+        );
+        return { ok: true, id: row.id, bridge: row.bridge };
+      }
+      if (name === "inject_page_extension") {
+        if (!this.browser.injectPageExtensions) {
+          return { ok: false, error: "injectPageExtensions unavailable" };
+        }
+        const scriptIds = Array.isArray(args.ids)
+          ? args.ids.map(String)
+          : typeof args.id === "string"
+            ? [args.id]
+            : undefined;
+        const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
+        return this.browser.injectPageExtensions({ tabId, scriptIds });
+      }
+      if (name === "page_ext_data_list") {
+        const id = String(args.id ?? "");
+        return { ok: true, keys: await store.dataList(id) };
+      }
+      if (name === "page_ext_data_get") {
+        const id = String(args.id ?? "");
+        const key = String(args.key ?? "");
+        if (args.all === true) return { ok: true, data: await store.dataGetAll(id) };
+        return { ok: true, key, value: await store.dataGet(id, key) };
+      }
+      if (name === "page_ext_data_clear") {
+        const n = await store.dataClear(String(args.id ?? ""), sessionId);
+        return { ok: true, cleared: n };
+      }
+      if (name === "list_page_extension_audit") {
+        const id = typeof args.id === "string" ? args.id : undefined;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        return { ok: true, entries: await store.listAudit(id, limit) };
+      }
+      return { ok: false, error: `unknown page extension tool ${name}` };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 

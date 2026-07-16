@@ -214,3 +214,17 @@ export {
   approvalDecisionFor,
 } from "./local/actionLog.js";
 export type { ActionLogEntry, ActionApprovalDecision } from "./local/actionLog.js";
+
+export { PageExtensionStore } from "./pageExtensions/store.js";
+export { urlMatches, patternToRegExp } from "./pageExtensions/match.js";
+export type { PageExtMatch } from "./pageExtensions/match.js";
+export { runPageExtensionInMainWorld } from "./pageExtensions/inject.js";
+export { sha256Hex } from "./pageExtensions/hash.js";
+export type {
+  PageExtension,
+  PageExtBridgeSpec,
+  PageExtAuditEntry,
+  PageExtAuditAction,
+  PageExtDataRow,
+  PageExtApproval,
+} from "./pageExtensions/types.js";

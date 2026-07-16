@@ -126,5 +126,12 @@ export function createChromeBridge(): BrowserBridge {
         filename: opts?.filename,
       })) as { ok: boolean; dataUrl?: string; error?: string };
     },
+    async injectPageExtensions(opts?: { tabId?: number; scriptIds?: string[] }) {
+      return (await chrome.runtime.sendMessage({
+        type: "inject_page_extensions",
+        tabId: opts?.tabId,
+        scriptIds: opts?.scriptIds,
+      })) as { ok: boolean; injected?: string[]; errors?: string[]; error?: string };
+    },
   };
 }

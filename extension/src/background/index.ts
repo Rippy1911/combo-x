@@ -12,6 +12,7 @@ import {
   startRecording,
   stopRecording,
 } from "../lib/media-bridge.js";
+import { handlePageExtBridge, injectPageExtensionsForTab } from "../lib/page-ext-inject.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -69,7 +70,7 @@ async function runContent(request: ContentRequest, tabId?: number): Promise<Cont
   return res;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const parsed = RuntimeMessageSchema.safeParse(message);
   if (!parsed.success) {
     sendResponse({ ok: false, error: "invalid runtime message" });
@@ -233,12 +234,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         );
         break;
       }
+      case "inject_page_extensions": {
+        const tabId = parsed.data.tabId ?? (await activeTabId());
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no active tab" });
+          break;
+        }
+        sendResponse(
+          await injectPageExtensionsForTab({
+            tabId,
+            scriptIds: parsed.data.scriptIds,
+          }),
+        );
+        break;
+      }
+      case "page_ext_bridge": {
+        sendResponse(
+          await handlePageExtBridge({
+            kind: parsed.data.kind,
+            scriptId: parsed.data.scriptId,
+            channel: parsed.data.channel,
+            payload: parsed.data.payload,
+            reqId: parsed.data.reqId,
+            pageUrl: parsed.data.pageUrl,
+            tabId: parsed.data.tabId ?? sender.tab?.id,
+          }),
+        );
+        break;
+      }
       default:
         sendResponse({ ok: false, error: "unknown" });
     }
   })();
 
   return true;
+});
+
+/** Auto-inject approved+enabled page extensions on navigation. */
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status !== "complete" || !tab.url) return;
+  if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) return;
+  void injectPageExtensionsForTab({ tabId }).catch(() => {
+    /* ignore */
+  });
 });
 
 const artifacts = new ArtifactStore();

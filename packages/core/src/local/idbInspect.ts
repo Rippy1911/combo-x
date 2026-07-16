@@ -14,6 +14,11 @@ export const INSPECTABLE_DBS: Array<{
   { name: "combo_x_views", stores: ["views"] },
   { name: "combo_x_action_log", stores: ["actions"] },
   {
+    name: "combo_x_page_ext",
+    stores: ["extensions", "data", "audit"],
+    redactValues: true,
+  },
+  {
     name: "combo_x_vault",
     stores: ["entries"],
     redactValues: true,

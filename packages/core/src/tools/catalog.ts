@@ -262,6 +262,18 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   create_task: "meta",
   update_task: "meta",
   list_tasks: "meta",
+  create_page_extension: "agentic",
+  update_page_extension: "agentic",
+  list_page_extensions: "agentic",
+  get_page_extension: "agentic",
+  approve_page_extension: "agentic",
+  revoke_page_extension: "agentic",
+  inject_page_extension: "agentic",
+  set_page_extension_bridge: "agentic",
+  page_ext_data_list: "agentic",
+  page_ext_data_get: "agentic",
+  page_ext_data_clear: "agentic",
+  list_page_extension_audit: "agentic",
 };
 
 function metaFor(name: string): CatalogMeta {

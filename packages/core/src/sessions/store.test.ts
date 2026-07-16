@@ -31,4 +31,22 @@ describe("SessionStore", () => {
     await store.delete(a.id);
     expect(await store.get(a.id)).toBeNull();
   });
+
+  it("persists session and message bookmarks", async () => {
+    const store = new SessionStore(`sess_bm_${crypto.randomUUID()}`);
+    const s = await store.create("Bookmarked chat");
+    s.bookmarked = true;
+    s.messages.push({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "keep this",
+      createdAt: "2026-07-16T12:00:00.000Z",
+      bookmarked: true,
+    });
+    await store.save(s);
+    const loaded = await store.get(s.id);
+    expect(loaded?.bookmarked).toBe(true);
+    expect(loaded?.messages[0]?.bookmarked).toBe(true);
+    expect(loaded?.messages[0]?.createdAt).toBe("2026-07-16T12:00:00.000Z");
+  });
 });

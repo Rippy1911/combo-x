@@ -28,6 +28,7 @@ import {
   stripImageParts,
   TaskStore,
   UsageStore,
+  PageExtensionStore,
   type AgentBudgetMode,
   type AgentEvent,
   type AgentProfile,
@@ -45,7 +46,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { copyText, shortConversationId } from "./chatClipboard";
 import { MarkdownView } from "./MarkdownView";
+import { MessageToolbar } from "./MessageToolbar";
 import {
   PreviewDrawer,
   buildPreviewFromAttachment,
@@ -59,6 +62,7 @@ import { ViewsPanel } from "./ViewsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { TasksPanel } from "./TasksPanel";
 import { SubagentStrip, type SubagentRun } from "./SubagentStrip";
+import { PageExtensionsPanel } from "./PageExtensionsPanel";
 import { GROUP_ORDER, TOOL_GROUPS } from "./toolGroups";
 
 const KEY_LABEL = "openrouter_api_key";
@@ -76,6 +80,7 @@ type TabId =
   | "activity"
   | "usage"
   | "tasks"
+  | "pageext"
   | "settings"
   | "vault"
   | "tools"
@@ -99,6 +104,8 @@ type UiTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  createdAt?: string;
+  bookmarked?: boolean;
   attachments?: Array<{ id: string; name: string; kind: string }>;
   tools?: ToolChipData[];
   usage?: LlmUsage;
@@ -129,7 +136,8 @@ function loadEnabledTools(): Set<string> {
       !saved.includes("rag_search") ||
       !saved.includes("list_attachments") ||
       !saved.includes("save_view") ||
-      !saved.includes("memory_list")
+      !saved.includes("memory_list") ||
+      !saved.includes("create_page_extension")
     ) {
       return new Set(ALL_TOOL_NAMES);
     }
@@ -162,6 +170,7 @@ export function App() {
   const agentProfiles = useMemo(() => new AgentProfileStore(), []);
   const usageStore = useMemo(() => new UsageStore(), []);
   const taskStore = useMemo(() => new TaskStore(), []);
+  const pageExtensions = useMemo(() => new PageExtensionStore(), []);
   const connectorStore = useMemo(() => new ConnectorStore(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profiles = useMemo<ProfileStore>(
@@ -214,6 +223,8 @@ export function App() {
   } | null>(null);
   const [sessionList, setSessionList] = useState<ChatSession[]>([]);
   const [sessionQuery, setSessionQuery] = useState("");
+  const [sessionBookmarksOnly, setSessionBookmarksOnly] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
   const [sessionUsage, setSessionUsage] = useState<LlmUsage>(ZERO);
   const [lastTurnUsage, setLastTurnUsage] = useState<LlmUsage | null>(null);
@@ -363,7 +374,8 @@ export function App() {
           id: t.id,
           role: t.role,
           content: t.content,
-          createdAt: new Date().toISOString(),
+          createdAt: t.createdAt ?? new Date().toISOString(),
+          bookmarked: t.bookmarked,
           usage: t.usage,
           tools: t.tools,
         };
@@ -516,6 +528,33 @@ export function App() {
     [attachments, currentSession, sessions],
   );
 
+  const toggleMessageBookmark = useCallback(
+    (turnId: string) => {
+      setTurns((prev) => {
+        const next = prev.map((t) =>
+          t.id === turnId ? { ...t, bookmarked: !t.bookmarked } : t,
+        );
+        if (currentSession) void persistSession(currentSession, next, sessionUsage);
+        return next;
+      });
+    },
+    [currentSession, persistSession, sessionUsage],
+  );
+
+  const toggleSessionBookmark = useCallback(() => {
+    void (async () => {
+      if (!currentSession) return;
+      const updated: ChatSession = {
+        ...currentSession,
+        bookmarked: !currentSession.bookmarked,
+        updatedAt: new Date().toISOString(),
+      };
+      await sessions.save(updated);
+      setCurrentSession(updated);
+      await refreshSessions();
+    })();
+  }, [currentSession, refreshSessions, sessions]);
+
   const loadSession = useCallback(async (id: string) => {
     const s = await sessions.get(id);
     if (!s) return;
@@ -527,6 +566,8 @@ export function App() {
           id: m.id,
           role: m.role as "user" | "assistant",
           content: m.content,
+          createdAt: m.createdAt,
+          bookmarked: m.bookmarked,
           tools: m.tools as ToolChipData[] | undefined,
           usage: m.usage,
         })),
@@ -578,14 +619,20 @@ export function App() {
       if (!overrideText) setInput("");
       const pendingIds = pending.map((p) => p.id);
       setPendingAttachments([]);
+      const nowIso = new Date().toISOString();
       const userTurn: UiTurn = {
         id: crypto.randomUUID(),
         role: "user",
         content: displayText,
+        createdAt: nowIso,
         attachments: pending.map((p) => ({ id: p.id, name: p.name, kind: p.kind })),
       };
       const assistantId = crypto.randomUUID();
-      let nextTurns = [...turns, userTurn, { id: assistantId, role: "assistant" as const, content: "" }];
+      let nextTurns = [
+        ...turns,
+        userTurn,
+        { id: assistantId, role: "assistant" as const, content: "", createdAt: nowIso },
+      ];
       setTurns(nextTurns);
       setRunning(true);
       setStreamingId(assistantId);
@@ -791,6 +838,7 @@ export function App() {
           budgetMode: runBudget,
           usageLog: usageStore,
           tasks: taskStore,
+          pageExtensions,
           agents: agentProfiles,
           sessionId: session.id,
           runId,
@@ -877,6 +925,7 @@ export function App() {
       sessions,
       taskStore,
       usageStore,
+      pageExtensions,
       turns,
       vault,
     ],
@@ -976,6 +1025,7 @@ export function App() {
             ["activity", "Activity"],
             ["usage", "Usage"],
             ["tasks", "Tasks"],
+            ["pageext", "Page ext"],
             ["settings", "Settings"],
             ["vault", "Vault"],
             ["tools", "Tools"],
@@ -1005,6 +1055,47 @@ export function App() {
         <>
           <div className={`chat-main${preview ? " chat-main-split" : ""}`}>
             <div className="messages">
+              {currentSession ? (
+                <div className="conv-bar">
+                  <div className="conv-bar-main">
+                    <span className="conv-label">Conversation</span>
+                    <code className="conv-id" title={currentSession.id}>
+                      {shortConversationId(currentSession.id)}
+                    </code>
+                    <button
+                      type="button"
+                      className="msg-action"
+                      title="Copy full conversation id"
+                      onClick={() => {
+                        void (async () => {
+                          const ok = await copyText(currentSession.id);
+                          if (ok) {
+                            setIdCopied(true);
+                            window.setTimeout(() => setIdCopied(false), 1200);
+                          }
+                        })();
+                      }}
+                    >
+                      {idCopied ? "Copied id" : "Copy id"}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className={
+                      currentSession.bookmarked ? "msg-action active" : "msg-action"
+                    }
+                    title={
+                      currentSession.bookmarked
+                        ? "Remove conversation bookmark"
+                        : "Bookmark conversation"
+                    }
+                    aria-pressed={!!currentSession.bookmarked}
+                    onClick={toggleSessionBookmark}
+                  >
+                    {currentSession.bookmarked ? "Bookmarked" : "Bookmark"}
+                  </button>
+                </div>
+              ) : null}
               <SubagentStrip runs={subagentRuns} />
               {turns.length === 0 ? (
                 <div className="bubble system">
@@ -1013,7 +1104,10 @@ export function App() {
                 </div>
               ) : null}
               {turns.map((t) => (
-                <div key={t.id} className={`bubble ${t.role}`}>
+                <div
+                  key={t.id}
+                  className={`bubble ${t.role}${t.bookmarked ? " bookmarked" : ""}`}
+                >
                   {t.role === "assistant" ? (
                     <MarkdownView content={t.content} streaming={streamingId === t.id} />
                   ) : (
@@ -1067,11 +1161,19 @@ export function App() {
                       ))}
                     </div>
                   ) : null}
-                  {t.usage && t.role === "assistant" ? (
-                    <div className="turn-usage">
-                      {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
-                    </div>
-                  ) : null}
+                  <div className="bubble-footer">
+                    <MessageToolbar
+                      content={t.content}
+                      createdAt={t.createdAt}
+                      bookmarked={t.bookmarked}
+                      onToggleBookmark={() => toggleMessageBookmark(t.id)}
+                    />
+                    {t.usage && t.role === "assistant" ? (
+                      <div className="turn-usage">
+                        {t.usage.totalTokens} tok · {formatUsd(t.usage.estimatedCostUsd)}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ))}
               {pendingApproval ? (
@@ -1287,20 +1389,52 @@ export function App() {
             >
               Search
             </button>
+            <button
+              type="button"
+              className={sessionBookmarksOnly ? "primary" : undefined}
+              title="Show bookmarked conversations or messages"
+              aria-pressed={sessionBookmarksOnly}
+              onClick={() => setSessionBookmarksOnly((v) => !v)}
+            >
+              Bookmarks
+            </button>
             <button type="button" className="primary" onClick={() => void newChat()}>
               New chat
             </button>
           </div>
           <ul className="list">
-            {sessionList.map((s) => (
-              <li key={s.id}>
-                <button type="button" className="linkish" onClick={() => void loadSession(s.id)}>
-                  <strong>{s.title || "Untitled"}</strong>
+            {sessionList
+              .filter((s) => {
+                if (!sessionBookmarksOnly) return true;
+                return (
+                  !!s.bookmarked || s.messages.some((m) => m.bookmarked && m.role !== "system")
+                );
+              })
+              .map((s) => (
+              <li key={s.id} className={s.bookmarked ? "session-row bookmarked" : "session-row"}>
+                <button type="button" className="linkish session-open" onClick={() => void loadSession(s.id)}>
+                  <strong>
+                    {s.bookmarked ? "[B] " : ""}
+                    {s.title || "Untitled"}
+                    {s.messages.some((m) => m.bookmarked) ? " · msgs bookmarked" : ""}
+                  </strong>
                   <br />
                   <span className="hint">
                     {new Date(s.updatedAt).toLocaleString()} · {s.totalTokens} tok ·{" "}
                     {formatUsd(s.estimatedCostUsd)}
                   </span>
+                  <br />
+                  <span className="hint mono-id" title={s.id}>
+                    id {shortConversationId(s.id)}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="msg-action"
+                  title="Copy conversation id"
+                  onClick={() => void copyText(s.id)}
+                >
+                  Copy id
                 </button>
               </li>
             ))}
@@ -1342,6 +1476,10 @@ export function App() {
 
       {tab === "tasks" ? (
         <TasksPanel taskStore={taskStore} currentSessionId={currentSession?.id} />
+      ) : null}
+
+      {tab === "pageext" ? (
+        <PageExtensionsPanel store={pageExtensions} sessionId={currentSession?.id} />
       ) : null}
 
       {tab === "settings" ? (

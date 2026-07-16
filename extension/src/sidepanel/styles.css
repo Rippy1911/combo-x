@@ -268,6 +268,42 @@ body {
   border-radius: 4px;
 }
 
+.md-pre-wrap {
+  position: relative;
+  margin: 0.5em 0;
+}
+
+.md-pre-wrap pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  padding-top: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 75%, #000);
+  margin: 0;
+}
+
+.md-copy {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 1;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--mono);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--muted);
+  cursor: pointer;
+  width: auto;
+}
+
+.md-copy:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
 .md pre {
   overflow-x: auto;
   padding: 8px 10px;
@@ -280,6 +316,146 @@ body {
 .md pre code {
   background: transparent;
   padding: 0;
+}
+
+.conv-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elev) 70%, transparent);
+}
+
+.conv-bar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.conv-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.conv-id,
+.mono-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.msg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.msg-time {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.msg-action {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--mono);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  width: auto;
+}
+
+.msg-action:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.msg-action.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.bubble-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bubble.bookmarked {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.session-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-row .session-open {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-row.bookmarked {
+  border-left: 2px solid var(--accent);
+  padding-left: 6px;
+}
+
+.page-ext-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 28%) 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.page-ext-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.page-ext-editor textarea.mono,
+.page-ext-editor textarea {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+  resize: vertical;
+}
+
+.page-ext-editor .row.wrap {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.list.compact li {
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 520px) {
+  .page-ext-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .md table {
@@ -770,7 +946,7 @@ code {
 }
 
 .turn-usage {
-  margin-top: 6px;
+  margin-top: 0;
   font-size: 10px;
   font-family: var(--mono);
   color: var(--muted);

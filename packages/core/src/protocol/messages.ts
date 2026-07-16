@@ -64,6 +64,18 @@ export const BrowserToolNameSchema = z.enum([
   "create_task",
   "update_task",
   "list_tasks",
+  "create_page_extension",
+  "update_page_extension",
+  "list_page_extensions",
+  "get_page_extension",
+  "approve_page_extension",
+  "revoke_page_extension",
+  "inject_page_extension",
+  "set_page_extension_bridge",
+  "page_ext_data_list",
+  "page_ext_data_get",
+  "page_ext_data_clear",
+  "list_page_extension_audit",
 ]);
 export type BrowserToolName = z.infer<typeof BrowserToolNameSchema>;
 
@@ -203,6 +215,21 @@ export const RuntimeMessageSchema = z.discriminatedUnion("type", [
     download: z.boolean().optional(),
     filename: z.string().min(1).optional(),
   }),
+  z.object({
+    type: z.literal("inject_page_extensions"),
+    tabId: z.number().int().optional(),
+    scriptIds: z.array(z.string()).optional(),
+  }),
+  z.object({
+    type: z.literal("page_ext_bridge"),
+    kind: z.enum(["export", "storage_get", "storage_set", "storage_delete", "storage_list", "log"]),
+    scriptId: z.string().min(1),
+    channel: z.string(),
+    payload: z.unknown().optional(),
+    reqId: z.string().optional(),
+    pageUrl: z.string().optional(),
+    tabId: z.number().int().optional(),
+  }),
 ]);
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
 
@@ -229,4 +256,11 @@ export const SENSITIVE_TOOLS = new Set([
   "start_recording",
   "stop_recording",
   "spawn_subagent",
+  "create_page_extension",
+  "update_page_extension",
+  "approve_page_extension",
+  "revoke_page_extension",
+  "inject_page_extension",
+  "set_page_extension_bridge",
+  "page_ext_data_clear",
 ]);

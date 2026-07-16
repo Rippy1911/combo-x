@@ -59,6 +59,20 @@ export const TOOL_GROUPS = {
     "search_sessions",
   ],
   Connectors: ["rest_request", "mcp_list_tools", "mcp_call"],
+  PageExt: [
+    "create_page_extension",
+    "update_page_extension",
+    "list_page_extensions",
+    "get_page_extension",
+    "approve_page_extension",
+    "revoke_page_extension",
+    "inject_page_extension",
+    "set_page_extension_bridge",
+    "page_ext_data_list",
+    "page_ext_data_get",
+    "page_ext_data_clear",
+    "list_page_extension_audit",
+  ],
 } as const;
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
@@ -69,4 +83,5 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Media",
   "Memory",
   "Connectors",
+  "PageExt",
 ];

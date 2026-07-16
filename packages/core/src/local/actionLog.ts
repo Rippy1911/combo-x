@@ -87,6 +87,13 @@ export function redactToolArgs(
   ) {
     base.text = "[redacted]";
   }
+  if (
+    (tool === "create_page_extension" || tool === "update_page_extension") &&
+    typeof base.source === "string"
+  ) {
+    const src = base.source;
+    base.source = `[source ${src.length} chars — omitted from action log]`;
+  }
   return base;
 }
 

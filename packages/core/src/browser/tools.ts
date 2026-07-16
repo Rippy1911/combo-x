@@ -997,6 +997,194 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_page_extension",
+      description:
+        "Create a MAIN-world page extension (userscript). Isolated from Combo DB. Starts as draft — approve then enable then inject. Source uses ComboX API: export/storage/log.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          source: { type: "string", description: "JavaScript body using ComboX" },
+          patterns: {
+            type: "array",
+            items: { type: "string" },
+            description: "URL match globs e.g. https://allegro.pl/*",
+          },
+          pattern: { type: "string" },
+          runAt: { type: "string", enum: ["document_idle", "document_end", "document_start"] },
+        },
+        required: ["name", "source"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_page_extension",
+      description: "Update page extension fields. Changing source resets approval to draft.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          source: { type: "string" },
+          patterns: { type: "array", items: { type: "string" } },
+          enabled: { type: "boolean" },
+          runAt: { type: "string", enum: ["document_idle", "document_end", "document_start"] },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_page_extensions",
+      description: "List page extensions (metadata; no full source).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_page_extension",
+      description: "Get full page extension including source + bridge + hashes.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "approve_page_extension",
+      description: "Approve a draft page extension for injection (sensitive).",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "revoke_page_extension",
+      description: "Revoke approval and disable a page extension.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inject_page_extension",
+      description:
+        "Inject approved+enabled page extension(s) into a tab (MAIN world). Omit id to inject all matching the tab URL.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          ids: { type: "array", items: { type: "string" } },
+          tabId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_page_extension_bridge",
+      description:
+        "ONLY path for page→host data. Set exportChannels + allowStorage, or clear:true. Without a bridge, page scripts cannot write host storage or export payloads.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          exportChannels: { type: "array", items: { type: "string" } },
+          allowStorage: { type: "boolean" },
+          maxPayloadBytes: { type: "number" },
+          clear: { type: "boolean" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_list",
+      description: "List keys in an extension's isolated data store (not Combo sessions/vault).",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_get",
+      description: "Read isolated extension data (key or all:true). Agent bridge into Combo context.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          key: { type: "string" },
+          all: { type: "boolean" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_clear",
+      description: "Clear all isolated data for a page extension.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_page_extension_audit",
+      description: "Traceability: audit log for page extensions (create/approve/inject/export/…).",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          limit: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export function toolArgsToContentRequest(
