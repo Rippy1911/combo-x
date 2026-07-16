@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Combo-X",
+  "description": "Local-first browser agent — BYOK, encrypted vault, memory, real page tools. Beats stub scaffolds.",
+  "version": "0.1.0",
+  "icons": {
+    "16": "public/icon-16.png",
+    "48": "public/icon-48.png",
+    "128": "public/icon-128.png"
+  },
+  "action": {
+    "default_title": "Open Combo-X"
+  },
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.ts"],
+      "run_at": "document_idle"
+    }
+  ]
+}

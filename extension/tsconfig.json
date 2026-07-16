@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "jsx": "react-jsx",
+    "rootDir": ".",
+    "outDir": "dist-types",
+    "types": ["chrome", "vite/client"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "manifest.json"],
+  "references": [{ "path": "../packages/core" }]
+}

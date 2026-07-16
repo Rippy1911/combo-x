@@ -1,0 +1,28 @@
+{
+  "name": "combo-x",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm --filter @combo-x/extension build",
+    "dev": "pnpm --filter @combo-x/extension dev",
+    "typecheck": "tsc --build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "lint": "tsc --build --pretty false"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@types/chrome": "^0.0.313",
+    "@types/node": "^22.14.1",
+    "@types/react": "^18.3.20",
+    "@types/react-dom": "^18.3.6",
+    "@vitejs/plugin-react": "^4.4.1",
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.3",
+    "vitest": "^3.1.2"
+  }
+}
