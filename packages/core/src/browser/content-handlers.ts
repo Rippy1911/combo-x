@@ -5,18 +5,77 @@ import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 const MAX_TEXT = 12_000;
 const interactiveMaps = new WeakMap<Document, HTMLElement[]>();
 
+const EAN_RE = /\b(\d{8}|\d{13}|\d{14})\b/g;
+
+function pageDigest(doc: Document): Record<string, unknown> {
+  const url = doc.location?.href ?? "";
+  const title = doc.title;
+  const headings = Array.from(doc.querySelectorAll("h1,h2,h3"))
+    .slice(0, 20)
+    .map((h) => ({
+      tag: h.tagName.toLowerCase(),
+      text: (h.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 160),
+    }))
+    .filter((h) => h.text);
+
+  const labelHits: Array<{ label: string; value: string }> = [];
+  const bodyText = visibleText(doc);
+  const labelPatterns = [
+    /EAN\s*Opakowanie\s*zbiorcze\s*:?\s*(\d{8,14})/i,
+    /EAN\s*:?\s*(\d{8,14})/i,
+    /Numer\s*katalogowy\s*:?\s*(\d+)/i,
+    /Catalog(?:ue)?\s*(?:no|number|#)\s*:?\s*(\w+)/i,
+    /Materiał\s*:?\s*(\d+)/i,
+  ];
+  for (const re of labelPatterns) {
+    const m = bodyText.match(re);
+    if (m) labelHits.push({ label: re.source.slice(0, 40), value: m[1]! });
+  }
+
+  const eans = [...new Set((bodyText.match(EAN_RE) ?? []).slice(0, 40))];
+  const main =
+    doc.querySelector("main, article, [class*='product'], [id*='product']") ??
+    doc.body;
+  const mainSample = (main?.textContent ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 900);
+
+  return {
+    title,
+    url,
+    headings,
+    labelHits,
+    eans,
+    mainSample,
+    hint: "Use extract/query_all for precise fields; avoid get_page full.",
+  };
+}
+
 export function handleContentRequest(request: ContentRequest, doc: Document = document): ContentResponse {
   try {
     switch (request.op) {
-      case "get_page":
+      case "get_page": {
+        const mode = request.mode ?? "full";
+        const maxChars = request.maxChars ?? MAX_TEXT;
+        if (mode === "structure") {
+          return { ok: true, data: pageDigest(doc) };
+        }
+        const text = visibleText(doc);
+        const cap = mode === "snippet" ? Math.min(maxChars, 2_500) : maxChars;
         return {
           ok: true,
           data: {
             title: doc.title,
             url: doc.location?.href ?? "",
-            text: visibleText(doc).slice(0, MAX_TEXT),
+            text: text.slice(0, cap),
+            truncated: text.length > cap,
+            mode,
           },
         };
+      }
+      case "page_digest":
+        return { ok: true, data: pageDigest(doc) };
       case "get_links": {
         const limit = request.limit ?? 30;
         const links = Array.from(doc.querySelectorAll("a[href]"))
@@ -145,6 +204,49 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           return item;
         });
         return { ok: true, data: { items, count: items.length } };
+      }
+      case "element_rect": {
+        let el: Element | null = null;
+        if (request.selector) {
+          el = doc.querySelector(request.selector);
+        } else if (request.index != null) {
+          const map = interactiveMaps.get(doc);
+          el = map?.[request.index] ?? null;
+        }
+        if (!el || !(el instanceof HTMLElement)) {
+          return { ok: false, error: "element not found" };
+        }
+        const rect = el.getBoundingClientRect();
+        const dpr = doc.defaultView?.devicePixelRatio ?? 1;
+        return {
+          ok: true,
+          data: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            dpr,
+            tag: el.tagName.toLowerCase(),
+          },
+        };
+      }
+      case "page_metrics": {
+        const view = doc.defaultView;
+        const root =
+          (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement ?? doc.body;
+        const dpr = view?.devicePixelRatio ?? 1;
+        return {
+          ok: true,
+          data: {
+            scrollWidth: root?.scrollWidth ?? 0,
+            scrollHeight: root?.scrollHeight ?? 0,
+            clientWidth: root?.clientWidth ?? view?.innerWidth ?? 0,
+            clientHeight: root?.clientHeight ?? view?.innerHeight ?? 0,
+            scrollX: view?.scrollX ?? root?.scrollLeft ?? 0,
+            scrollY: view?.scrollY ?? root?.scrollTop ?? 0,
+            dpr,
+          },
+        };
       }
       default:
         return { ok: false, error: "unknown op" };

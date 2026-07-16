@@ -52,6 +52,13 @@ export function buildPreviewFromTool(
       body: JSON.stringify(result, null, 2).slice(0, 80_000),
     };
   }
+  if (typeof result === "object" && result) {
+    const obj = result as Record<string, unknown>;
+    const dataUrl = typeof obj.dataUrl === "string" ? obj.dataUrl : "";
+    if (dataUrl.startsWith("data:image/")) {
+      return { title: name, kind: "image", body: dataUrl };
+    }
+  }
   if (typeof result === "object" && result && "content" in result) {
     const content = String((result as { content: unknown }).content ?? "");
     if (content.startsWith("data:image/")) {

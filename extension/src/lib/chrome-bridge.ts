@@ -1,4 +1,4 @@
-import type { BrowserBridge, ContentRequest, ContentResponse } from "@combo-x/core";
+import type { BrowserBridge, ContentRequest, ContentResponse, ScreenshotResult } from "@combo-x/core";
 
 async function sleep(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
@@ -85,6 +85,53 @@ export function createChromeBridge(): BrowserBridge {
       })) as { ok: boolean; error?: string };
       if (!res.ok) throw new Error(res.error ?? "download failed");
       return { ok: true };
+    },
+    async captureViewport(windowId?: number): Promise<ScreenshotResult> {
+      return (await chrome.runtime.sendMessage({
+        type: "capture_viewport",
+        windowId,
+      })) as ScreenshotResult;
+    },
+    async captureElement(
+      tabId: number,
+      target: { selector?: string; index?: number },
+    ): Promise<ScreenshotResult> {
+      return (await chrome.runtime.sendMessage({
+        type: "capture_element",
+        tabId,
+        selector: target.selector,
+        index: target.index,
+      })) as ScreenshotResult;
+    },
+    async captureFullPage(tabId: number): Promise<ScreenshotResult> {
+      return (await chrome.runtime.sendMessage({
+        type: "capture_full_page",
+        tabId,
+      })) as ScreenshotResult;
+    },
+    async startRecording(tabId: number) {
+      return (await chrome.runtime.sendMessage({
+        type: "start_recording",
+        tabId,
+      })) as {
+        ok: boolean;
+        session?: { id: string; tabId: number; startedAt: string };
+        error?: string;
+      };
+    },
+    async stopRecording(opts?: { download?: boolean; filename?: string }) {
+      return (await chrome.runtime.sendMessage({
+        type: "stop_recording",
+        download: opts?.download,
+        filename: opts?.filename,
+      })) as { ok: boolean; dataUrl?: string; error?: string };
+    },
+    async injectPageExtensions(opts?: { tabId?: number; scriptIds?: string[] }) {
+      return (await chrome.runtime.sendMessage({
+        type: "inject_page_extensions",
+        tabId: opts?.tabId,
+        scriptIds: opts?.scriptIds,
+      })) as { ok: boolean; injected?: string[]; errors?: string[]; error?: string };
     },
   };
 }

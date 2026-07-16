@@ -3,6 +3,10 @@ import type { OpenRouterClient } from "../llm/openrouter.js";
 import { ViewStore } from "../local/views.js";
 import { MemoryStore } from "../memory/store.js";
 import { SessionStore } from "../sessions/store.js";
+import { AgentProfileStore } from "../agents/profiles.js";
+import { UsageStore } from "../usage/store.js";
+import { AGENT_TOOLS } from "../browser/tools.js";
+import * as pickToolsMod from "../tools/pickTools.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -90,6 +94,102 @@ describe("AgentLoop", () => {
     expect(browser.runContent).toHaveBeenCalled();
     expect(events).toContain("tool_start");
     expect(events).toContain("done");
+  });
+
+  it("budget mode rewrites bare get_page to page_digest", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "get_page", args: "{}" }],
+      },
+      { content: "done" },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "digest",
+      budgetMode: "budget",
+    });
+    expect(browser.runContent).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "page_digest" }),
+    );
+  });
+
+  it("scrape_pdps upserts rows without get_page full", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "scrape_pdps",
+            args: JSON.stringify({
+              saps: ["29597", "29605"],
+              baseUrl: "https://b2b.example.com",
+              viewName: "ean-map",
+            }),
+          },
+        ],
+      },
+      { content: "done" },
+    ]);
+    let nav = 0;
+    const browser = stubBrowser({
+      runContent: vi.fn(async (req) => {
+        if (req.op === "page_digest") {
+          nav += 1;
+          const n = String(nav);
+          return {
+            ok: true,
+            data: {
+              title: `PDP ${n}`,
+              url: `https://b2b.example.com/s/${n}`,
+              labelHits: [
+                { label: "EAN", value: `590074961092${n}` },
+                { label: "EAN Opakowanie zbiorcze", value: `590074961192${n}` },
+                { label: "Numer katalogowy", value: n === "1" ? "29597" : "29605" },
+              ],
+              eans: [`590074961092${n}`, `590074961192${n}`],
+            },
+          };
+        }
+        return { ok: true, data: {} };
+      }),
+      navigate: vi.fn(async (url) => ({ ok: true, url })),
+      listTabs: vi.fn(async () => [
+        { id: 1, title: "B2B", url: "https://b2b.example.com/" },
+      ]),
+    });
+    const views = new ViewStore(`views_${crypto.randomUUID()}`);
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "scrape",
+      budgetMode: "budget",
+      approvalMode: "auto_all",
+      views,
+      maxSteps: 4,
+    });
+    const getPageFull = (browser.runContent as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0]?.op === "get_page" && c[0]?.mode === "full",
+    );
+    expect(getPageFull).toHaveLength(0);
+    const digestCalls = (browser.runContent as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0]?.op === "page_digest",
+    );
+    expect(digestCalls.length).toBeGreaterThanOrEqual(2);
+    const table = await views.get("ean-map");
+    expect(table).toBeTruthy();
+    expect((table!.rows?.length ?? 0) - 1).toBeGreaterThanOrEqual(2);
   });
 
   it("respects abort signal", async () => {
@@ -322,7 +422,7 @@ describe("AgentLoop", () => {
     });
     const agent = new AgentLoop(llm, stubBrowser(), memory);
     await agent.run({ model: "mock", userMessage: "hi" });
-    expect(seenSystem).toMatch(/USER MEMORIES/);
+    expect(seenSystem).toMatch(/AGENT MEMORIES/);
     expect(seenSystem).toMatch(/Anita prefers morning calls/);
   });
 
@@ -375,6 +475,86 @@ describe("AgentLoop", () => {
     await agent.run({ model: "mock", userMessage: "continue", history });
     expect(roles).not.toContain("tool");
     expect(roles.filter((r) => r === "user").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("emits approvalDecision on sensitive tool_result", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://example.com" }),
+          },
+        ],
+      },
+      { content: "ok" },
+    ]);
+    const decisions: Array<string | undefined> = [];
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "go",
+      approvalMode: "auto_all",
+      onEvent: (e) => {
+        if (e.type === "tool_result") decisions.push(e.approvalDecision);
+      },
+    });
+    expect(decisions).toContain("auto_all");
+  });
+
+  it("mid-run Auto-approve via getApprovalMode skips later prompts", async () => {
+    let mode: "ask" | "auto_all" = "ask";
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://a.example" }),
+          },
+        ],
+      },
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "2",
+            name: "navigate",
+            args: JSON.stringify({ url: "https://b.example" }),
+          },
+        ],
+      },
+      { content: "Done." },
+    ]);
+    const browser = stubBrowser();
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    let approvals = 0;
+    await agent.run({
+      model: "mock",
+      userMessage: "go twice",
+      approvalMode: "ask",
+      getApprovalMode: () => mode,
+      onEvent: (e) => {
+        if (e.type === "tool_approval") {
+          approvals += 1;
+          mode = "auto_all";
+          e.resolve?.(true);
+        }
+      },
+    });
+    expect(approvals).toBe(1);
+    expect(browser.navigate).toHaveBeenCalledTimes(2);
   });
 
   it("ask deny blocks navigate (T-Approve-1)", async () => {
@@ -552,5 +732,206 @@ describe("AgentLoop", () => {
     expect(browser.navigate).toHaveBeenCalledWith("https://b2b.foodwell.pl/login");
     expect(ops.filter((c) => c === "type_text").length).toBe(2);
     expect(ops).toContain("click");
+  });
+
+  it("computes enabled tools once before the step loop (T-V11-tools-once)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "list_tabs", args: "{}" }],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "list_tabs", args: "{}" }],
+      },
+      { content: "done" },
+    ]);
+    const filterSpy = vi.spyOn(AGENT_TOOLS, "filter");
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "tabs",
+      enabledTools: ["list_tabs", "get_page"],
+      toolMode: "static",
+      maxSteps: 3,
+    });
+    // Schemas are rebuilt each orchestrator step (skill unlocks may expand mid-run).
+    expect(filterSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const call of filterSpy.mock.results) {
+      const tools = call.value as typeof AGENT_TOOLS;
+      expect(tools.every((t) => ["list_tabs", "get_page"].includes(t.function.name))).toBe(true);
+    }
+    filterSpy.mockRestore();
+  });
+
+  it("empty enabledTools attaches zero tools (T-V12-empty-allowlist)", async () => {
+    const llm = mockLlm([{ content: "no tools" }]);
+    const filterSpy = vi.spyOn(AGENT_TOOLS, "filter");
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "hi",
+      enabledTools: [],
+      maxSteps: 1,
+    });
+    // Filter yields []; loop omits tools key when length===0 (not the old bug of restoring ALL).
+    expect(filterSpy.mock.results[0]?.value).toEqual([]);
+    const stream = llm.chatStreaming as ReturnType<typeof vi.fn>;
+    const call = stream.mock.calls[0]?.[0] as { tools?: unknown[] };
+    expect(call?.tools).toBeUndefined();
+    filterSpy.mockRestore();
+  });
+
+  it("approve_page_extension is rejected for agent (user-only)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "approve_page_extension",
+            args: JSON.stringify({ id: "x" }),
+          },
+        ],
+      },
+      { content: "done" },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const pageExtensions = new (await import("../pageExtensions/store.js")).PageExtensionStore(
+      `pe_${crypto.randomUUID()}`,
+    );
+    const toolResults: unknown[] = [];
+    await agent.run({
+      model: "mock",
+      userMessage: "approve",
+      approvalMode: "ask",
+      pageExtensions,
+      onEvent: (e) => {
+        if (e.type === "tool_approval" && e.resolve) e.resolve(true);
+        if (e.type === "tool_result" && e.tool === "approve_page_extension") {
+          toolResults.push(e.result);
+        }
+      },
+    });
+    expect(toolResults[0]).toMatchObject({ ok: false });
+    expect(String((toolResults[0] as { error?: string }).error)).toMatch(/user-only/i);
+  });
+
+  it("spawn_subagent blocks at nesting depth 1 (T-V11-nesting)", async () => {
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "spawn_subagent",
+            args: JSON.stringify({ goal: "nested task" }),
+          },
+        ],
+      },
+      { content: "Blocked nesting." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const toolResults: unknown[] = [];
+    await agent.run({
+      model: "mock",
+      userMessage: "spawn",
+      nestingDepth: 1,
+      approvalMode: "auto_all",
+      onEvent: (e) => {
+        if (e.type === "tool_result" && e.tool === "spawn_subagent") {
+          toolResults.push(e.result);
+        }
+      },
+    });
+    expect(toolResults[0]).toMatchObject({ ok: false, error: "nesting limit" });
+  });
+
+  it("create_agent auto-picks tools and saves profile (T-V11-create-agent)", async () => {
+    const pickSpy = vi.spyOn(pickToolsMod, "pickToolsForGoal").mockResolvedValue({
+      tools: ["navigate", "page_digest", "scrape_pdps"],
+      rationale: "scrape goal",
+    });
+    const agents = new AgentProfileStore(`agents_loop_${crypto.randomUUID()}`);
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            name: "create_agent",
+            args: JSON.stringify({
+              name: "FoodWell Scraper",
+              goal: "Map EANs from FoodWell catalog",
+            }),
+          },
+        ],
+      },
+      { content: "Agent created." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      workerModel: "worker-model",
+      userMessage: "create agent",
+      agents,
+    });
+    expect(pickSpy).toHaveBeenCalledOnce();
+    const saved = await agents.list();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.name).toBe("FoodWell Scraper");
+    expect(saved[0]?.toolAllowlist).toContain("create_task");
+    expect(saved[0]?.toolAllowlist).toContain("spawn_subagent");
+    pickSpy.mockRestore();
+  });
+
+  it("usageLog append on user, llm, tool, assistant (T-V11-usage)", async () => {
+    const usageLog = new UsageStore(`usage_loop_${crypto.randomUUID()}`);
+    const appendSpy = vi.spyOn(usageLog, "append");
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "list_tabs", args: "{}" }],
+      },
+      { content: "Listed tabs." },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock-orch",
+      userMessage: "list tabs",
+      sessionId: "sess-1",
+      runId: "run-1",
+      usageLog,
+    });
+    const kinds = appendSpy.mock.calls.map((c) => c[0]?.kind);
+    expect(kinds).toContain("message");
+    expect(kinds.filter((k) => k === "message")).toHaveLength(2);
+    expect(kinds).toContain("llm");
+    expect(kinds).toContain("tool");
+    appendSpy.mockRestore();
   });
 });

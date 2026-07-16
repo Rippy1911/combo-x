@@ -1,5 +1,3 @@
-import { githubGetFile, githubSearchCode, type GitHubConfig } from "../connectors/github.js";
-import { ideaforgeSearch, type IdeaForgeConfig } from "../connectors/ideaforge.js";
 import { ArtifactStore, buildReportHtml } from "../local/artifacts.js";
 import type { AttachmentStore } from "../attachments/store.js";
 import {
@@ -7,6 +5,36 @@ import {
   formatAttachmentInventory,
 } from "../attachments/parse.js";
 import type { ViewChartSpec, ViewStore } from "../local/views.js";
+import { ensureView, upsertRows } from "../local/views.js";
+import type { ConnectorStore } from "../connectors/store.js";
+import { restRequest } from "../connectors/rest.js";
+import { mcpCall, mcpListTools } from "../connectors/mcp.js";
+import {
+  resolveAgentProfile,
+  type AgentProfile,
+  type AgentToolMode,
+  type ResolvedAgentProfile,
+  type AgentProfileStore,
+} from "../agents/profiles.js";
+import type { TaskStore } from "../tasks/store.js";
+import { formatOpenTasksBlock } from "../tasks/inject.js";
+import { providerFromModel, type UsageEvent, type UsageStore } from "../usage/store.js";
+import { TOOL_CATALOG } from "../tools/catalog.js";
+import {
+  initialActiveTools,
+  isSkillGatedTool,
+  unlockFromHints,
+} from "../tools/gating.js";
+import { pickToolsForGoal } from "../tools/pickTools.js";
+import type { SkillStore } from "../skills/store.js";
+import {
+  BUDGET_SYSTEM_ADDON,
+  preferPageDigest,
+  resolveMaxSteps,
+  rewriteGetPageArgs,
+  type AgentBudgetMode,
+} from "./budget.js";
+import { PageTemplateCache } from "./pageTemplateCache.js";
 import { leanHistory } from "./leanHistory.js";
 import type {
   ChatMessage,
@@ -18,6 +46,7 @@ import type {
 } from "../llm/openrouter.js";
 import type { MemoryStore } from "../memory/store.js";
 import { DEFAULT_WORKER_MODEL } from "../models.js";
+import { approvalDecisionFor } from "../local/actionLog.js";
 import { SENSITIVE_TOOLS } from "../protocol/messages.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
@@ -35,6 +64,24 @@ export interface BrowserBridge {
   goBack(tabId?: number): Promise<{ ok: boolean }>;
   closeTab(tabId: number): Promise<{ ok: boolean }>;
   downloadText(filename: string, text: string, mime?: string): Promise<{ ok: boolean }>;
+  captureViewport?(windowId?: number): Promise<import("../media/capture.js").ScreenshotResult>;
+  captureElement?(
+    tabId: number,
+    target: { selector?: string; index?: number },
+  ): Promise<import("../media/capture.js").ScreenshotResult>;
+  captureFullPage?(tabId: number): Promise<import("../media/capture.js").ScreenshotResult>;
+  startRecording?(
+    tabId: number,
+  ): Promise<{ ok: boolean; session?: import("../media/capture.js").RecordingSession; error?: string }>;
+  stopRecording?(opts?: {
+    download?: boolean;
+    filename?: string;
+  }): Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  /** Inject approved page extensions into a tab (MAIN world). */
+  injectPageExtensions?(opts?: {
+    tabId?: number;
+    scriptIds?: string[];
+  }): Promise<{ ok: boolean; injected?: string[]; errors?: string[]; error?: string }>;
 }
 
 /** A saved site login + scrape recipe, stored encrypted in the vault as `site_profile:<name>`. */
@@ -59,6 +106,17 @@ export interface ProfileStore {
   save(profile: SiteProfile): Promise<void>;
 }
 
+export type RunContextSnapshot = {
+  systemPrompt: string;
+  memoryBlock: string;
+  /** Open conversation + global tasks prepended each turn (empty if none). */
+  taskBlock: string;
+  toolNames: string[];
+  model: string;
+  /** How the first orchestrator call was delivered */
+  transport: "stream" | "full";
+};
+
 export interface AgentEvent {
   type:
     | "status"
@@ -68,7 +126,9 @@ export interface AgentEvent {
     | "assistant_delta"
     | "done"
     | "error"
-    | "usage";
+    | "usage"
+    | "run_context"
+    | "tools_unlocked";
   message?: string;
   tool?: string;
   args?: Record<string, unknown>;
@@ -78,11 +138,36 @@ export interface AgentEvent {
   /** orchestrator | worker | approval */
   usageSource?: "orchestrator" | "worker" | "approval";
   resolve?: (allow: boolean) => void;
+  /** Present on tool_result after the approval gate */
+  approvalMode?: ApprovalMode;
+  /** allowed | denied | auto_all | auto_llm | n/a */
+  approvalDecision?: "allowed" | "denied" | "auto_all" | "auto_llm" | "n/a";
+  /** Emitted once per user turn — system + memories (not re-sent mid-stream). */
+  runContext?: RunContextSnapshot;
+  /** skill_read unlocked tools for this run */
+  skillId?: string;
+  unlockedTools?: string[];
+  activeTools?: string[];
 }
 
-export interface ConnectorBundle {
-  ideaforge?: IdeaForgeConfig | null;
-  github?: GitHubConfig | null;
+/** Runtime for dynamic REST/MCP connectors (no hardcoded hosts). */
+export type ConnectorRuntime = {
+  store: ConnectorStore;
+  getSecret: (label: string) => Promise<string | null>;
+  /** If set, only these connector ids are callable */
+  allowedIds?: string[];
+};
+
+/** @deprecated use ConnectorRuntime */
+export type ConnectorBundle = ConnectorRuntime;
+
+export interface SubagentEvent {
+  type: "start" | "delta" | "done" | "error";
+  subagentId: string;
+  goal: string;
+  summary?: string;
+  messages?: ChatMessage[];
+  usage?: LlmUsage;
 }
 
 export interface AgentRunOptions {
@@ -95,19 +180,47 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
   systemPrompt?: string;
   enabledTools?: string[];
+  /**
+   * skill_gated (default when skills provided): lean ALWAYS_ON + unlock via skill_read.
+   * static: attach full ceiling every turn (good for expensive orch / auto-picked profiles).
+   */
+  toolMode?: AgentToolMode;
+  /** On-demand skill store (search/read/save). */
+  skills?: SkillStore;
   approvalMode?: ApprovalMode;
+  /**
+   * Live approval mode (e.g. UI flipped mid-run to auto_all).
+   * When set, consulted per tool call so Auto-approve persists for the rest of the run.
+   */
+  getApprovalMode?: () => ApprovalMode;
   approvalModel?: string;
   onEvent?: (event: AgentEvent) => void;
   /** Local folder RAG index (IndexedDB) */
   rag?: RagStore;
-  /** Live read-only connectors */
-  connectors?: ConnectorBundle;
+  /** Dynamic REST/MCP connectors */
+  connectors?: ConnectorRuntime;
   /** Chat attachments (PDF/CSV/images/…) */
   attachments?: AttachmentStore;
   /** Attachment ids included with this user turn */
   pendingAttachmentIds?: string[];
   /** Named Views (Views tab / save_view) */
   views?: ViewStore;
+  /** Minimize steps/tokens — prefer page_digest + worker parse */
+  budgetMode?: AgentBudgetMode;
+  /** Sub-agent nesting depth (0 = root orchestrator). */
+  nestingDepth?: number;
+  /** Agent profile store for create/list/update/spawn. */
+  agents?: AgentProfileStore;
+  /** Task board store. */
+  tasks?: TaskStore;
+  /** Usage telemetry store. */
+  usageLog?: UsageStore;
+  /** Page extensions (userscripts) — isolated from combo sessions/vault. */
+  pageExtensions?: import("../pageExtensions/store.js").PageExtensionStore;
+  sessionId?: string;
+  runId?: string;
+  agentId?: string;
+  onSubagent?: (e: SubagentEvent) => void;
 }
 
 export interface AgentRunResult {
@@ -122,18 +235,15 @@ export interface AgentRunResult {
 const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and close_tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
-For catalogs/scrapes: scroll + query_all or scrape_tables, then parse_data (cheap worker LLM) to structure rows, then export_csv or save_view (durable table in Views tab).
-For a WHOLE catalog in one call: scrape_catalog (paginates all pages, calls the worker per page, dedupes, returns rows) — then export_csv or save_view.
-Use list_views / get_view to reopen saved tables.
-Login + recipe reuse without re-entering: save_site_profile once (name, loginUrl, username, password, selectors, selector, nextSelector|nextText, intent) — then login {profile} and scrape_catalog {profile} reuse it. Use get_site_profile to recall a recipe.
-For codebase questions: rag_search / rag_read_file against the granted local folder; ideaforge_search for portfolio knowledge; github_search_code / github_get_file when a GitHub token is configured.
-For uploaded chat files (PDF/CSV/XLSX/txt/images): list_attachments / read_attachment. Images may be attached as vision parts on the user turn.
-Durable notes: remember / recall / memory_list — top memories are also injected into the system prompt each run.
+SKILLS vs MEMORY:
+- Memories are already prepended in the system message each turn (global + active agent). Do not re-fetch them mid-stream.
+- Skills are on-demand playbooks. Use skill_search then skill_read to load a playbook AND unlock specialized tools (scrape, rest, rag, page-ext, media) for this run.
+- If a tool is locked, skill_search → skill_read the matching seed skill (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media).
+Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
+Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 Rules:
-- Prefer get_interactive or query_all over dumping huge get_page text into your own context.
-- Prefer rag_search over inventing file contents.
-- Prefer read_attachment over inventing uploaded file contents.
-- Prefer USER MEMORIES / recall over inventing user facts.
+- Prefer page_digest over full get_page dumps.
+- Prefer skill_read + tools / rag / memories over inventing facts.
 - After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
 - Be concise in the final answer.`;
@@ -191,6 +301,61 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const META_TASK_TOOLS = ["create_task", "list_tasks", "update_task"];
+
+function mergeToolNames(...groups: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const group of groups) {
+    for (const name of group) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+function metaToolsForAgent(canDelegate: boolean, canSelfEdit: boolean): string[] {
+  const meta = [...META_TASK_TOOLS];
+  if (canDelegate) meta.push("spawn_subagent");
+  if (canSelfEdit) meta.push("update_agent", "list_agents", "create_agent");
+  return meta;
+}
+
+interface RunContext {
+  nestingDepth: number;
+  runId: string;
+  sessionId?: string;
+  agentId?: string;
+  agents?: AgentProfileStore;
+  tasks?: TaskStore;
+  usageLog?: UsageStore;
+  pageExtensions?: import("../pageExtensions/store.js").PageExtensionStore;
+  resolvedProfile: ResolvedAgentProfile | null;
+  /** Ceiling — user/profile may-use set. */
+  enabledToolNames: string[];
+  /** Currently attached tool names (skill_gated expands on skill_read). */
+  activeToolNames: string[];
+  toolMode: AgentToolMode;
+  skills?: SkillStore;
+  onSubagent?: (e: SubagentEvent) => void;
+  rebuildTools: () => void;
+  model: string;
+  workerModel: string;
+  budgetMode: AgentBudgetMode;
+  signal?: AbortSignal;
+  rag?: RagStore;
+  connectors?: ConnectorRuntime;
+  attachments?: AttachmentStore;
+  views?: ViewStore;
+  approvalMode?: ApprovalMode;
+  getApprovalMode?: () => ApprovalMode;
+  approvalModel?: string;
+  systemPrompt?: string;
+  history?: ChatMessage[];
+}
+
 export class AgentLoop {
   private readonly artifacts = new ArtifactStore();
 
@@ -203,15 +368,52 @@ export class AgentLoop {
   ) {}
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
-    const maxSteps = options.maxSteps ?? 32;
-    const approvalMode = options.approvalMode ?? "ask";
-    const workerModel = options.workerModel ?? DEFAULT_WORKER_MODEL;
+    const nestingDepth = options.nestingDepth ?? 0;
+    const runId = options.runId ?? crypto.randomUUID();
+    let resolvedProfile: ResolvedAgentProfile | null = null;
+    if (options.agentId && options.agents) {
+      const profile = await options.agents.get(options.agentId);
+      if (profile) resolvedProfile = resolveAgentProfile(profile);
+    }
+
+    const budgetMode =
+      options.budgetMode ?? resolvedProfile?.budgetMode ?? "normal";
+    const maxSteps = resolveMaxSteps(
+      budgetMode,
+      options.maxSteps ?? resolvedProfile?.maxSteps,
+    );
+    const resolveApprovalMode = (): ApprovalMode =>
+      options.getApprovalMode?.() ??
+      options.approvalMode ??
+      resolvedProfile?.approvalMode ??
+      "ask";
+    const workerModel =
+      options.workerModel ??
+      resolvedProfile?.workerModel ??
+      DEFAULT_WORKER_MODEL;
+    const orchestratorModel = resolvedProfile?.orchestratorModel ?? options.model;
     const emit = options.onEvent ?? (() => undefined);
+
+    const logUsage = async (input: Omit<UsageEvent, "id" | "at">) => {
+      await options.usageLog?.append({
+        sessionId: options.sessionId,
+        runId,
+        agentId: options.agentId,
+        ...input,
+      });
+    };
+
+    await logUsage({ kind: "message", role: "user" });
+
     const userContent = await this.buildUserContent(options);
-    const systemBase = options.systemPrompt ?? DEFAULT_SYSTEM;
-    const memBlock = await this.formatMemoryInject();
+    let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
+    if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
+    // Memories + open tasks loaded once per user turn (not mid-stream).
+    const memBlock = await this.formatMemoryInject(options.agentId);
+    const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
+    const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
     const messages: ChatMessage[] = [
-      { role: "system", content: memBlock ? `${systemBase}\n\n${memBlock}` : systemBase },
+      { role: "system", content: systemParts.join("\n\n") },
       ...leanHistory(options.history ?? []),
       { role: "user", content: userContent },
     ];
@@ -219,6 +421,93 @@ export class AgentLoop {
     let usage = ZERO;
     let steps = 0;
     let finalText = "";
+    const pageTemplates = new PageTemplateCache();
+
+    // undefined/null → all tools; [] → zero tools (Disable-all must not silently restore full set).
+    let enabledToolNames =
+      options.enabledTools != null
+        ? options.enabledTools
+        : AGENT_TOOLS.map((t) => t.function.name);
+
+    // Enforce profile capability flags on the allowlist for this run.
+    if (resolvedProfile && !resolvedProfile.canSelfEdit) {
+      enabledToolNames = enabledToolNames.filter(
+        (n) => n !== "create_agent" && n !== "update_agent",
+      );
+    }
+    if (resolvedProfile && !resolvedProfile.canDelegate) {
+      enabledToolNames = enabledToolNames.filter((n) => n !== "spawn_subagent");
+    }
+
+    const ceiling = new Set(enabledToolNames);
+    const toolMode: AgentToolMode =
+      options.toolMode ??
+      resolvedProfile?.toolMode ??
+      (options.skills ? "skill_gated" : "static");
+
+    let activeToolNames =
+      toolMode === "skill_gated"
+        ? initialActiveTools(ceiling)
+        : enabledToolNames.filter((n) => ceiling.has(n));
+
+    // Tool schemas re-sent each orchestrator step; skill_gated may expand after skill_read.
+    let tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+    const rebuildTools = () => {
+      tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+    };
+
+    const preferStream = typeof this.llm.chatStreaming === "function";
+    emit({
+      type: "run_context",
+      runContext: {
+        systemPrompt: systemBase,
+        memoryBlock: memBlock,
+        taskBlock,
+        toolNames: tools.map((t) => t.function.name),
+        model: orchestratorModel,
+        transport: preferStream ? "stream" : "full",
+      },
+    });
+
+    const runCtx: RunContext = {
+      nestingDepth,
+      runId,
+      sessionId: options.sessionId,
+      agentId: options.agentId,
+      agents: options.agents,
+      tasks: options.tasks,
+      usageLog: options.usageLog,
+      pageExtensions: options.pageExtensions,
+      resolvedProfile,
+      enabledToolNames,
+      activeToolNames,
+      toolMode,
+      skills: options.skills,
+      rebuildTools: () => {
+        // Keep runCtx.activeToolNames as source of truth for unlocks.
+        activeToolNames = runCtx.activeToolNames;
+        rebuildTools();
+      },
+      onSubagent: options.onSubagent,
+      model: orchestratorModel,
+      workerModel,
+      budgetMode,
+      signal: options.signal,
+      rag: options.rag,
+      connectors: options.connectors,
+      attachments: options.attachments,
+      views: options.views,
+      approvalMode: options.approvalMode ?? resolvedProfile?.approvalMode,
+      getApprovalMode: options.getApprovalMode,
+      approvalModel: options.approvalModel,
+      systemPrompt: options.systemPrompt ?? resolvedProfile?.systemPrompt,
+      history: options.history,
+    };
+    // Point rebuild at runCtx so unlocks sync both arrays.
+    runCtx.rebuildTools = () => {
+      activeToolNames = runCtx.activeToolNames;
+      rebuildTools();
+    };
 
     for (let step = 0; step < maxSteps; step += 1) {
       if (options.signal?.aborted) {
@@ -226,22 +515,21 @@ export class AgentLoop {
         return { messages, finalText, steps, usage, aborted: true, hitStepLimit: false };
       }
 
+      // Refresh schemas after possible skill_read unlocks from the previous step.
+      activeToolNames = runCtx.activeToolNames;
+      rebuildTools();
+
       emit({
         type: "status",
         message: `Working… turn ${step + 1} (limit ${maxSteps})`,
       });
-
-      const tools =
-        options.enabledTools && options.enabledTools.length > 0
-          ? AGENT_TOOLS.filter((t) => options.enabledTools!.includes(t.function.name))
-          : AGENT_TOOLS;
 
       let result: ChatResult;
       try {
         // Prefer streaming so the UI sees tokens; fall back to non-stream chat for mocks/old clients.
         if (typeof this.llm.chatStreaming === "function") {
           result = await this.llm.chatStreaming({
-            model: options.model,
+            model: orchestratorModel,
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
@@ -252,7 +540,7 @@ export class AgentLoop {
           });
         } else {
           result = await this.llm.chat({
-            model: options.model,
+            model: orchestratorModel,
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
@@ -266,12 +554,22 @@ export class AgentLoop {
 
       usage = sumUsage(usage, result.usage);
       emit({ type: "usage", usage: result.usage, usageSource: "orchestrator" });
+      await logUsage({
+        kind: "llm",
+        model: orchestratorModel,
+        provider: providerFromModel(orchestratorModel),
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        totalTokens: result.usage.totalTokens,
+        estimatedCostUsd: result.usage.estimatedCostUsd,
+      });
       steps += 1;
 
       if (result.toolCalls.length === 0) {
         finalText = result.content ?? "";
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });
+        await logUsage({ kind: "message", role: "assistant" });
         emit({ type: "done", usage });
         return { messages, finalText, steps, usage, aborted: false, hitStepLimit: false };
       }
@@ -289,17 +587,29 @@ export class AgentLoop {
         }
 
         const args = parseToolArguments(call.function.arguments);
+        const modeNow = resolveApprovalMode();
+        const sensitive = SENSITIVE_TOOLS.has(call.function.name);
         const allowed = await this.approve(
           call,
           args,
-          approvalMode,
+          modeNow,
           options.approvalModel ?? workerModel,
           emit,
           options.signal,
           (u) => {
             usage = sumUsage(usage, u);
+            void logUsage({
+              kind: "llm",
+              model: options.approvalModel ?? workerModel,
+              provider: providerFromModel(options.approvalModel ?? workerModel),
+              promptTokens: u.promptTokens,
+              completionTokens: u.completionTokens,
+              totalTokens: u.totalTokens,
+              estimatedCostUsd: u.estimatedCostUsd,
+            });
           },
         );
+        const decision = approvalDecisionFor(modeNow, allowed, sensitive);
         if (!allowed) {
           const denied = { ok: false, error: "denied by user / policy" };
           emit({
@@ -308,6 +618,8 @@ export class AgentLoop {
             args,
             result: denied,
             toolCallId: call.id,
+            approvalMode: modeNow,
+            approvalDecision: decision,
           });
           messages.push({
             role: "tool",
@@ -330,6 +642,11 @@ export class AgentLoop {
           options.connectors,
           options.attachments,
           options.views,
+          { approvalMode: modeNow, approvalDecision: decision },
+          budgetMode,
+          pageTemplates,
+          runCtx,
+          logUsage,
         );
         messages.push({
           role: "tool",
@@ -343,6 +660,7 @@ export class AgentLoop {
     finalText =
       `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + parse_data + export_csv).`;
     messages.push({ role: "assistant", content: finalText });
+    await logUsage({ kind: "message", role: "assistant" });
     emit({ type: "done", message: finalText, usage });
     return { messages, finalText, steps, usage, aborted: false, hitStepLimit: true };
   }
@@ -357,9 +675,19 @@ export class AgentLoop {
     onUsage: (u: LlmUsage) => void,
   ): Promise<boolean> {
     if (!SENSITIVE_TOOLS.has(call.function.name)) return true;
-    if (mode === "auto_all") return true;
+    // Page-extension lifecycle that installs MAIN-world JS must never auto-approve.
+    const alwaysAskUser = new Set([
+      "approve_page_extension",
+      "set_page_extension_bridge",
+      "inject_page_extension",
+    ]);
+    if (alwaysAskUser.has(call.function.name)) {
+      /* fall through to ask / UI gate even under auto_all */
+    } else if (mode === "auto_all") {
+      return true;
+    }
 
-    if (mode === "auto_llm") {
+    if (mode === "auto_llm" && !alwaysAskUser.has(call.function.name)) {
       try {
         const verdict = await this.llm.chat({
           model: approvalModel,
@@ -407,13 +735,30 @@ export class AgentLoop {
     });
   }
 
-  /** First-call inject from the same MemoryStore `remember` writes (GAP-MEM-1). */
-  private async formatMemoryInject(): Promise<string> {
+  /** First-call inject: always prepend global + active-agent memories (not mid-stream). */
+  private async formatMemoryInject(agentId?: string): Promise<string> {
     try {
-      const top = await this.memory.list(8);
+      const top = await this.memory.listForInject({ agentId, limit: 24 });
       if (!top.length) return "";
-      const lines = top.map((m, i) => `${i + 1}. ${m.text.slice(0, 400)}`);
-      return `USER MEMORIES (local; prefer these over inventing facts):\n${lines.join("\n")}`;
+      const lines = top.map((m, i) => {
+        const tag = m.scope === "agent" ? "agent" : "global";
+        return `${i + 1}. [${tag}] ${m.text.slice(0, 400)}`;
+      });
+      return `AGENT MEMORIES (local; always prepended each turn; prefer these over inventing facts):\n${lines.join("\n")}`;
+    } catch {
+      return "";
+    }
+  }
+
+  /** First-call inject: open session + global tasks (ns-agent Conversation Tasks parity). */
+  private async formatTaskInject(
+    sessionId: string | undefined,
+    tasks: AgentRunOptions["tasks"],
+  ): Promise<string> {
+    if (!tasks) return "";
+    try {
+      const rows = await tasks.list({});
+      return formatOpenTasksBlock(rows, sessionId);
     } catch {
       return "";
     }
@@ -484,15 +829,59 @@ export class AgentLoop {
     workerModel: string,
     onUsage: (u: LlmUsage) => void,
     rag?: RagStore,
-    connectors?: ConnectorBundle,
+    connectors?: ConnectorRuntime,
     attachments?: AttachmentStore,
     views?: ViewStore,
+    approvalMeta?: {
+      approvalMode: ApprovalMode;
+      approvalDecision: NonNullable<AgentEvent["approvalDecision"]>;
+    },
+    budgetMode: AgentBudgetMode = "normal",
+    pageTemplates?: PageTemplateCache,
+    runCtx?: RunContext,
+    logUsage?: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
   ): Promise<unknown> {
     const name = call.function.name;
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
 
+    const workerOnUsage = (u: LlmUsage) => {
+      onUsage(u);
+      void logUsage?.({
+        kind: "llm",
+        model: workerModel,
+        provider: providerFromModel(workerModel),
+        promptTokens: u.promptTokens,
+        completionTokens: u.completionTokens,
+        totalTokens: u.totalTokens,
+        estimatedCostUsd: u.estimatedCostUsd,
+      });
+    };
+
     try {
       let result: unknown;
+
+      // Hard gate: skill-gated tools must be unlocked (or toolMode static).
+      if (
+        runCtx &&
+        runCtx.toolMode === "skill_gated" &&
+        isSkillGatedTool(name) &&
+        !runCtx.activeToolNames.includes(name)
+      ) {
+        result = {
+          ok: false,
+          error: "tool_locked",
+          hint: "Call skill_search then skill_read for a skill that unlocks this tool (e.g. combo-scrape).",
+        };
+        emit({
+          type: "tool_result",
+          tool: name,
+          result,
+          toolCallId: call.id,
+          approvalMode: approvalMeta?.approvalMode,
+          approvalDecision: approvalMeta?.approvalDecision ?? "n/a",
+        });
+        return result;
+      }
 
       if (name === "list_tabs") {
         result = { tabs: await this.browser.listTabs() };
@@ -508,7 +897,7 @@ export class AgentLoop {
       } else if (name === "close_tab") {
         result = await this.browser.closeTab(Number(args.tabId));
       } else if (name === "parse_data") {
-        result = await this.parseData(args, workerModel, emit, onUsage);
+        result = await this.parseData(args, workerModel, emit, workerOnUsage);
       } else if (name === "rag_status") {
         if (!rag) result = { ok: false, error: "rag store unavailable" };
         else {
@@ -557,42 +946,6 @@ export class AgentLoop {
             ? { ok: true, ...file }
             : { ok: false, error: `path not in index: ${path}` };
         }
-      } else if (name === "ideaforge_search") {
-        const cfg = connectors?.ideaforge;
-        if (!cfg?.email || !cfg?.password) {
-          result = {
-            ok: false,
-            error: "IdeaForge credentials missing — set email+password in Settings (vault)",
-          };
-        } else {
-          result = await ideaforgeSearch(
-            cfg,
-            String(args.query ?? ""),
-            typeof args.limit === "number" ? args.limit : 10,
-          );
-        }
-      } else if (name === "github_search_code") {
-        const cfg = connectors?.github;
-        if (!cfg?.token) {
-          result = { ok: false, error: "github_token missing in vault (Settings)" };
-        } else {
-          result = await githubSearchCode(cfg, String(args.query ?? ""), {
-            repo: typeof args.repo === "string" ? args.repo : undefined,
-            limit: typeof args.limit === "number" ? args.limit : 10,
-          });
-        }
-      } else if (name === "github_get_file") {
-        const cfg = connectors?.github;
-        if (!cfg?.token) {
-          result = { ok: false, error: "github_token missing in vault (Settings)" };
-        } else {
-          result = await githubGetFile(
-            cfg,
-            String(args.repo ?? ""),
-            String(args.path ?? ""),
-            typeof args.ref === "string" ? args.ref : undefined,
-          );
-        }
       } else if (name === "list_attachments") {
         if (!attachments) result = { ok: false, error: "attachment store unavailable" };
         else {
@@ -623,18 +976,144 @@ export class AgentLoop {
             ? { ok: true, ...file }
             : { ok: false, error: `attachment not found: ${id}` };
         }
-      } else if (name === "remember") {
-        const text = String(args.text ?? "");
+      } else if (name === "remember" || name === "save_memory") {
+        const text = String(args.text ?? args.fact ?? "");
         const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
-        const entry = await this.memory.remember({ text, tags, kind: "note" });
-        result = { saved: true, id: entry.id };
+        const scopeRaw = String(args.scope ?? "global").toLowerCase();
+        const scope = scopeRaw === "agent" ? ("agent" as const) : ("global" as const);
+        const agentIdArg =
+          typeof args.agentId === "string" && args.agentId.trim()
+            ? args.agentId.trim()
+            : runCtx?.agentId;
+        try {
+          const entry = await this.memory.remember({
+            text,
+            tags,
+            kind: "note",
+            scope,
+            agentId: scope === "agent" ? agentIdArg : undefined,
+          });
+          result = {
+            ok: true,
+            saved: true,
+            id: entry.id,
+            scope: entry.scope,
+            agentId: entry.agentId ?? null,
+          };
+        } catch (err) {
+          result = {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
       } else if (name === "recall") {
         const query = String(args.query ?? "");
         const limit = typeof args.limit === "number" ? args.limit : 5;
-        result = { hits: await this.memory.recall(query, limit) };
+        result = {
+          hits: await this.memory.recall(query, limit, { agentId: runCtx?.agentId }),
+        };
       } else if (name === "memory_list") {
         const limit = typeof args.limit === "number" ? args.limit : 20;
-        result = { memories: await this.memory.list(limit) };
+        result = {
+          memories: await this.memory.listForInject({
+            agentId: runCtx?.agentId,
+            limit,
+          }),
+        };
+      } else if (name === "skill_search") {
+        if (!runCtx?.skills) result = { ok: false, error: "skills store unavailable" };
+        else {
+          const query = String(args.query ?? "");
+          const limit = typeof args.limit === "number" ? args.limit : 8;
+          const hits = await runCtx.skills.search(query, {
+            agentId: runCtx.agentId,
+            limit,
+          });
+          result = {
+            ok: true,
+            hits: hits.map((s) => ({
+              id: s.id,
+              name: s.name,
+              description: s.description,
+              tags: s.tags,
+              toolHints: s.toolHints ?? [],
+              scope: s.scope,
+              score: s.score,
+            })),
+          };
+        }
+      } else if (name === "skill_read") {
+        if (!runCtx?.skills) result = { ok: false, error: "skills store unavailable" };
+        else {
+          let skill =
+            typeof args.id === "string" && args.id.trim()
+              ? await runCtx.skills.get(args.id.trim())
+              : null;
+          if (!skill && typeof args.name === "string" && args.name.trim()) {
+            const skillName = args.name.trim();
+            const hits = await runCtx.skills.search(skillName, {
+              agentId: runCtx.agentId,
+              limit: 5,
+            });
+            skill = hits.find((h) => h.name === skillName) ?? hits[0] ?? null;
+          }
+          if (!skill) result = { ok: false, error: "skill not found" };
+          else {
+            const ceiling = new Set(runCtx.enabledToolNames);
+            const { active, unlocked } = unlockFromHints(
+              runCtx.activeToolNames,
+              skill.toolHints ?? [],
+              ceiling,
+            );
+            runCtx.activeToolNames = active;
+            runCtx.rebuildTools();
+            emit({
+              type: "tools_unlocked",
+              skillId: skill.id,
+              unlockedTools: unlocked,
+              activeTools: active,
+            });
+            result = {
+              ok: true,
+              id: skill.id,
+              name: skill.name,
+              description: skill.description,
+              body: skill.body,
+              tags: skill.tags,
+              toolHints: skill.toolHints ?? [],
+              unlockedTools: unlocked,
+              activeToolCount: active.length,
+            };
+          }
+        }
+      } else if (name === "skill_save") {
+        if (!runCtx?.skills) result = { ok: false, error: "skills store unavailable" };
+        else {
+          try {
+            const scopeRaw = String(args.scope ?? "global").toLowerCase();
+            const scope = scopeRaw === "agent" ? ("agent" as const) : ("global" as const);
+            const agentIdArg =
+              typeof args.agentId === "string" && args.agentId.trim()
+                ? args.agentId.trim()
+                : runCtx.agentId;
+            const saved = await runCtx.skills.save({
+              id: typeof args.id === "string" ? args.id : undefined,
+              name: String(args.name ?? ""),
+              description: String(args.description ?? ""),
+              body: String(args.body ?? ""),
+              tags: Array.isArray(args.tags) ? args.tags.map(String) : [],
+              scope,
+              agentId: scope === "agent" ? agentIdArg : undefined,
+              toolHints: Array.isArray(args.toolHints) ? args.toolHints.map(String) : undefined,
+            });
+            result = { ok: true, skill: saved };
+          } catch (err) {
+            result = {
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
       } else if (name === "export_csv") {
         const filename = String(args.filename ?? "export.csv");
         const rows = Array.isArray(args.rows) ? (args.rows as string[][]) : [];
@@ -748,23 +1227,759 @@ export class AgentLoop {
       } else if (name === "login") {
         result = await this.loginWithProfile(args, emit);
       } else if (name === "scrape_catalog") {
-        result = await this.scrapeCatalog(args, workerModel, emit, onUsage);
+        result = await this.scrapeCatalog(args, workerModel, emit, workerOnUsage);
+      } else if (name === "ensure_scrape_table") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const columns = Array.isArray(args.columns) ? args.columns.map(String) : [];
+          const keyColumns = Array.isArray(args.keyColumns)
+            ? args.keyColumns.map(String)
+            : columns.slice(0, 1);
+          const view = await ensureView(views, {
+            name: String(args.name ?? "scrape"),
+            columns,
+            keyColumns,
+          });
+          result = {
+            ok: true,
+            id: view.id,
+            name: view.name,
+            columns,
+            keyColumns,
+            rowCount: Math.max(0, (view.rows?.length ?? 1) - 1),
+          };
+        }
+      } else if (name === "upsert_scrape_rows") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const viewId = String(args.viewId ?? "");
+          const rows = Array.isArray(args.rows)
+            ? (args.rows as unknown[]).map((r) =>
+                Array.isArray(r) ? r.map((c) => String(c ?? "")) : [String(r)],
+              )
+            : [];
+          let keyColumns = Array.isArray(args.keyColumns) ? args.keyColumns.map(String) : [];
+          const existing = await views.get(viewId);
+          if (!existing) result = { ok: false, error: `view not found: ${viewId}` };
+          else {
+            if (!keyColumns.length) {
+              const note = existing.note ?? "";
+              const m = note.match(/keyColumns:([^|]+)/);
+              keyColumns = m
+                ? m[1]!.split(",").map((s) => s.trim()).filter(Boolean)
+                : (existing.rows?.[0] ?? existing.columns ?? []).slice(0, 1);
+            }
+            const saved = await upsertRows(views, existing.id, rows, keyColumns);
+            result = {
+              ok: true,
+              id: saved.id,
+              name: saved.name,
+              rowCount: Math.max(0, (saved.rows?.length ?? 1) - 1),
+            };
+          }
+        }
+      } else if (name === "get_scrape_table") {
+        if (!views) result = { ok: false, error: "view store unavailable" };
+        else {
+          const v = await views.get(String(args.viewId ?? ""));
+          const limit = clampInt(args.limit, 200, 1, 500);
+          result = v
+            ? {
+                ok: true,
+                id: v.id,
+                name: v.name,
+                rows: v.rows?.slice(0, limit + 1),
+                rowCount: Math.max(0, (v.rows?.length ?? 1) - 1),
+              }
+            : { ok: false, error: "view not found" };
+        }
+      } else if (name === "scrape_pdps") {
+        result = await this.scrapePdps(args, views, pageTemplates, emit);
+      } else if (name === "rest_request") {
+        result = await this.runRestRequest(args, connectors);
+      } else if (name === "mcp_list_tools") {
+        result = await this.runMcpList(args, connectors);
+      } else if (name === "mcp_call") {
+        result = await this.runMcpCall(args, connectors);
+      } else if (name === "screenshot_viewport") {
+        if (!this.browser.captureViewport) result = { ok: false, error: "capture unavailable" };
+        else
+          result = await this.browser.captureViewport(
+            typeof args.windowId === "number" ? args.windowId : undefined,
+          );
+      } else if (name === "screenshot_element") {
+        if (!this.browser.captureElement) result = { ok: false, error: "capture unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.captureElement(tabId, {
+            selector: typeof args.selector === "string" ? args.selector : undefined,
+            index: typeof args.index === "number" ? args.index : undefined,
+          });
+        }
+      } else if (name === "screenshot_full") {
+        if (!this.browser.captureFullPage) result = { ok: false, error: "capture unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.captureFullPage(tabId);
+        }
+      } else if (name === "start_recording") {
+        if (!this.browser.startRecording) result = { ok: false, error: "recording unavailable" };
+        else {
+          const tabs = await this.browser.listTabs();
+          const tabId =
+            typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
+          result = await this.browser.startRecording(tabId);
+        }
+      } else if (name === "stop_recording") {
+        if (!this.browser.stopRecording) result = { ok: false, error: "recording unavailable" };
+        else
+          result = await this.browser.stopRecording({
+            download: args.download !== false,
+            filename: typeof args.filename === "string" ? args.filename : undefined,
+          });
+      } else if (name === "create_agent") {
+        if (runCtx?.resolvedProfile && !runCtx.resolvedProfile.canSelfEdit) {
+          result = { ok: false, error: "canSelfEdit is false on active profile" };
+        } else {
+          result = await this.createAgent(args, runCtx, workerModel);
+        }
+      } else if (name === "update_agent") {
+        if (runCtx?.resolvedProfile && !runCtx.resolvedProfile.canSelfEdit) {
+          result = { ok: false, error: "canSelfEdit is false on active profile" };
+        } else {
+          result = await this.updateAgent(args, runCtx);
+        }
+      } else if (name === "list_agents") {
+        result = await this.listAgents(runCtx);
+      } else if (name === "spawn_subagent") {
+        result = await this.spawnSubagent(args, runCtx);
+      } else if (name === "create_task") {
+        result = await this.createTask(args, runCtx);
+      } else if (name === "update_task") {
+        result = await this.updateTask(args, runCtx);
+      } else if (name === "list_tasks") {
+        result = await this.listTasks(args, runCtx);
+      } else if (
+        name === "create_page_extension" ||
+        name === "update_page_extension" ||
+        name === "list_page_extensions" ||
+        name === "get_page_extension" ||
+        name === "approve_page_extension" ||
+        name === "revoke_page_extension" ||
+        name === "inject_page_extension" ||
+        name === "set_page_extension_bridge" ||
+        name === "page_ext_data_list" ||
+        name === "page_ext_data_get" ||
+        name === "page_ext_data_clear" ||
+        name === "list_page_extension_audit"
+      ) {
+        result = await this.handlePageExtensionTool(name, args, runCtx);
       } else {
-        const req = toolArgsToContentRequest(name, args);
+        let toolName = name;
+        let toolArgs = args;
+        if (name === "get_page") {
+          if (preferPageDigest(budgetMode, name, args)) {
+            toolName = "page_digest";
+            toolArgs = {};
+          } else {
+            const rewritten = rewriteGetPageArgs(budgetMode, args);
+            if ("error" in rewritten) {
+              result = { ok: false, error: rewritten.error };
+              emit({
+                type: "tool_result",
+                tool: name,
+                args,
+                result,
+                toolCallId: call.id,
+                approvalMode: approvalMeta?.approvalMode,
+                approvalDecision: approvalMeta?.approvalDecision,
+              });
+              return result;
+            }
+            toolArgs = rewritten;
+          }
+        }
+        const req = toolArgsToContentRequest(toolName, toolArgs);
         if (!req) {
-          result = { ok: false, error: `invalid args for ${name}` };
+          result = { ok: false, error: `invalid args for ${toolName}` };
         } else {
           result = await this.browser.runContent(req);
+          if (
+            pageTemplates &&
+            result &&
+            typeof result === "object" &&
+            (result as { ok?: boolean }).ok &&
+            (toolName === "page_digest" ||
+              (toolName === "get_page" && toolArgs.mode === "structure"))
+          ) {
+            const data = (result as { data?: unknown }).data;
+            if (data && typeof data === "object") {
+              (result as { data: unknown }).data = pageTemplates.annotate(
+                data as Record<string, unknown>,
+              );
+            }
+          }
         }
       }
 
-      emit({ type: "tool_result", tool: name, args, result, toolCallId: call.id });
+      emit({
+        type: "tool_result",
+        tool: name,
+        args,
+        result,
+        toolCallId: call.id,
+        approvalMode: approvalMeta?.approvalMode,
+        approvalDecision: approvalMeta?.approvalDecision,
+      });
+      await logUsage?.({ kind: "tool", tool: name });
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       const result = { ok: false, error: msg };
-      emit({ type: "tool_result", tool: name, args, result, toolCallId: call.id });
+      emit({
+        type: "tool_result",
+        tool: name,
+        args,
+        result,
+        toolCallId: call.id,
+        approvalMode: approvalMeta?.approvalMode,
+        approvalDecision: approvalMeta?.approvalDecision,
+      });
+      await logUsage?.({ kind: "tool", tool: name });
       return result;
+    }
+  }
+
+  private async createAgent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+    workerModel: string,
+  ): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const name = String(args.name ?? "");
+    if (!name.trim()) return { ok: false, error: "name required" };
+
+    const goal = strOpt(args.goal);
+    const canDelegate = args.canDelegate !== false;
+    const canSelfEdit = args.canSelfEdit !== false;
+    const pickModel = strOpt(args.workerModel) ?? workerModel;
+
+    const hasSkills = Boolean(runCtx?.skills);
+    // Default off when skills exist — lean skill_gated; keep auto-pick for static/expensive orch.
+    const autoPick =
+      typeof args.autoPickTools === "boolean" ? args.autoPickTools : !hasSkills && Boolean(goal);
+    const toolModeArg =
+      args.toolMode === "static" || args.toolMode === "skill_gated"
+        ? args.toolMode
+        : autoPick
+          ? ("static" as const)
+          : ("skill_gated" as const);
+
+    let pickedTools: string[] = AGENT_TOOLS.map((t) => t.function.name);
+    if (autoPick && goal) {
+      const picked = await pickToolsForGoal(this.llm, pickModel, goal, TOOL_CATALOG);
+      pickedTools = picked.tools;
+    }
+
+    const toolAllowlist =
+      toolModeArg === "skill_gated" && !autoPick
+        ? ("all" as const)
+        : mergeToolNames(pickedTools, metaToolsForAgent(canDelegate, canSelfEdit));
+
+    const profile: AgentProfile = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      systemPrompt: strOpt(args.systemPrompt),
+      orchestratorModel: strOpt(args.orchestratorModel),
+      workerModel: strOpt(args.workerModel),
+      toolAllowlist,
+      toolMode: toolModeArg,
+      connectorIds: [],
+      budgetMode:
+        args.budgetMode === "budget" || args.budgetMode === "normal"
+          ? args.budgetMode
+          : undefined,
+      maxSteps: typeof args.maxSteps === "number" ? args.maxSteps : undefined,
+      canDelegate: typeof args.canDelegate === "boolean" ? args.canDelegate : undefined,
+      canSelfEdit: typeof args.canSelfEdit === "boolean" ? args.canSelfEdit : undefined,
+      createdAt: "",
+      updatedAt: "",
+    };
+
+    const saved = await runCtx.agents.put(profile);
+    return { ok: true, agent: resolveAgentProfile(saved) };
+  }
+
+  private async updateAgent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const agentId = String(args.agentId ?? "");
+    if (!agentId) return { ok: false, error: "agentId required" };
+
+    const existing = await runCtx.agents.get(agentId);
+    if (!existing) return { ok: false, error: `agent not found: ${agentId}` };
+
+    const updated: AgentProfile = {
+      ...existing,
+      name: typeof args.name === "string" ? args.name : existing.name,
+      systemPrompt:
+        typeof args.systemPrompt === "string" ? args.systemPrompt : existing.systemPrompt,
+      orchestratorModel:
+        typeof args.orchestratorModel === "string"
+          ? args.orchestratorModel
+          : existing.orchestratorModel,
+      workerModel:
+        typeof args.workerModel === "string" ? args.workerModel : existing.workerModel,
+      toolAllowlist: Array.isArray(args.toolAllowlist)
+        ? args.toolAllowlist.map(String)
+        : existing.toolAllowlist,
+      connectorIds: Array.isArray(args.connectorIds)
+        ? args.connectorIds.map(String)
+        : existing.connectorIds,
+      budgetMode:
+        args.budgetMode === "budget" || args.budgetMode === "normal"
+          ? args.budgetMode
+          : existing.budgetMode,
+      approvalMode:
+        args.approvalMode === "ask" ||
+        args.approvalMode === "auto_llm" ||
+        args.approvalMode === "auto_all"
+          ? args.approvalMode
+          : existing.approvalMode,
+      maxSteps: typeof args.maxSteps === "number" ? args.maxSteps : existing.maxSteps,
+      canDelegate:
+        typeof args.canDelegate === "boolean" ? args.canDelegate : existing.canDelegate,
+      canSelfEdit:
+        typeof args.canSelfEdit === "boolean" ? args.canSelfEdit : existing.canSelfEdit,
+      nestingDepth:
+        typeof args.nestingDepth === "number" ? args.nestingDepth : existing.nestingDepth,
+      ragEnabled: typeof args.ragEnabled === "boolean" ? args.ragEnabled : existing.ragEnabled,
+      toolMode:
+        args.toolMode === "static" || args.toolMode === "skill_gated"
+          ? args.toolMode
+          : existing.toolMode,
+    };
+
+    const saved = await runCtx.agents.put(updated);
+    return { ok: true, agent: resolveAgentProfile(saved) };
+  }
+
+  private async listAgents(runCtx: RunContext | undefined): Promise<unknown> {
+    if (!runCtx?.agents) return { ok: false, error: "agent store unavailable" };
+    const agents = await runCtx.agents.list();
+    return {
+      ok: true,
+      agents: agents.map((a) => {
+        const resolved = resolveAgentProfile(a);
+        const toolCount =
+          a.toolAllowlist === "all" ? AGENT_TOOLS.length : a.toolAllowlist.length;
+        return {
+          id: a.id,
+          name: a.name,
+          orchestratorModel: a.orchestratorModel,
+          workerModel: a.workerModel,
+          toolCount,
+          maxSteps: resolved.maxSteps,
+          canDelegate: resolved.canDelegate,
+          canSelfEdit: resolved.canSelfEdit,
+          updatedAt: a.updatedAt,
+        };
+      }),
+    };
+  }
+
+  private async createTask(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const title = String(args.title ?? "");
+    if (!title.trim()) return { ok: false, error: "title required" };
+
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : "todo";
+
+    const task = await runCtx.tasks.put({
+      id: crypto.randomUUID(),
+      title: title.trim(),
+      status,
+      sessionId:
+        typeof args.sessionId === "string" ? args.sessionId : (runCtx.sessionId ?? null),
+      agentId: runCtx.agentId,
+      note: typeof args.note === "string" ? args.note : undefined,
+      planMarkdown: typeof args.planMarkdown === "string" ? args.planMarkdown : undefined,
+    });
+    return { ok: true, task };
+  }
+
+  private async updateTask(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const id = String(args.id ?? "");
+    if (!id) return { ok: false, error: "id required" };
+
+    const existing = (await runCtx.tasks.list()).find((t) => t.id === id);
+    if (!existing) return { ok: false, error: `task not found: ${id}` };
+
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : existing.status;
+
+    const task = await runCtx.tasks.put({
+      ...existing,
+      status,
+      title: typeof args.title === "string" ? args.title : existing.title,
+      note: typeof args.note === "string" ? args.note : existing.note,
+      planMarkdown:
+        typeof args.planMarkdown === "string" ? args.planMarkdown : existing.planMarkdown,
+    });
+    return { ok: true, task };
+  }
+
+  private async listTasks(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const status =
+      args.status === "todo" ||
+      args.status === "doing" ||
+      args.status === "done" ||
+      args.status === "blocked"
+        ? args.status
+        : undefined;
+    const tasks = await runCtx.tasks.list({
+      sessionId: typeof args.sessionId === "string" ? args.sessionId : runCtx.sessionId,
+      globalOnly: Boolean(args.globalOnly),
+      status,
+    });
+    return { ok: true, tasks };
+  }
+
+  private async spawnSubagent(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx) return { ok: false, error: "run context unavailable" };
+
+    const profile = runCtx.resolvedProfile;
+    if (profile && !profile.canDelegate) {
+      return { ok: false, error: "delegation not allowed for this agent" };
+    }
+
+    const maxNesting = profile?.nestingDepth ?? 1;
+    if (runCtx.nestingDepth >= maxNesting) {
+      return { ok: false, error: "nesting limit" };
+    }
+
+    const goal = String(args.goal ?? "");
+    if (!goal.trim()) return { ok: false, error: "goal required" };
+
+    const subagentId = crypto.randomUUID();
+    runCtx.onSubagent?.({ type: "start", subagentId, goal });
+
+    let childEnabled: string[] | undefined = Array.isArray(args.tools)
+      ? args.tools.map(String)
+      : undefined;
+    let childAgentId = strOpt(args.agentId);
+    let childModel = runCtx.model;
+    let childWorker = runCtx.workerModel;
+    let childBudget: AgentBudgetMode =
+      args.budgetMode === "budget" || args.budgetMode === "normal"
+        ? args.budgetMode
+        : runCtx.budgetMode;
+    let childMaxSteps = typeof args.maxSteps === "number" ? args.maxSteps : 16;
+    let childSystem = runCtx.systemPrompt;
+
+    if (childAgentId && runCtx.agents) {
+      const childProfile = await runCtx.agents.get(childAgentId);
+      if (childProfile) {
+        const resolved = resolveAgentProfile(childProfile);
+        childModel = resolved.orchestratorModel ?? childModel;
+        childWorker = resolved.workerModel ?? childWorker;
+        childBudget = resolved.budgetMode ?? childBudget;
+        childMaxSteps = typeof args.maxSteps === "number" ? args.maxSteps : resolved.maxSteps;
+        childSystem = resolved.systemPrompt ?? childSystem;
+        if (!childEnabled) {
+          childEnabled =
+            resolved.toolAllowlist === "all"
+              ? runCtx.enabledToolNames
+              : [...resolved.toolAllowlist];
+        }
+      }
+    }
+
+    if (!childEnabled) {
+      childEnabled = [...runCtx.enabledToolNames];
+    }
+    childEnabled = childEnabled.filter((n) => n !== "spawn_subagent");
+
+    const childLoop = new AgentLoop(
+      this.llm,
+      this.browser,
+      this.memory,
+      this.sessions,
+      this.profiles,
+    );
+
+    try {
+      const childResult = await childLoop.run({
+        model: childModel,
+        workerModel: childWorker,
+        userMessage: goal,
+        maxSteps: childMaxSteps,
+        budgetMode: childBudget,
+        enabledTools: childEnabled,
+        toolMode: runCtx.toolMode,
+        skills: runCtx.skills,
+        nestingDepth: runCtx.nestingDepth + 1,
+        agents: runCtx.agents,
+        tasks: runCtx.tasks,
+        usageLog: runCtx.usageLog,
+        pageExtensions: runCtx.pageExtensions,
+        sessionId: runCtx.sessionId,
+        runId: subagentId,
+        agentId: childAgentId,
+        signal: runCtx.signal,
+        rag: runCtx.rag,
+        connectors: runCtx.connectors,
+        views: runCtx.views,
+        approvalMode: runCtx.approvalMode,
+        getApprovalMode: runCtx.getApprovalMode,
+        systemPrompt: childSystem,
+        onSubagent: runCtx.onSubagent,
+        onEvent: (e) => {
+          if (e.type === "assistant_delta" && e.message) {
+            runCtx.onSubagent?.({
+              type: "delta",
+              subagentId,
+              goal,
+              summary: e.message,
+            });
+          }
+          if (e.type === "error" && e.message) {
+            runCtx.onSubagent?.({
+              type: "error",
+              subagentId,
+              goal,
+              summary: e.message,
+            });
+          }
+        },
+      });
+
+      runCtx.onSubagent?.({
+        type: "done",
+        subagentId,
+        goal,
+        summary: childResult.finalText,
+        messages: childResult.messages,
+        usage: childResult.usage,
+      });
+
+      return {
+        ok: !childResult.aborted && !childResult.hitStepLimit,
+        summary: childResult.finalText,
+        steps: childResult.steps,
+        usage: childResult.usage,
+        subagentId,
+        error: childResult.hitStepLimit
+          ? "hit_step_limit"
+          : childResult.aborted
+            ? "aborted"
+            : undefined,
+        artifacts: [] as unknown[],
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      runCtx.onSubagent?.({
+        type: "error",
+        subagentId,
+        goal,
+        summary: msg,
+      });
+      return { ok: false, error: msg, summary: msg, subagentId, artifacts: [] };
+    }
+  }
+
+  private async handlePageExtensionTool(
+    name: string,
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    const store = runCtx?.pageExtensions;
+    if (!store) return { ok: false, error: "page extension store unavailable" };
+    const sessionId = runCtx?.sessionId;
+    try {
+      if (name === "create_page_extension") {
+        const patterns = Array.isArray(args.patterns)
+          ? args.patterns.map(String)
+          : typeof args.pattern === "string"
+            ? [args.pattern]
+            : [];
+        const row = await store.create({
+          name: String(args.name ?? "Untitled"),
+          source: String(args.source ?? ""),
+          patterns,
+          description: typeof args.description === "string" ? args.description : undefined,
+          runAt:
+            args.runAt === "document_start" || args.runAt === "document_end"
+              ? args.runAt
+              : "document_idle",
+          createdBy: "agent",
+          sessionId,
+          enabled: false,
+        });
+        return {
+          ok: true,
+          id: row.id,
+          approval: row.approval,
+          version: row.version,
+          sourceHash: row.sourceHash,
+          note: "Created as draft — call approve_page_extension then enable (update enabled:true) then inject",
+        };
+      }
+      if (name === "update_page_extension") {
+        const id = String(args.id ?? "");
+        if (!id) return { ok: false, error: "id required" };
+        const row = await store.update(
+          id,
+          {
+            name: typeof args.name === "string" ? args.name : undefined,
+            description: typeof args.description === "string" ? args.description : undefined,
+            source: typeof args.source === "string" ? args.source : undefined,
+            patterns: Array.isArray(args.patterns) ? args.patterns.map(String) : undefined,
+            runAt:
+              args.runAt === "document_start" ||
+              args.runAt === "document_end" ||
+              args.runAt === "document_idle"
+                ? args.runAt
+                : undefined,
+            enabled: typeof args.enabled === "boolean" ? args.enabled : undefined,
+          },
+          { actor: "agent", sessionId },
+        );
+        return {
+          ok: true,
+          id: row.id,
+          approval: row.approval,
+          version: row.version,
+          enabled: row.enabled,
+          sourceHash: row.sourceHash,
+        };
+      }
+      if (name === "list_page_extensions") {
+        const list = await store.list();
+        return {
+          ok: true,
+          extensions: list.map((e) => ({
+            id: e.id,
+            name: e.name,
+            enabled: e.enabled,
+            approval: e.approval,
+            version: e.version,
+            patterns: e.match.patterns,
+            bridge: e.bridge
+              ? {
+                  exportChannels: e.bridge.exportChannels,
+                  allowStorage: !!e.bridge.allowStorage,
+                }
+              : null,
+            lastInjectedAt: e.lastInjectedAt,
+            lastInjectedUrl: e.lastInjectedUrl,
+          })),
+        };
+      }
+      if (name === "get_page_extension") {
+        const id = String(args.id ?? "");
+        const row = await store.get(id);
+        if (!row) return { ok: false, error: "not found" };
+        return { ok: true, extension: row };
+      }
+      if (name === "approve_page_extension") {
+        // Human-only: MAIN-world JS install must be confirmed in Page ext UI (actor=user).
+        return {
+          ok: false,
+          error:
+            "approve_page_extension is user-only — open the Page ext tab and click Approve (shows source hash).",
+        };
+      }
+      if (name === "revoke_page_extension") {
+        const row = await store.revoke(String(args.id ?? ""), "agent", sessionId);
+        return { ok: true, id: row.id, approval: row.approval, enabled: row.enabled };
+      }
+      if (name === "set_page_extension_bridge") {
+        const id = String(args.id ?? "");
+        if (args.clear === true || args.bridge === null) {
+          const row = await store.setBridge(id, null, { actor: "agent", sessionId });
+          return { ok: true, id: row.id, bridge: null };
+        }
+        const channels = Array.isArray(args.exportChannels)
+          ? args.exportChannels.map(String)
+          : [];
+        const row = await store.setBridge(
+          id,
+          {
+            exportChannels: channels,
+            allowStorage: Boolean(args.allowStorage),
+            maxPayloadBytes:
+              typeof args.maxPayloadBytes === "number" ? args.maxPayloadBytes : 64_000,
+          },
+          { actor: "agent", sessionId },
+        );
+        return { ok: true, id: row.id, bridge: row.bridge };
+      }
+      if (name === "inject_page_extension") {
+        if (!this.browser.injectPageExtensions) {
+          return { ok: false, error: "injectPageExtensions unavailable" };
+        }
+        const scriptIds = Array.isArray(args.ids)
+          ? args.ids.map(String)
+          : typeof args.id === "string"
+            ? [args.id]
+            : undefined;
+        const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
+        return this.browser.injectPageExtensions({ tabId, scriptIds });
+      }
+      if (name === "page_ext_data_list") {
+        const id = String(args.id ?? "");
+        return { ok: true, keys: await store.dataList(id) };
+      }
+      if (name === "page_ext_data_get") {
+        const id = String(args.id ?? "");
+        const key = String(args.key ?? "");
+        if (args.all === true) return { ok: true, data: await store.dataGetAll(id) };
+        return { ok: true, key, value: await store.dataGet(id, key) };
+      }
+      if (name === "page_ext_data_clear") {
+        const n = await store.dataClear(String(args.id ?? ""), sessionId);
+        return { ok: true, cleared: n };
+      }
+      if (name === "list_page_extension_audit") {
+        const id = typeof args.id === "string" ? args.id : undefined;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        return { ok: true, entries: await store.listAudit(id, limit) };
+      }
+      return { ok: false, error: `unknown page extension tool ${name}` };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -777,12 +1992,30 @@ export class AgentLoop {
     const intent = String(args.intent ?? "");
     const schemaHint = args.schema_hint != null ? String(args.schema_hint) : "";
     let text = typeof args.text === "string" ? args.text : "";
+    let pageSource: "text" | "page_digest" | "get_page" = "text";
     if (args.use_page || !text.trim()) {
-      const page = await this.browser.runContent({ op: "get_page" });
-      const data = page.data as { text?: string; title?: string; url?: string } | undefined;
-      text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 14_000);
+      const digest = await this.browser.runContent({ op: "page_digest" });
+      if (digest.ok && digest.data) {
+        pageSource = "page_digest";
+        text = JSON.stringify(digest.data).slice(0, 10_000);
+      } else {
+        const page = await this.browser.runContent({
+          op: "get_page",
+          mode: "snippet",
+          maxChars: 4_000,
+        });
+        pageSource = "get_page";
+        const data = page.data as { text?: string; title?: string; url?: string } | undefined;
+        text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 10_000);
+      }
     }
-    if (!text.trim()) return { ok: false, error: "no text to parse" };
+    if (!text.trim()) {
+      return {
+        ok: false,
+        error: "no text to parse",
+        meta: { workerModel, source: pageSource, inputChars: 0, fallback: true },
+      };
+    }
 
     emit({ type: "status", message: `Worker parse (${workerModel})…` });
     const result = await this.llm.chat({
@@ -799,8 +2032,27 @@ export class AgentLoop {
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "worker" });
-    const parsed = parseJsonLoose(result.content ?? "{}");
-    return { ok: true, model: workerModel, data: parsed };
+    const parsed = parseJsonLoose(result.content ?? "{}") as {
+      rows?: unknown;
+      notes?: string;
+    };
+    const failed =
+      parsed &&
+      typeof parsed === "object" &&
+      "notes" in parsed &&
+      String(parsed.notes).includes("parse_failed");
+    return {
+      ok: !failed,
+      model: workerModel,
+      data: parsed,
+      meta: {
+        workerModel,
+        source: pageSource,
+        inputChars: text.length,
+        fallback: failed === true,
+        notes: typeof parsed?.notes === "string" ? parsed.notes : undefined,
+      },
+    };
   }
 
   private async saveSiteProfile(args: Record<string, unknown>): Promise<unknown> {
@@ -941,5 +2193,163 @@ export class AgentLoop {
     }
 
     return { ok: true, pages, count: allRows.length, rows: allRows, notes: notes.join("; ") || undefined };
+  }
+
+  private async scrapePdps(
+    args: Record<string, unknown>,
+    views: ViewStore | undefined,
+    pageTemplates: PageTemplateCache | undefined,
+    emit: (e: AgentEvent) => void,
+  ): Promise<unknown> {
+    if (!views) return { ok: false, error: "view store unavailable" };
+    const saps = Array.isArray(args.saps) ? args.saps.map(String).filter(Boolean) : [];
+    const urls = Array.isArray(args.urls) ? args.urls.map(String).filter(Boolean) : [];
+    const columns = Array.isArray(args.columns)
+      ? args.columns.map(String)
+      : ["ean", "packagedEan", "sap", "title", "url"];
+    const keyColumns = Array.isArray(args.keyColumns)
+      ? args.keyColumns.map(String)
+      : [columns[0] ?? "ean"];
+    const viewName = String(args.viewName ?? "scrape-pdps");
+    const waitMs = clampInt(args.waitMs, 500, 100, 5_000);
+    let baseUrl = strOpt(args.baseUrl) ?? "";
+    if (!baseUrl) {
+      const tabs = await this.browser.listTabs();
+      try {
+        baseUrl = tabs[0]?.url ? new URL(tabs[0].url).origin : "";
+      } catch {
+        baseUrl = "";
+      }
+    }
+    const targets: Array<{ url: string; sap: string }> = [];
+    for (const sap of saps) {
+      if (!baseUrl) return { ok: false, error: "baseUrl required when using saps" };
+      targets.push({ sap, url: `${baseUrl.replace(/\/$/, "")}/s/${sap}` });
+    }
+    for (const url of urls) targets.push({ sap: "", url });
+    if (!targets.length) return { ok: false, error: "scrape_pdps needs saps or urls" };
+
+    const view = await ensureView(views, { name: viewName, columns, keyColumns });
+    const rowsOut: string[][] = [];
+    const errors: string[] = [];
+
+    for (let i = 0; i < targets.length; i += 1) {
+      const t = targets[i]!;
+      emit({ type: "status", message: `PDP ${i + 1}/${targets.length}: ${t.sap || t.url}` });
+      try {
+        await this.browser.navigate(t.url);
+        await wait(waitMs);
+        let digest = await this.browser.runContent({ op: "page_digest" });
+        if (!digest.ok) {
+          errors.push(`${t.sap || t.url}: digest failed`);
+          continue;
+        }
+        let data = (digest.data ?? {}) as Record<string, unknown>;
+        if (pageTemplates) data = pageTemplates.annotate(data);
+        const labelHits = Array.isArray(data.labelHits)
+          ? (data.labelHits as Array<{ label?: string; value?: string }>)
+          : [];
+        const eans = Array.isArray(data.eans) ? data.eans.map(String) : [];
+        const findLabel = (re: RegExp) =>
+          labelHits.find((h) => re.test(String(h.label ?? "")))?.value ?? "";
+        const retail =
+          findLabel(/^EAN(?!.*zbior)/i) ||
+          findLabel(/^EAN\b/i) ||
+          eans[0] ||
+          "";
+        const carton =
+          findLabel(/zbiorcze|opakowanie|carton|packaged/i) ||
+          eans.find((e) => e !== retail) ||
+          eans[1] ||
+          "";
+        const sap =
+          t.sap ||
+          findLabel(/katalog|catalog|Materiał|sap/i) ||
+          "";
+        const title = String(data.title ?? "");
+        const rowMap: Record<string, string> = {
+          ean: retail,
+          packagedEan: carton,
+          sap,
+          title,
+          url: String(data.url ?? t.url),
+        };
+        const row = columns.map((c) => rowMap[c] ?? "");
+        await upsertRows(views, view.id, [row], keyColumns);
+        rowsOut.push(row);
+      } catch (e) {
+        errors.push(`${t.sap || t.url}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    const refreshed = await views.get(view.id);
+    return {
+      ok: true,
+      viewId: view.id,
+      viewName: view.name,
+      done: rowsOut.length,
+      total: targets.length,
+      rows: rowsOut,
+      rowCount: Math.max(0, (refreshed?.rows?.length ?? 1) - 1),
+      errors: errors.length ? errors : undefined,
+    };
+  }
+
+  private async runRestRequest(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "rest") return { ok: false, error: `REST connector not found: ${id}` };
+    return restRequest(
+      conn,
+      {
+        method: typeof args.method === "string" ? args.method : "GET",
+        path: String(args.path ?? "/"),
+        query:
+          args.query && typeof args.query === "object"
+            ? (args.query as Record<string, string>)
+            : undefined,
+        body: args.body,
+      },
+      connectors.getSecret,
+    );
+  }
+
+  private async runMcpList(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "mcp") return { ok: false, error: `MCP connector not found: ${id}` };
+    return mcpListTools(conn, connectors.getSecret);
+  }
+
+  private async runMcpCall(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.connectorId ?? "");
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    const conn = await connectors.store.get(id);
+    if (!conn || conn.kind !== "mcp") return { ok: false, error: `MCP connector not found: ${id}` };
+    const toolArgs =
+      args.arguments && typeof args.arguments === "object"
+        ? (args.arguments as Record<string, unknown>)
+        : {};
+    return mcpCall(conn, String(args.tool ?? ""), toolArgs, connectors.getSecret);
   }
 }

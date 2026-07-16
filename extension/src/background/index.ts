@@ -5,6 +5,18 @@ import {
   type ContentRequest,
   type ContentResponse,
 } from "@combo-x/core";
+import {
+  captureElement,
+  captureFullPage,
+  captureViewport,
+  startRecording,
+  stopRecording,
+} from "../lib/media-bridge.js";
+import {
+  clearTokensForTab,
+  handlePageExtBridge,
+  injectPageExtensionsForTab,
+} from "../lib/page-ext-inject.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -62,7 +74,7 @@ async function runContent(request: ContentRequest, tabId?: number): Promise<Cont
   return res;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const parsed = RuntimeMessageSchema.safeParse(message);
   if (!parsed.success) {
     sendResponse({ ok: false, error: "invalid runtime message" });
@@ -192,12 +204,119 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse(await runContent(parsed.data.request, parsed.data.tabId));
         break;
       }
+      case "capture_viewport": {
+        sendResponse(await captureViewport(parsed.data.windowId));
+        break;
+      }
+      case "capture_element": {
+        if (parsed.data.selector == null && parsed.data.index == null) {
+          sendResponse({ ok: false, error: "selector or index required" });
+          break;
+        }
+        sendResponse(
+          await captureElement(parsed.data.tabId, {
+            selector: parsed.data.selector,
+            index: parsed.data.index,
+          }),
+        );
+        break;
+      }
+      case "capture_full_page": {
+        sendResponse(await captureFullPage(parsed.data.tabId));
+        break;
+      }
+      case "start_recording": {
+        sendResponse(await startRecording(parsed.data.tabId));
+        break;
+      }
+      case "stop_recording": {
+        sendResponse(
+          await stopRecording({
+            download: parsed.data.download,
+            filename: parsed.data.filename,
+          }),
+        );
+        break;
+      }
+      case "inject_page_extensions": {
+        const tabId = parsed.data.tabId ?? (await activeTabId());
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no active tab" });
+          break;
+        }
+        sendResponse(
+          await injectPageExtensionsForTab({
+            tabId,
+            scriptIds: parsed.data.scriptIds,
+          }),
+        );
+        break;
+      }
+      case "page_ext_bridge": {
+        if (!sender.tab?.id) {
+          sendResponse({ ok: false, error: "bridge requires tab sender" });
+          break;
+        }
+        sendResponse(
+          await handlePageExtBridge({
+            kind: parsed.data.kind,
+            scriptId: parsed.data.scriptId,
+            bridgeToken: parsed.data.bridgeToken,
+            channel: parsed.data.channel,
+            payload: parsed.data.payload,
+            reqId: parsed.data.reqId,
+            pageUrl: parsed.data.pageUrl,
+            tabId: parsed.data.tabId ?? sender.tab.id,
+          }),
+        );
+        break;
+      }
+      case "preview_frame": {
+        const tabId = parsed.data.tabId ?? (await activeTabId());
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no active tab" });
+          break;
+        }
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId!, {
+            format: "jpeg",
+            quality: 72,
+          });
+          sendResponse({
+            ok: true,
+            dataUrl,
+            tabId,
+            url: tab.url ?? "",
+            title: tab.title ?? "",
+          });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        break;
+      }
       default:
         sendResponse({ ok: false, error: "unknown" });
     }
   })();
 
   return true;
+});
+
+/** Auto-inject only extensions with autoInject=true on navigation. */
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status !== "complete" || !tab.url) return;
+  if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) return;
+  void injectPageExtensionsForTab({ tabId, autoOnly: true }).catch(() => {
+    /* ignore */
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearTokensForTab(tabId);
 });
 
 const artifacts = new ArtifactStore();

@@ -34,7 +34,7 @@ See [`docs/ATTACHMENTS.md`](./ATTACHMENTS.md) — Attach/drop/paste PDF·CSV·XL
 
 ## Local RAG + connectors (v0.4)
 
-See [`docs/LOCAL_RAG.md`](./LOCAL_RAG.md) — directory grant + index + `rag_*` tools; IdeaForge/GitHub live with vault creds.
+See [`docs/LOCAL_RAG.md`](./LOCAL_RAG.md) — directory grant + index + `rag_*` tools; REST/MCP connectors with vault secret refs.
 
 ## Intentionally deferred (honest)
 

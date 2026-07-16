@@ -1,6 +1,5 @@
-import { RagStore, grantAndIndex, reindexSaved } from "@combo-x/core";
-
 const TOOL_NAMES = [
+  "page_digest",
   "get_page",
   "get_links",
   "get_interactive",
@@ -21,12 +20,16 @@ const TOOL_NAMES = [
   "activate_tab",
   "close_tab",
   "parse_data",
+  "login",
+  "scrape_catalog",
+  "save_site_profile",
+  "get_site_profile",
   "rag_search",
   "rag_read_file",
   "rag_status",
-  "ideaforge_search",
-  "github_search_code",
-  "github_get_file",
+  "rest_request",
+  "mcp_list_tools",
+  "mcp_call",
   "list_attachments",
   "read_attachment",
   "export_csv",
@@ -42,13 +45,51 @@ const TOOL_NAMES = [
   "recall",
 ];
 
+const FOODWELL_PRESET = new Set([
+  "page_digest",
+  "get_page",
+  "get_links",
+  "get_interactive",
+  "click_index",
+  "type_index",
+  "type_text",
+  "extract",
+  "query_all",
+  "find_text",
+  "navigate",
+  "go_back",
+  "list_tabs",
+  "open_tab",
+  "activate_tab",
+  "wait",
+  "scroll",
+  "parse_data",
+  "login",
+  "scrape_catalog",
+  "save_site_profile",
+  "get_site_profile",
+  "list_attachments",
+  "read_attachment",
+  "export_csv",
+  "save_view",
+  "list_views",
+  "get_view",
+  "memory_list",
+  "remember",
+  "recall",
+  "rag_search",
+  "rag_read_file",
+  "rag_status",
+]);
+
 const TOOL_BLURB: Record<string, string> = {
+  page_digest: "Compact PDP map (EAN / carton / catalog) — prefer in Budget mode.",
   rag_search: "Search granted local folder index.",
   rag_read_file: "Read a path from the local RAG index.",
   rag_status: "Folder grant + index stats.",
-  ideaforge_search: "Search IdeaForge knowledge (vault creds).",
-  github_search_code: "GitHub code search (PAT).",
-  github_get_file: "Read a GitHub file (PAT).",
+  rest_request: "Call a configured REST connector.",
+  mcp_list_tools: "List tools from an MCP connector.",
+  mcp_call: "Call a tool on an MCP connector.",
   list_attachments: "List uploaded chat files.",
   read_attachment: "Read parsed text from an upload.",
   save_view: "Save table snapshot to Views tab.",
@@ -67,8 +108,6 @@ type SetupPayload = {
   connectors: string[];
 };
 
-const rag = new RagStore();
-
 function readState(): SetupPayload {
   const tools = [...document.querySelectorAll<HTMLInputElement>("#tools input")]
     .filter((c) => c.checked)
@@ -77,26 +116,10 @@ function readState(): SetupPayload {
     | "ask"
     | "auto_llm"
     | "auto_all";
-  const ragPathHint = (document.getElementById("rag") as HTMLInputElement).value.trim() || null;
   const connectors = [...document.querySelectorAll<HTMLInputElement>("#connectors input")]
     .filter((c) => c.checked)
     .map((c) => c.value);
-  return { type: "combo-x-setup", tools, approvalMode: approval, ragPathHint, connectors };
-}
-
-async function refreshRagStatus() {
-  const el = document.getElementById("rag-status")!;
-  const meta = await rag.getMeta();
-  const handle = await rag.getHandle();
-  if (!handle && !meta?.chunkCount) {
-    el.textContent = "No folder granted yet.";
-    return;
-  }
-  el.textContent = `${meta?.folderName || handle?.folderName || "folder"} — ${meta?.fileCount ?? 0} files / ${meta?.chunkCount ?? 0} chunks${
-    meta?.indexedAt ? ` · ${new Date(meta.indexedAt).toLocaleString()}` : ""
-  }`;
-  const ragInput = document.getElementById("rag") as HTMLInputElement;
-  if (!ragInput.value && meta?.folderName) ragInput.value = meta.folderName;
+  return { type: "combo-x-setup", tools, approvalMode: approval, ragPathHint: null, connectors };
 }
 
 function render() {
@@ -112,6 +135,16 @@ function render() {
   document.getElementById("all-off")!.addEventListener("click", () => {
     document.querySelectorAll<HTMLInputElement>("#tools input").forEach((c) => (c.checked = false));
   });
+  document.getElementById("preset-foodwell")!.addEventListener("click", () => {
+    document.querySelectorAll<HTMLInputElement>("#tools input").forEach((c) => {
+      c.checked = FOODWELL_PRESET.has(c.value);
+    });
+    const approval = document.getElementById("approval") as HTMLSelectElement;
+    approval.value = "auto_llm";
+    document.querySelectorAll<HTMLInputElement>("#connectors input").forEach((c) => {
+      c.checked = c.value === "local_rag";
+    });
+  });
 
   void chrome.storage.local.get("combo_x_setup_payload").then((res) => {
     const p = res.combo_x_setup_payload as SetupPayload | undefined;
@@ -122,44 +155,10 @@ function render() {
       });
     }
     if (p.approvalMode) (document.getElementById("approval") as HTMLSelectElement).value = p.approvalMode;
-    if (p.ragPathHint) (document.getElementById("rag") as HTMLInputElement).value = p.ragPathHint;
     if (Array.isArray(p.connectors)) {
       document.querySelectorAll<HTMLInputElement>("#connectors input").forEach((c) => {
         c.checked = p.connectors.includes(c.value);
       });
-    }
-  });
-
-  document.getElementById("grant")!.addEventListener("click", async () => {
-    const status = document.getElementById("rag-status")!;
-    status.textContent = "Pick a folder…";
-    try {
-      const meta = await grantAndIndex(rag, (p) => {
-        status.textContent = p.message ?? p.phase;
-      });
-      (document.getElementById("rag") as HTMLInputElement).value = meta.folderName;
-      const local = document.querySelector<HTMLInputElement>('#connectors input[value="local_rag"]');
-      if (local) local.checked = true;
-      for (const name of ["rag_search", "rag_read_file", "rag_status"]) {
-        const box = document.querySelector<HTMLInputElement>(`#tools input[value="${name}"]`);
-        if (box) box.checked = true;
-      }
-      await refreshRagStatus();
-    } catch (e) {
-      status.textContent = e instanceof Error ? e.message : String(e);
-    }
-  });
-
-  document.getElementById("reindex")!.addEventListener("click", async () => {
-    const status = document.getElementById("rag-status")!;
-    status.textContent = "Reindexing…";
-    try {
-      await reindexSaved(rag, (p) => {
-        status.textContent = p.message ?? p.phase;
-      });
-      await refreshRagStatus();
-    } catch (e) {
-      status.textContent = e instanceof Error ? e.message : String(e);
     }
   });
 
@@ -168,14 +167,13 @@ function render() {
     const msg = document.getElementById("msg")!;
     try {
       await chrome.storage.local.set({ combo_x_setup_payload: payload });
-      msg.textContent = `Sent — ${payload.tools.length} tools, approval=${payload.approvalMode}, connectors=${payload.connectors.length}. Open the Combo-X side panel.`;
+      msg.textContent = `Sent — ${payload.tools.length} tools, approval=${payload.approvalMode}. Open the Combo-X side panel.`;
     } catch (e) {
       msg.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   });
 
   document.getElementById("close")!.addEventListener("click", () => window.close());
-  void refreshRagStatus();
 }
 
 render();

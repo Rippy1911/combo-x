@@ -25,6 +25,7 @@ describe("local RAG", () => {
     expect(shouldIndexFile("node_modules/foo/index.js")).toBe(false);
     expect(shouldIndexFile("dist/bundle.js")).toBe(false);
     expect(shouldIndexFile("AGENTS.md")).toBe(true);
+    expect(shouldIndexFile("tmp/cache/x.ts", ["tmp"])).toBe(false);
   });
 
   it("RagStore rebuild + search", async () => {

@@ -2,9 +2,13 @@
  * Local episodic/semantic memory with cheap keyword scoring.
  * Combo Phase B aimed at pglite+pgvector — heavier, not wired.
  * Combo-X ships searchable memory that actually hooks into the agent day 1.
+ *
+ * Scopes: `global` (all agents) or `agent` (bound to an AgentProfile id).
+ * Agent runs always prepend global + matching agent memories (once per turn).
  */
 
 export type MemoryKind = "episodic" | "semantic" | "note";
+export type MemoryScope = "global" | "agent";
 
 export interface MemoryEntry {
   id: string;
@@ -12,6 +16,10 @@ export interface MemoryEntry {
   text: string;
   tags: string[];
   createdAt: string;
+  /** Defaults to global for legacy rows. */
+  scope: MemoryScope;
+  /** Required when scope === "agent". */
+  agentId?: string;
   score?: number;
 }
 
@@ -41,13 +49,34 @@ function scoreEntry(queryTokens: string[], entry: MemoryEntry): number {
   return (hits / queryTokens.length) * recencyBoost;
 }
 
+function normalizeEntry(raw: MemoryEntry): MemoryEntry {
+  const scope: MemoryScope = raw.scope === "agent" ? "agent" : "global";
+  return {
+    ...raw,
+    scope,
+    agentId: scope === "agent" ? raw.agentId : undefined,
+    tags: Array.isArray(raw.tags) ? raw.tags : [],
+  };
+}
+
 function openDb(dbName: string, storeName: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(dbName, 1);
+    const req = indexedDB.open(dbName, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(storeName)) {
-        db.createObjectStore(storeName, { keyPath: "id" });
+        const os = db.createObjectStore(storeName, { keyPath: "id" });
+        os.createIndex("scope", "scope", { unique: false });
+        os.createIndex("agentId", "agentId", { unique: false });
+      } else {
+        const tx = req.transaction;
+        const os = tx?.objectStore(storeName);
+        if (os && !os.indexNames.contains("scope")) {
+          os.createIndex("scope", "scope", { unique: false });
+        }
+        if (os && !os.indexNames.contains("agentId")) {
+          os.createIndex("agentId", "agentId", { unique: false });
+        }
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -86,13 +115,21 @@ export class MemoryStore {
     text: string;
     kind?: MemoryKind;
     tags?: string[];
+    scope?: MemoryScope;
+    agentId?: string;
   }): Promise<MemoryEntry> {
+    const scope: MemoryScope = input.scope === "agent" ? "agent" : "global";
+    if (scope === "agent" && !input.agentId?.trim()) {
+      throw new Error("agentId required when scope is agent");
+    }
     const entry: MemoryEntry = {
       id: crypto.randomUUID(),
       kind: input.kind ?? "note",
       text: input.text.trim(),
       tags: input.tags ?? [],
       createdAt: new Date().toISOString(),
+      scope,
+      agentId: scope === "agent" ? input.agentId!.trim() : undefined,
     };
     if (!entry.text) throw new Error("memory text must not be empty");
     await this.getDb();
@@ -100,17 +137,16 @@ export class MemoryStore {
     return entry;
   }
 
-  async recall(query: string, limit = 5): Promise<MemoryEntry[]> {
-    await this.getDb();
-    const all = await idbReq<MemoryEntry[]>(this.store("readonly").getAll());
+  async recall(query: string, limit = 5, opts?: { agentId?: string }): Promise<MemoryEntry[]> {
+    const candidates = await this.listForInject({
+      agentId: opts?.agentId,
+      limit: 500,
+    });
     const tokens = tokenize(query);
     if (tokens.length === 0) {
-      return all
-        .slice()
-        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-        .slice(0, limit);
+      return candidates.slice(0, limit);
     }
-    return all
+    return candidates
       .map((e) => ({ ...e, score: scoreEntry(tokens, e) }))
       .filter((e) => (e.score ?? 0) > 0)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
@@ -121,9 +157,67 @@ export class MemoryStore {
     await this.getDb();
     const all = await idbReq<MemoryEntry[]>(this.store("readonly").getAll());
     return all
-      .slice()
+      .map(normalizeEntry)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, limit);
+  }
+
+  /**
+   * Memories always prepended to each user turn: all global + agent-scoped for active agent.
+   * Newest first within each bucket; global listed before agent.
+   */
+  async listForInject(opts: { agentId?: string; limit?: number } = {}): Promise<MemoryEntry[]> {
+    const limit = opts.limit ?? 24;
+    await this.getDb();
+    const all = (await idbReq<MemoryEntry[]>(this.store("readonly").getAll())).map(normalizeEntry);
+    const global = all
+      .filter((e) => e.scope !== "agent")
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    const agentId = opts.agentId?.trim();
+    const agentScoped = agentId
+      ? all
+          .filter((e) => e.scope === "agent" && e.agentId === agentId)
+          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      : [];
+    return [...global, ...agentScoped].slice(0, limit);
+  }
+
+  async get(id: string): Promise<MemoryEntry | null> {
+    await this.getDb();
+    const row = await idbReq<MemoryEntry | undefined>(this.store("readonly").get(id));
+    return row ? normalizeEntry(row) : null;
+  }
+
+  async update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, "text" | "tags" | "kind" | "scope" | "agentId">>,
+  ): Promise<MemoryEntry> {
+    const existing = await this.get(id);
+    if (!existing) throw new Error(`memory not found: ${id}`);
+    const scope: MemoryScope =
+      patch.scope === "agent" || patch.scope === "global" ? patch.scope : existing.scope;
+    const agentId =
+      scope === "agent" ? (patch.agentId ?? existing.agentId)?.trim() : undefined;
+    if (scope === "agent" && !agentId) throw new Error("agentId required when scope is agent");
+    const entry: MemoryEntry = {
+      ...existing,
+      text: patch.text != null ? patch.text.trim() : existing.text,
+      tags: patch.tags ?? existing.tags,
+      kind: patch.kind ?? existing.kind,
+      scope,
+      agentId,
+    };
+    if (!entry.text) throw new Error("memory text must not be empty");
+    await idbReq(this.store("readwrite").put(entry));
+    return entry;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const existing = await this.get(id);
+    if (!existing) return false;
+    await this.getDb();
+    await idbReq(this.store("readwrite").delete(id));
+    return true;
   }
 
   async clear(): Promise<void> {

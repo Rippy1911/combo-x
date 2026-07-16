@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Combo-X",
   "description": "Local-first browser agent — BYOK, vault, sessions, scrape/export, approvals.",
-  "version": "0.8.0",
+  "version": "1.4.3",
   "icons": {
     "16": "public/icon-16.png",
     "48": "public/icon-48.png",
@@ -26,12 +26,14 @@
     "tabs",
     "downloads",
     "alarms",
-    "notifications"
+    "notifications",
+    "offscreen",
+    "tabCapture"
   ],
   "host_permissions": ["<all_urls>"],
   "web_accessible_resources": [
     {
-      "resources": ["setup/index.html", "assets/*", "public/*"],
+      "resources": ["setup/index.html", "assets/*", "public/*", "src/offscreen/offscreen.html"],
       "matches": ["<all_urls>"]
     }
   ],

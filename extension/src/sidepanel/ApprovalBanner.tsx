@@ -20,11 +20,19 @@ export function ApprovalBanner(props: {
         <button type="button" className="danger" onClick={props.onDeny}>
           Deny
         </button>
-        <button type="button" onClick={props.onAutoSmart} title="Let a cheap LLM judge intent for the rest of this session">
+        <button
+          type="button"
+          onClick={props.onAutoSmart}
+          title="Cheap LLM judges intent for this browser (saved in Settings)"
+        >
           Auto (smart)
         </button>
-        <button type="button" onClick={props.onAutoAll}>
-          Auto-approve all (session)
+        <button
+          type="button"
+          onClick={props.onAutoAll}
+          title="Auto-approve all sensitive tools in this browser (saved in Settings)"
+        >
+          Auto-approve all
         </button>
       </div>
     </div>

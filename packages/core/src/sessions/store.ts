@@ -7,6 +7,8 @@ export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   createdAt: string;
+  /** Operator starred this turn for later reference */
+  bookmarked?: boolean;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -31,6 +33,8 @@ export interface ChatSession {
   messages: SessionMessage[];
   totalTokens: number;
   estimatedCostUsd: number;
+  /** Operator starred this conversation */
+  bookmarked?: boolean;
 }
 
 function openDb(name: string): Promise<IDBDatabase> {

@@ -47,6 +47,16 @@ export default defineConfig({
     rollupOptions: {
       input: {
         setup: path.resolve(__dirname, "setup/index.html"),
+        offscreen: path.resolve(__dirname, "src/offscreen/offscreen.html"),
+      },
+      output: {
+        entryFileNames: (chunkInfo) => {
+          const id = chunkInfo.facadeModuleId ?? "";
+          if (id.includes("offscreen")) {
+            return "assets/offscreen-[hash].js";
+          }
+          return "assets/[name]-[hash].js";
+        },
       },
     },
   },

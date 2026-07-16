@@ -8,7 +8,23 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab: title, URL, and visible text (truncated). Prefer get_interactive or query_all for structured scrape.",
+        "Read the active tab. Prefer page_digest in budget mode. mode=snippet|structure|full; maxChars caps text. Prefer extract/query_all for fields.",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["snippet", "structure", "full"] },
+          maxChars: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_digest",
+      description:
+        "Cheap page map: title, url, headings, EAN/catalog label hits, short main sample — NOT full nav chrome. Prefer this over get_page for PDPs/invoices.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -337,58 +353,6 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "ideaforge_search",
-      description:
-        "Read-only search IdeaForge knowledge (Notes / ProjectDocuments) via admin session. Requires IdeaForge credentials in Settings.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          limit: { type: "number" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "github_search_code",
-      description:
-        "Read-only GitHub code search (needs github_token in vault). Optional repo owner/name filter.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          repo: { type: "string", description: "owner/name" },
-          limit: { type: "number" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "github_get_file",
-      description: "Read a file from GitHub (owner/name + path). Read-only.",
-      parameters: {
-        type: "object",
-        properties: {
-          repo: { type: "string" },
-          path: { type: "string" },
-          ref: { type: "string" },
-        },
-        required: ["repo", "path"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "list_attachments",
       description:
         "List files the user uploaded in chat (PDF, CSV, XLSX, txt, images). Prefer read_attachment for full text.",
@@ -561,12 +525,41 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "remember",
-      description: "Save a fact or note into local persistent memory.",
+      description:
+        "Save a durable agent memory. scope=global (all agents) or scope=agent (this profile). Memories are always prepended to the next user turn (not mid-stream).",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
+          scope: {
+            type: "string",
+            enum: ["global", "agent"],
+            description: "global = shared; agent = bound to agentId (defaults to active agent)",
+          },
+          agentId: {
+            type: "string",
+            description: "Required for scope=agent when no active agent is set",
+          },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_memory",
+      description:
+        "Alias of remember — persist agent memory (global or per-agent). Always prepended on the next user turn, never mid-stream.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+          scope: { type: "string", enum: ["global", "agent"] },
+          agentId: { type: "string" },
         },
         required: ["text"],
         additionalProperties: false,
@@ -577,7 +570,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "recall",
-      description: "Search local memory for relevant notes.",
+      description: "Search local memory (global + active agent) for relevant notes.",
       parameters: {
         type: "object",
         properties: {
@@ -600,6 +593,61 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         properties: {
           limit: { type: "number" },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "skill_search",
+      description:
+        "Search on-demand skills (playbooks). Returns name/description/toolHints only — does NOT unlock tools. Call skill_read to load body and unlock gated tools for this run.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "skill_read",
+      description:
+        "Load a skill body by id and unlock its toolHints (skill-gated tools) for the rest of this user turn. Skills are never auto-injected into the system prompt.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string", description: "Optional name lookup if id unknown" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "skill_save",
+      description: "Create or update a skill (playbook). scope=global|agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          body: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+          scope: { type: "string", enum: ["global", "agent"] },
+          agentId: { type: "string" },
+          toolHints: { type: "array", items: { type: "string" } },
+        },
+        required: ["name", "description", "body"],
         additionalProperties: false,
       },
     },
@@ -687,6 +735,547 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ensure_scrape_table",
+      description:
+        "Create or open a durable scrape table in Views (IndexedDB). Call BEFORE navigating PDPs so rows persist each step.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "View name e.g. foodwell-ean-map" },
+          columns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Header columns e.g. ean,packagedEan,sap,name,qty_per_box",
+          },
+          keyColumns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Columns used for upsert merge (default first column)",
+          },
+        },
+        required: ["name", "columns"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "upsert_scrape_rows",
+      description: "Merge rows into a scrape table by key columns. Call after every successful PDP.",
+      parameters: {
+        type: "object",
+        properties: {
+          viewId: { type: "string", description: "View id or name" },
+          rows: {
+            type: "array",
+            items: { type: "array", items: { type: "string" } },
+            description: "Data rows (no header) matching ensure_scrape_table columns",
+          },
+          keyColumns: { type: "array", items: { type: "string" } },
+        },
+        required: ["viewId", "rows"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_scrape_table",
+      description: "Read current scrape table rows (progress check).",
+      parameters: {
+        type: "object",
+        properties: {
+          viewId: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["viewId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "scrape_pdps",
+      description:
+        "Batch scrape product pages in ONE tool turn: for each SAP or URL → navigate → page_digest → upsert row. Prefer over N× get_page. Creates the view if missing.",
+      parameters: {
+        type: "object",
+        properties: {
+          saps: { type: "array", items: { type: "string" }, description: "Catalog/SAP codes → /s/{sap}" },
+          urls: { type: "array", items: { type: "string" } },
+          baseUrl: {
+            type: "string",
+            description: "Origin for /s/{sap} (default current tab origin)",
+          },
+          viewName: { type: "string", description: "Default scrape-pdps" },
+          columns: {
+            type: "array",
+            items: { type: "string" },
+            description: "Default ean,packagedEan,sap,title,url",
+          },
+          keyColumns: { type: "array", items: { type: "string" } },
+          waitMs: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rest_request",
+      description:
+        "Call a configured REST connector (Settings → Connectors). Headers resolve vault secret refs. No hardcoded hosts.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectorId: { type: "string" },
+          method: { type: "string" },
+          path: { type: "string" },
+          query: { type: "object", additionalProperties: { type: "string" } },
+          body: {},
+        },
+        required: ["connectorId", "path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_list_tools",
+      description: "List tools from a remote MCP connector (HTTP transport).",
+      parameters: {
+        type: "object",
+        properties: { connectorId: { type: "string" } },
+        required: ["connectorId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_call",
+      description: "Call a tool on a remote MCP connector.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectorId: { type: "string" },
+          tool: { type: "string" },
+          arguments: { type: "object", additionalProperties: true },
+        },
+        required: ["connectorId", "tool"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_viewport",
+      description: "Capture visible tab screenshot (PNG data URL).",
+      parameters: {
+        type: "object",
+        properties: { windowId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_element",
+      description: "Capture + crop an element by CSS selector or interactive index.",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: { type: "string" },
+          index: { type: "number" },
+          tabId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_full",
+      description: "Best-effort full-page screenshot (scroll-stitch, capped).",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "start_recording",
+      description: "Start tab screen recording (webm). Requires recent user gesture/approval.",
+      parameters: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_recording",
+      description: "Stop tab recording; download webm and/or return data URL.",
+      parameters: {
+        type: "object",
+        properties: {
+          download: { type: "boolean" },
+          filename: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_agent",
+      description:
+        "Create a reusable agent profile. Prefer skill_gated (default when skills installed); autoPickTools true builds a static fat allowlist for expensive orch.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          goal: { type: "string", description: "Used for auto tool picking when autoPickTools is true" },
+          systemPrompt: { type: "string" },
+          orchestratorModel: { type: "string" },
+          workerModel: { type: "string" },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+          maxSteps: { type: "number" },
+          toolMode: {
+            type: "string",
+            enum: ["skill_gated", "static"],
+          },
+          autoPickTools: {
+            type: "boolean",
+            description: "Default false when skills installed; true runs pickToolsForGoal",
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_agent",
+      description:
+        "Update an agent profile (partial fields: systemPrompt, models, toolAllowlist, maxSteps, canDelegate, canSelfEdit, budgetMode).",
+      parameters: {
+        type: "object",
+        properties: {
+          agentId: { type: "string" },
+          name: { type: "string" },
+          systemPrompt: { type: "string" },
+          orchestratorModel: { type: "string" },
+          workerModel: { type: "string" },
+          toolAllowlist: { type: "array", items: { type: "string" } },
+          connectorIds: { type: "array", items: { type: "string" } },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+          approvalMode: { type: "string", enum: ["ask", "auto_llm", "auto_all"] },
+          maxSteps: { type: "number" },
+          canDelegate: { type: "boolean" },
+          canSelfEdit: { type: "boolean" },
+          nestingDepth: { type: "number" },
+          ragEnabled: { type: "boolean" },
+        },
+        required: ["agentId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_agents",
+      description: "List saved agent profiles (id, name, models, tool counts).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_subagent",
+      description:
+        "Run a focused sub-task in an isolated agent loop. Returns summary only — not full child messages.",
+      parameters: {
+        type: "object",
+        properties: {
+          goal: { type: "string" },
+          agentId: { type: "string", description: "Optional AgentProfile id" },
+          tools: {
+            type: "array",
+            items: { type: "string" },
+            description: "Tool allowlist override; default = parent tools minus spawn_subagent",
+          },
+          maxSteps: { type: "number" },
+          budgetMode: { type: "string", enum: ["normal", "budget"] },
+        },
+        required: ["goal"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_task",
+      description: "Create a task on the agent task board (todo/doing/done/blocked).",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          sessionId: { type: "string" },
+          note: { type: "string" },
+          planMarkdown: { type: "string" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+        },
+        required: ["title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_task",
+      description: "Update task status, title, note, or planMarkdown.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+          title: { type: "string" },
+          note: { type: "string" },
+          planMarkdown: { type: "string" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_tasks",
+      description: "List tasks filtered by session, status, or global-only scope.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          globalOnly: { type: "boolean" },
+          status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_page_extension",
+      description:
+        "Create a MAIN-world page extension (userscript). Isolated from Combo DB. Starts as draft — approve then enable then inject. Source uses ComboX API: export/storage/log.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          source: { type: "string", description: "JavaScript body using ComboX" },
+          patterns: {
+            type: "array",
+            items: { type: "string" },
+            description: "URL match globs e.g. https://allegro.pl/*",
+          },
+          pattern: { type: "string" },
+          runAt: { type: "string", enum: ["document_idle", "document_end", "document_start"] },
+        },
+        required: ["name", "source"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_page_extension",
+      description: "Update page extension fields. Changing source resets approval to draft.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          source: { type: "string" },
+          patterns: { type: "array", items: { type: "string" } },
+          enabled: { type: "boolean" },
+          runAt: { type: "string", enum: ["document_idle", "document_end", "document_start"] },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_page_extensions",
+      description: "List page extensions (metadata; no full source).",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_page_extension",
+      description: "Get full page extension including source + bridge + hashes.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "approve_page_extension",
+      description: "Approve a draft page extension for injection (sensitive).",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "revoke_page_extension",
+      description: "Revoke approval and disable a page extension.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inject_page_extension",
+      description:
+        "Inject approved+enabled page extension(s) into a tab (MAIN world). Omit id to inject all matching the tab URL.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          ids: { type: "array", items: { type: "string" } },
+          tabId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_page_extension_bridge",
+      description:
+        "ONLY path for page→host data. Set exportChannels + allowStorage, or clear:true. Without a bridge, page scripts cannot write host storage or export payloads.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          exportChannels: { type: "array", items: { type: "string" } },
+          allowStorage: { type: "boolean" },
+          maxPayloadBytes: { type: "number" },
+          clear: { type: "boolean" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_list",
+      description: "List keys in an extension's isolated data store (not Combo sessions/vault).",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_get",
+      description: "Read isolated extension data (key or all:true). Agent bridge into Combo context.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          key: { type: "string" },
+          all: { type: "boolean" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_ext_data_clear",
+      description: "Clear all isolated data for a page extension.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_page_extension_audit",
+      description: "Traceability: audit log for page extensions (create/approve/inject/export/…).",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          limit: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export function toolArgsToContentRequest(
@@ -695,7 +1284,16 @@ export function toolArgsToContentRequest(
 ): ContentRequest | null {
   switch (name) {
     case "get_page":
-      return { op: "get_page" };
+      return {
+        op: "get_page",
+        mode:
+          args.mode === "snippet" || args.mode === "structure" || args.mode === "full"
+            ? args.mode
+            : undefined,
+        maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
+      };
+    case "page_digest":
+      return { op: "page_digest" };
     case "get_links":
       return {
         op: "get_links",

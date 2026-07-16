@@ -3,64 +3,52 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Combo-X setup</title>
+    <title>Combo-X — Workspace setup</title>
     <link rel="stylesheet" href="./setup.css" />
   </head>
   <body>
     <main class="wrap">
-      <h1>Combo-X setup</h1>
+      <h1>Combo-X workspace setup</h1>
       <p class="sub">
-        Configure tools, grant a local folder for device RAG, and enable read-only connectors. Payload
-        goes to <code>chrome.storage.local</code>. Credentials (IdeaForge / GitHub) are entered in the
-        side panel Settings vault — never on this page.
+        Sync tool allowlist, approval mode, and connector flags into the extension. Folder grant and
+        exclude filters live in the side panel <strong>Settings → Device RAG</strong>.
       </p>
 
       <section>
         <h2>Approval mode</h2>
         <select id="approval">
           <option value="ask">Ask each sensitive action</option>
-          <option value="auto_llm">Auto — LLM judges intent (recommended)</option>
-          <option value="auto_all">Auto-approve all this session</option>
+          <option value="auto_llm" selected>Auto — LLM judges intent (recommended)</option>
+          <option value="auto_all">Auto-approve all (this browser)</option>
         </select>
       </section>
 
       <section>
-        <h2>Device RAG (local folder)</h2>
+        <h2>Tool presets</h2>
         <p class="hint">
-          Pick a repo folder on this machine. Combo-X indexes it into IndexedDB; the agent uses
-          <code>rag_search</code> / <code>rag_read_file</code>. A path string alone cannot open files —
-          grant is required.
+          Defaults favor browser scrape + attachments + RAG. Toggle freely, then Send.
         </p>
-        <div class="row">
-          <button type="button" id="grant" class="primary">Grant folder + index</button>
-          <button type="button" id="reindex">Reindex</button>
-        </div>
-        <p id="rag-status" class="hint">No folder granted yet.</p>
-        <input id="rag" type="text" placeholder="Optional label (auto-filled from folder name)" />
-      </section>
-
-      <section>
-        <h2>Tool access</h2>
         <div class="row">
           <button type="button" id="all-on">Enable all</button>
           <button type="button" id="all-off">Disable all</button>
+          <button type="button" id="preset-foodwell">FoodWell scrape preset</button>
         </div>
         <ul id="tools" class="tools"></ul>
       </section>
 
       <section>
-        <h2>Read-only connectors</h2>
+        <h2>Connectors</h2>
         <ul id="connectors" class="tools">
           <li>
             <label>
-              <input type="checkbox" value="ideaforge:read" /> IdeaForge — <code>ideaforge_search</code>
-              (set email/password in Settings)
+              <input type="checkbox" value="connectors:rest" checked /> REST connectors —
+              <code>rest_request</code> (configure in Settings)
             </label>
           </li>
           <li>
             <label>
-              <input type="checkbox" value="github:read" /> GitHub —
-              <code>github_search_code</code> / <code>github_get_file</code> (set PAT in Settings)
+              <input type="checkbox" value="connectors:mcp" checked /> MCP connectors —
+              <code>mcp_list_tools</code> / <code>mcp_call</code>
             </label>
           </li>
           <li>
@@ -70,8 +58,7 @@
           </li>
         </ul>
         <p class="hint">
-          Supabase read MCP remains planned. IdeaForge + GitHub call live APIs once vault credentials
-          exist.
+          Add REST/MCP connectors and vault secrets in Settings → Connectors.
         </p>
       </section>
 
