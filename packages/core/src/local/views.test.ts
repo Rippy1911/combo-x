@@ -38,7 +38,7 @@ describe("ensureView + upsertRows", () => {
       columns: ["sku", "name", "price"],
       keyColumns: ["sku"],
     });
-    await upsertRows(
+    const first = await upsertRows(
       store,
       view.id,
       [
@@ -47,13 +47,15 @@ describe("ensureView + upsertRows", () => {
       ],
       ["sku"],
     );
+    expect(first.delta.added).toBe(2);
     const updated = await upsertRows(
       store,
       view.id,
       [["A1", "Widget Pro", "12"]],
       ["sku"],
     );
-    const rows = updated.rows ?? [];
+    expect(updated.delta.updated).toBe(1);
+    const rows = updated.view.rows ?? [];
     expect(rows).toHaveLength(3);
     expect(rows[1]).toEqual(["A1", "Widget Pro", "12"]);
     expect(rows[2]).toEqual(["B2", "Gadget", "20"]);

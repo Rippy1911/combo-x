@@ -1,5 +1,7 @@
+import { chatArtifactSandbox } from "@combo-x/core";
 import { MarkdownView } from "./MarkdownView";
 import { DataTable } from "./DataTable";
+import { canOpenPreviewInNewTab, openPreviewInNewTab } from "./openPreviewTab";
 import {
   parseCsv,
   rowsFromMarkdownTables,
@@ -8,9 +10,13 @@ import {
 
 export type PreviewPayload = {
   title: string;
-  kind: "table" | "csv" | "json" | "text" | "markdown" | "image";
+  kind: "table" | "csv" | "json" | "text" | "markdown" | "image" | "html" | "compare";
   body: string;
   rows?: string[][];
+  html?: string;
+  beforeSrc?: string;
+  afterSrc?: string;
+  interactive?: boolean;
 };
 
 export { parseCsv, rowsFromMarkdownTables };
@@ -125,17 +131,52 @@ export function PreviewDrawer({
   let rows = preview.rows;
   if (!rows && preview.kind === "csv") rows = parseCsv(preview.body);
 
+  const openable = canOpenPreviewInNewTab(preview);
+
   return (
     <div className="preview-drawer" role="dialog" aria-label="Preview">
       <div className="preview-head">
         <strong className="preview-title">{preview.title}</strong>
-        <button type="button" onClick={onClose}>
-          Close
-        </button>
+        <div className="preview-head-actions">
+          {openable ? (
+            <button
+              type="button"
+              title="Open in a full browser tab for fullscreen inspect"
+              onClick={() => {
+                if (!openPreviewInNewTab(preview)) {
+                  window.alert("Pop-up blocked — allow pop-ups for this extension.");
+                }
+              }}
+            >
+              Open tab
+            </button>
+          ) : null}
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
       </div>
       <div className="preview-body">
-        {preview.kind === "image" ? (
+        {preview.kind === "image" && preview.body ? (
           <img src={preview.body} alt={preview.title} className="preview-img" />
+        ) : null}
+        {preview.kind === "html" && preview.html ? (
+          <iframe
+            title={preview.title}
+            srcDoc={preview.html}
+            sandbox={chatArtifactSandbox(Boolean(preview.interactive))}
+            className="preview-html-frame"
+          />
+        ) : null}
+        {preview.kind === "compare" ? (
+          <div className="preview-compare">
+            {preview.beforeSrc ? (
+              <img src={preview.beforeSrc} alt="Before" className="preview-img" />
+            ) : null}
+            {preview.afterSrc ? (
+              <img src={preview.afterSrc} alt="After" className="preview-img" />
+            ) : null}
+          </div>
         ) : null}
         {rows && rows.length > 0 ? (
           <DataTable

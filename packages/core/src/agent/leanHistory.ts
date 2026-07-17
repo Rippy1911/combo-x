@@ -31,6 +31,14 @@ function snippet(content: string, max = RESULT_SNIPPET): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+/** Strip megabase64 data URLs so lean crumbs never re-inject vision bytes. */
+export function scrubDataUrls(text: string): string {
+  return text.replace(
+    /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{80,}/g,
+    "data:image…[redacted]",
+  );
+}
+
 /** Redact sensitive keys then truncate for lean crumbs. */
 export function redactToolResultSnippet(raw: unknown, max = RESULT_SNIPPET): string {
   let text: string;
@@ -43,7 +51,7 @@ export function redactToolResultSnippet(raw: unknown, max = RESULT_SNIPPET): str
   } else {
     text = JSON.stringify(redactSensitiveDeep(raw));
   }
-  return snippet(text, max);
+  return snippet(scrubDataUrls(text), max);
 }
 
 function collectToolResultLines(

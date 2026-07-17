@@ -11,4 +11,14 @@ describe("ArtifactStore", () => {
     const list = await store.listReports();
     expect(list.some((r) => r.title === title)).toBe(true);
   });
+
+  it("getReport + deleteReport", async () => {
+    const store = new ArtifactStore();
+    const title = `report_del_${crypto.randomUUID()}`;
+    const saved = await store.saveReport({ title, bodyHtml: "<p>bye</p>" });
+    expect(await store.getReport(saved.id)).toMatchObject({ title });
+    expect(await store.deleteReport(saved.id)).toBe(true);
+    expect(await store.getReport(saved.id)).toBeNull();
+    expect(await store.deleteReport(saved.id)).toBe(false);
+  });
 });

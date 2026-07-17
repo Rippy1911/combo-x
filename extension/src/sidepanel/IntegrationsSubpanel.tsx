@@ -44,19 +44,25 @@ export function IntegrationsSubpanel({
         <ul className="list">
           {connectors.map((c) => (
             <li key={c.id}>
-              <strong>{c.name}</strong>
-              <div className="hint">
-                {c.kind}
-                {c.kind === "rest" ? ` · ${c.baseUrl}` : ` · ${c.url}`}
-              </div>
-              <div className="row" style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => void removeConnector(c.id)}
-                >
-                  Remove
-                </button>
+              <div className="list-card-top">
+                <div className="list-card-body">
+                  <strong>{c.name}</strong>
+                  <div className="hint">
+                    {c.kind}
+                    {c.kind === "rest" ? ` · ${c.baseUrl}` : ` · ${c.url}`}
+                  </div>
+                </div>
+                <div className="list-row-actions">
+                  <button
+                    type="button"
+                    className="msg-action icon-btn dangerish"
+                    title="Remove connector"
+                    aria-label="Remove"
+                    onClick={() => void removeConnector(c.id)}
+                  >
+                    ⌫
+                  </button>
+                </div>
               </div>
             </li>
           ))}

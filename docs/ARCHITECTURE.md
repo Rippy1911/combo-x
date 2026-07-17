@@ -94,9 +94,11 @@ flowchart TB
 | `combo_x_memory` | `MemoryStore` | Durable notes (`remember` / `recall`) |
 | `combo_x_rag` | `RagStore` | Local folder index (chunks + handles) |
 | `combo_x_action_log` | `ActionLogStore` | Durable tool audit trail |
-| `combo_x_attachments` | `AttachmentStore` | Parsed PDF/CSV/image uploads |
+| `combo_x_attachments` | `AttachmentStore` | Parsed PDF/CSV/image uploads + Vision screenshots |
 | `combo_x_vault` | `Vault` | AES-GCM secrets (passphrase-derived) |
 | `combo_x_artifacts` | `ArtifactStore` | Bookmarks, reminders, HTML reports |
+
+Side panel **Assets** tab browses/deletes attachments + reports (quota hint). Limits: [`docs/ATTACHMENTS.md`](./ATTACHMENTS.md#storage-limits-indexeddb-vs-folder).
 
 Inspect helpers: `packages/core/src/local/idbInspect.ts` (`INSPECTABLE_DBS`).
 
@@ -218,18 +220,24 @@ Full catalog: [`docs/TOOLS.md`](./TOOLS.md).
 
 ## Memory inject + lean history
 
-### Memory + open-task inject (once per user turn)
+### Memory + tasks + skills + tool schemas (once per user turn)
 
 Before the first orchestrator call each `run()`:
 
 - `formatMemoryInject()` — top memories (global + active agent) via `listForInject`
-- `formatTaskInject()` — open session + global tasks (`formatOpenTasksBlock`, cap 10) so the model tracks the board without calling `list_tasks` first (ns-agent Conversation Tasks parity for *prompt* inject; UI board remains the Tasks tab)
+- `formatTaskInject()` — open session + global tasks (`formatOpenTasksBlock`, cap 10, `sortOrder` + `N/M done` line). Chat UI: Conversation Tasks drawer (☑); Tasks tab = global/all board. Tools: `create_task` / `update_task` / `list_tasks` / `reorder_tasks` (ALWAYS_ON).
+- `formatSkillInject()` — skill **name/description/hints** index (bodies still via `skill_read`)
+- `formatToolSchemaBlock()` — schema-less TOOL INDEX (ACTIVE one-liners + LOCKED pack→skill); JSON parameters stay on API `tools[]` only
 
 ```typescript
 // packages/core/src/agent/loop.ts
-const memBlock = await this.formatMemoryInject(options.agentId);
-const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
-const systemParts = [systemBase, memBlock, taskBlock].filter(Boolean);
+const systemParts = [
+  systemBase,
+  memBlock,
+  taskBlock,
+  skillBlock,
+  toolCatalogBlock,
+].filter(Boolean);
 messages = [
   { role: "system", content: systemParts.join("\n\n") },
   ...leanHistory(options.history ?? []),
@@ -237,7 +245,7 @@ messages = [
 ];
 ```
 
-Memory scoring: keyword + recency (`packages/core/src/memory/store.ts`).
+Memory scoring: keyword + recency (`packages/core/src/memory/store.ts`). Custom tools: `CustomToolStore` + `custom_tool_save`.
 
 ### Lean history (subsequent turns)
 
@@ -363,13 +371,14 @@ flowchart TB
   Run --> Session
 ```
 
-### v1.1 (shipped): task board
+### v1.1 / v1.6.14: conversation tasks
 
-`TaskStore` (`packages/core/src/tasks/store.ts`) — session + global:
+`TaskStore` (`packages/core/src/tasks/store.ts`) — session + global + `sortOrder`:
 
-- Tools: `create_task`, `update_task`, `list_tasks`
-- UI: **Tasks** tab (`TasksPanel.tsx`)
+- Tools: `create_task`, `update_task`, `list_tasks`, `reorder_tasks` (ALWAYS_ON)
+- UI: **Conversation Tasks** drawer in Chat (☑) + **Tasks** tab board
 - Status: `todo` | `doing` | `done` | `blocked`
+- Inject: ordered open tasks + `N/M done` progress line each `run()`
 
 ---
 
@@ -439,6 +448,7 @@ Content handlers: `packages/core/src/browser/content-handlers.ts` (shared logic;
 
 - **Connectors** — user-defined REST/MCP endpoints in `ConnectorStore`; secrets referenced as `{ vaultLabel: "…" }` and resolved at call time
 - **Vault** — passphrase-derived AES-GCM; stores OpenRouter key, connector tokens, `site_profile:*` login recipes
+- **Chat secret embed (v1.6.15)** — optional **Detect secrets** above the composer (`detectChatSecrets` / `embedSecretsInMessage`). On Send: `vault.putByLabel` for each queued secret **before** the agent run, rewrite the user message to `{vault:label}`, append a VAULT SECRETS EMBEDDED context block. Manual **Add secret…** form queues labels without waiting for detection. Toggle persists in `localStorage` (`combo_x_detect_secrets`).
 - **Tools** — `rest_request`, `mcp_list_tools`, `mcp_call` in `AgentLoop.executeTool()`
 
 See [`docs/CONNECTORS.md`](./CONNECTORS.md).

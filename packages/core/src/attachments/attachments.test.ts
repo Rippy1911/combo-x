@@ -90,4 +90,41 @@ describe("AttachmentStore", () => {
     expect(body?.content).toBe("hello world from att");
     expect(body?.truncated).toBe(true);
   });
+
+  it("listScreenshots + remove + totalBytes", async () => {
+    const store = new AttachmentStore(`attach_shots_${crypto.randomUUID()}`);
+    const shotId = crypto.randomUUID();
+    const otherId = crypto.randomUUID();
+    await store.put({
+      id: shotId,
+      sessionId: "s",
+      name: "screenshot-home.png",
+      mime: "image/png",
+      kind: "image",
+      size: 1200,
+      text: "",
+      dataUrl: "data:image/png;base64,aa",
+      meta: { vision: true, source: "ux-viewport" },
+      truncated: false,
+      createdAt: Date.now(),
+    });
+    await store.put({
+      id: otherId,
+      sessionId: "s",
+      name: "notes.txt",
+      mime: "text/plain",
+      kind: "txt",
+      size: 40,
+      text: "hi",
+      meta: {},
+      truncated: false,
+      createdAt: Date.now(),
+    });
+    const shots = await store.listScreenshots();
+    expect(shots.map((r) => r.id)).toEqual([shotId]);
+    expect(await store.totalBytes()).toBe(1240);
+    await store.remove(shotId);
+    expect(await store.listScreenshots()).toHaveLength(0);
+    expect(await store.totalBytes()).toBe(40);
+  });
 });

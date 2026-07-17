@@ -3,6 +3,8 @@
  * Snapshots are plaintext IDB (same class as sessions/artifacts) — never store vault secrets.
  */
 
+import { computeUpsertDelta, type UpsertDelta } from "./changeLog.js";
+
 export type ViewSource = "snapshot" | `collection:${string}` | "manual";
 
 export type ViewChartSpec = {
@@ -205,7 +207,7 @@ export async function upsertRows(
   viewId: string,
   rows: string[][],
   keyColumns: string[],
-): Promise<SavedView> {
+): Promise<{ view: SavedView; delta: UpsertDelta }> {
   const view = await store.get(viewId);
   if (!view) throw new Error(`view not found: ${viewId}`);
   const header = view.rows?.[0] ?? view.columns ?? [];
@@ -216,17 +218,25 @@ export async function upsertRows(
   const existing = view.rows ?? [header];
   const dataRows = existing.slice(1);
   const byKey = new Map<string, string[]>();
+  const beforeKeys = new Set<string>();
   for (const row of dataRows) {
-    byKey.set(rowKey(row, indices), row);
+    const k = rowKey(row, indices);
+    beforeKeys.add(k);
+    byKey.set(k, row);
   }
+  const touchedKeys: string[] = [];
   for (const row of rows) {
     if (row.length === 0) continue;
     const padded = [...row];
     while (padded.length < header.length) padded.push("");
-    byKey.set(rowKey(padded, indices), padded.slice(0, header.length));
+    const k = rowKey(padded, indices);
+    touchedKeys.push(k);
+    byKey.set(k, padded.slice(0, header.length));
   }
+  const afterKeys = new Set(byKey.keys());
+  const delta = computeUpsertDelta(beforeKeys, afterKeys, touchedKeys);
   const merged = [header, ...Array.from(byKey.values())];
-  return store.save({
+  const saved = await store.save({
     id: view.id,
     name: view.name,
     source: view.source,
@@ -236,4 +246,5 @@ export async function upsertRows(
     chart: view.chart,
     note: view.note,
   });
+  return { view: saved, delta };
 }

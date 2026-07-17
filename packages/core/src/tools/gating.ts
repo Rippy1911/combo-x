@@ -3,7 +3,13 @@
  * Ceiling (enabledTools / profile allowlist) still applies.
  */
 
-export const SKILL_META_TOOLS = ["skill_search", "skill_read", "skill_save"] as const;
+export const SKILL_META_TOOLS = [
+  "skill_search",
+  "skill_read",
+  "skill_save",
+  "list_custom_tools",
+  "custom_tool_save",
+] as const;
 
 /** Attached every run when in the ceiling (browse + memory + skill meta + light meta). */
 export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
@@ -32,16 +38,41 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "memory_list",
   ...SKILL_META_TOOLS,
   "search_sessions",
+  "get_session",
   "list_tasks",
   "create_task",
   "update_task",
+  "reorder_tasks",
   "save_bookmark",
   "set_reminder",
   "create_report",
+  "create_map_report",
+  "publish_upload",
   "list_agents",
   "create_agent",
   "update_agent",
   "spawn_subagent",
+  /** UX Vision Lab — capture+attach without unlocking raw screenshot tools */
+  "ux_critique",
+  "open_preview",
+  "annotate_screenshot",
+  "page_css_preview",
+  "page_css_clear",
+];
+
+/**
+ * Always merge into the run ceiling (unless allowlist is explicitly empty).
+ * Prevents stale localStorage/profile allowlists from hiding Vision Lab tools
+ * that the system prompt requires for visual UX audits.
+ */
+export const FORCE_ATTACH_TOOL_NAMES: readonly string[] = [
+  "ux_critique",
+  "open_preview",
+  "annotate_screenshot",
+  "page_css_preview",
+  "page_css_clear",
+  "skill_search",
+  "skill_read",
 ];
 
 export const TOOL_PACKS = {
@@ -127,6 +158,12 @@ export function unionNames(...lists: Array<readonly string[]>): string[] {
 
 export function initialActiveTools(ceiling: ReadonlySet<string>): string[] {
   return intersectNames(ALWAYS_ON_TOOL_NAMES, ceiling);
+}
+
+/** Merge FORCE_ATTACH into a non-empty allowlist (no-op for explicit []). */
+export function ensureForceAttachTools(enabled: string[]): string[] {
+  if (enabled.length === 0) return enabled;
+  return unionNames(enabled, FORCE_ATTACH_TOOL_NAMES);
 }
 
 export function unlockFromHints(

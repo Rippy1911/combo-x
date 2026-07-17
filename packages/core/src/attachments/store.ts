@@ -95,7 +95,7 @@ export class AttachmentStore {
 
   async read(
     idOrName: string,
-    maxChars = 12_000,
+    maxChars = 200_000,
   ): Promise<{ id: string; name: string; kind: AttachmentKind; content: string; truncated: boolean } | null> {
     const all = await this.list();
     const row =
@@ -145,5 +145,30 @@ export class AttachmentStore {
     } finally {
       db.close();
     }
+  }
+
+  /** Sum of recorded `size` fields (bytes). */
+  async totalBytes(sessionId?: string): Promise<number> {
+    const rows = await this.list(sessionId);
+    return rows.reduce((n, r) => n + (r.size || 0), 0);
+  }
+
+  /** Screenshots from ux_critique / screenshot_* (vision meta or name prefix). */
+  async listScreenshots(sessionId?: string): Promise<AttachmentRecord[]> {
+    const rows = await this.list(sessionId);
+    return rows.filter(
+      (r) =>
+        r.kind === "image" &&
+        (r.meta?.vision === true ||
+          r.meta?.source === "ux-viewport" ||
+          String(r.meta?.source ?? "").startsWith("ux-") ||
+          r.name.startsWith("screenshot-")),
+    );
+  }
+
+  async clearScreenshots(): Promise<number> {
+    const rows = await this.listScreenshots();
+    for (const r of rows) await this.remove(r.id);
+    return rows.length;
   }
 }

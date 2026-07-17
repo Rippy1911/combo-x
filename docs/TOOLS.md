@@ -88,11 +88,15 @@ Structured extraction, RAG, attachments, views, export.
 
 ### Media
 
-Screenshots and tab recording (service worker + offscreen).
+Screenshots, UX Vision Lab, and tab recording (service worker + offscreen).
 
 | Tool | Use when |
 |------|----------|
-| `screenshot_viewport` | Visible tab PNG |
+| `ux_critique` | **ALWAYS_ON** — required for visual UX audits; capture + chat artifact + vision attach |
+| `annotate_screenshot` | Numbered markers / boxes on a prior `attachmentId` |
+| `page_css_preview` / `page_css_clear` | Ephemeral live CSS for before/after proof |
+| `open_preview` | HTML / image / compare (prefer `attachmentId*`, never base64) |
+| `screenshot_viewport` | Visible tab PNG (combo-media) |
 | `screenshot_element` | Crop element by selector or index |
 | `screenshot_full` | Scroll-stitch full page |
 | `start_recording` / `stop_recording` | Tab webm capture |
@@ -111,7 +115,8 @@ Durable local notes and session artifacts.
 | `save_bookmark` | Local bookmark artifact |
 | `set_reminder` | Chrome notification reminder |
 | `create_report` | HTML report + download |
-| `search_sessions` | Search past chats |
+| `search_sessions` | List recent chats (empty query) or search by keyword |
+| `get_session` | Load full messages for a session id |
 
 Store: `packages/core/src/memory/store.ts` (`combo_x_memory`).
 
@@ -146,7 +151,7 @@ Protocol: [`docs/SUBAGENTS.md`](./SUBAGENTS.md). Profile fields: [`docs/AGENTS.m
 
 | Tool | Use when |
 |------|----------|
-| `create_task` / `update_task` / `list_tasks` | Session + global task tracking |
+| `create_task` / `update_task` / `list_tasks` / `reorder_tasks` | Conversation tasks (session checklist + global; ordered) |
 
 Usage charts are UI-driven (`UsagePanel` ← `UsageStore`), not a separate tool.
 

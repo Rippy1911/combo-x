@@ -3,6 +3,8 @@ import {
   DEFAULT_SKIP_DIRS,
   grantAndIndex,
   githubRestTemplate,
+  uploadsRestTemplate,
+  nsFoodRestTemplate,
   normalizeModelId,
   parseMcpDefinition,
   reindexSaved,
@@ -11,11 +13,14 @@ import {
   type AgentProfileStore,
   type AgentToolMode,
   type ApprovalMode,
+  type ApprovalPolicy,
+  type ApprovalPolicyStore,
   type Connector,
   type ConnectorStore,
   type RagMeta,
   type RagStore,
   type Vault,
+  type VisionSettings,
 } from "@combo-x/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { mcpConnectorFromSanitized } from "./connectorHelpers";
@@ -40,8 +45,11 @@ export type SettingsPanelProps = {
   setCustomModel: (v: string) => void;
   customWorkerModel: string;
   setCustomWorkerModel: (v: string) => void;
+  visionSettings: VisionSettings;
+  setVisionSettings: (v: VisionSettings) => void;
   approvalMode: ApprovalMode;
   setApprovalMode: (v: ApprovalMode) => void;
+  approvalPolicies: ApprovalPolicyStore;
   budgetMode: AgentBudgetMode;
   setBudgetMode: (v: AgentBudgetMode) => void;
   enabledTools: Set<string>;
@@ -82,8 +90,11 @@ export function SettingsPanel({
   setCustomModel,
   customWorkerModel,
   setCustomWorkerModel,
+  visionSettings,
+  setVisionSettings,
   approvalMode,
   setApprovalMode,
+  approvalPolicies,
   budgetMode,
   setBudgetMode,
   enabledTools,
@@ -101,6 +112,7 @@ export function SettingsPanel({
   const [msg, setMsg] = useState("");
   const [ragMsg, setRagMsg] = useState("");
   const [ragBusy, setRagBusy] = useState(false);
+  const [alwaysAllow, setAlwaysAllow] = useState<ApprovalPolicy[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -130,6 +142,10 @@ export function SettingsPanel({
     setConnectors(await connectorStore.list());
   }, [connectorStore]);
 
+  const refreshAlwaysAllow = useCallback(async () => {
+    setAlwaysAllow(await approvalPolicies.list());
+  }, [approvalPolicies]);
+
   const migrateGithub = useCallback(async () => {
     const list = await connectorStore.list();
     if (list.some((c) => c.id === "github-rest")) return;
@@ -143,8 +159,9 @@ export function SettingsPanel({
   useEffect(() => {
     void refreshProfiles();
     void refreshConnectors();
+    void refreshAlwaysAllow();
     void migrateGithub();
-  }, [migrateGithub, refreshConnectors, refreshProfiles]);
+  }, [migrateGithub, refreshAlwaysAllow, refreshConnectors, refreshProfiles]);
 
   const editing = profiles.find((p) => p.id === editingId) ?? null;
 
@@ -323,6 +340,31 @@ export function SettingsPanel({
       return next;
     });
     setMsg("GitHub REST template added");
+  };
+
+  const addUploadsTemplate = async () => {
+    await connectorStore.put(uploadsRestTemplate());
+    await refreshConnectors();
+    setEnabledTools((prev) => {
+      const next = new Set(prev);
+      next.add("rest_request");
+      next.add("publish_upload");
+      return next;
+    });
+    setMsg(
+      "NS Uploads template added (id ns-uploads). Public publish_upload needs no key; vault fc_uploads_key for protected /v2.",
+    );
+  };
+
+  const addNsFoodTemplate = async () => {
+    await connectorStore.put(nsFoodRestTemplate());
+    await refreshConnectors();
+    setEnabledTools((prev) => {
+      const next = new Set(prev);
+      next.add("rest_request");
+      return next;
+    });
+    setMsg("NS Food template added (id ns-food) — set vault ns_food_key (nsk_…)");
   };
 
   const removeConnector = async (id: string) => {
@@ -539,10 +581,23 @@ export function SettingsPanel({
         <button type="button" onClick={() => void addRestConnector()}>
           Add REST
         </button>
-        <h4>GitHub template</h4>
-        <button type="button" onClick={() => void addGithubTemplate()}>
-          Add from GitHub template
-        </button>
+        <h4>Templates</h4>
+        <div className="row">
+          <button type="button" onClick={() => void addGithubTemplate()}>
+            GitHub
+          </button>
+          <button type="button" onClick={() => void addUploadsTemplate()}>
+            NS Uploads
+          </button>
+          <button type="button" onClick={() => void addNsFoodTemplate()}>
+            NS Food
+          </button>
+        </div>
+        <p className="hint wrap">
+          Uploads: tool <code>publish_upload</code> (public, no key). Map:{" "}
+          <code>create_map_report</code> then publish. Food: vault{" "}
+          <code>ns_food_key</code> + <code>rest_request</code>.
+        </p>
         <h4>Paste MCP JSON</h4>
         <textarea
           rows={5}
@@ -779,6 +834,99 @@ export function SettingsPanel({
         </button>
       </div>
 
+      <h3>UX Vision Lab</h3>
+      <p className="hint wrap">
+        Screenshots attach as vision for the next model turn. Non-vision orchestrators use the
+        vision worker. Defaults work out of the box.
+      </p>
+      <label className="hint">Vision worker model</label>
+      <ModelPicker
+        value={visionSettings.visionWorkerModel}
+        apiKey={apiKey}
+        onChange={(id) =>
+          setVisionSettings({ ...visionSettings, visionWorkerModel: id })
+        }
+      />
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.autoAttachScreenshots}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              autoAttachScreenshots: e.target.checked,
+            })
+          }
+        />
+        Auto-attach screenshots to the next model turn
+      </label>
+      <label className="hint">Critique image detail</label>
+      <select
+        value={visionSettings.critiqueImageDetail}
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            critiqueImageDetail: e.target.value as VisionSettings["critiqueImageDetail"],
+          })
+        }
+      >
+        <option value="low">low (cheap, default)</option>
+        <option value="auto">auto</option>
+        <option value="high">high</option>
+      </select>
+      <label className="hint">Max vision bytes</label>
+      <input
+        type="number"
+        min={50_000}
+        max={8_000_000}
+        step={50_000}
+        value={visionSettings.maxVisionBytes}
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            maxVisionBytes: Number(e.target.value) || 1_500_000,
+          })
+        }
+      />
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.interactivePreviewScripts}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              interactivePreviewScripts: e.target.checked,
+            })
+          }
+        />
+        Interactive HTML previews (sandbox allow-scripts only)
+      </label>
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={visionSettings.enableGenerateMock}
+          onChange={(e) =>
+            setVisionSettings({
+              ...visionSettings,
+              enableGenerateMock: e.target.checked,
+            })
+          }
+        />
+        Enable generate_mock tool (P1 — off by default)
+      </label>
+      <label className="hint">Force vision on model id (override)</label>
+      <input
+        type="text"
+        value={visionSettings.visionModelOverride}
+        placeholder="e.g. openai/gpt-5.6-luna"
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            visionModelOverride: e.target.value.trim(),
+          })
+        }
+      />
+
       <h3>Advanced</h3>
       <label className="hint">Global approval mode</label>
       <select
@@ -789,6 +937,41 @@ export function SettingsPanel({
         <option value="auto_llm">Auto (LLM judges intent)</option>
         <option value="auto_all">Auto-approve all (this browser)</option>
       </select>
+      <label className="hint">Always allow (per action)</label>
+      <p className="hint wrap">
+        Remembers a single tool (or tool + target). Distinct from Auto-approve all.
+      </p>
+      {alwaysAllow.length === 0 ? (
+        <p className="hint">None yet — use “Always allow action/target” on an Allow prompt.</p>
+      ) : (
+        <ul className="list">
+          {alwaysAllow.map((p) => (
+            <li key={p.id} className="tool-row">
+              <div className="grow">
+                <code>{p.tool}</code>
+                {p.targetKey ? (
+                  <div className="hint mono-id">{p.targetKey}</div>
+                ) : (
+                  <div className="hint">any args</div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="dangerish"
+                onClick={() =>
+                  void (async () => {
+                    await approvalPolicies.forget(p.id);
+                    await refreshAlwaysAllow();
+                    setMsg(`Forgot always-allow: ${p.tool}`);
+                  })()
+                }
+              >
+                Forget
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <label className="hint">Global token budget</label>
       <select
         value={budgetMode}

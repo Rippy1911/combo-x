@@ -76,8 +76,14 @@ const CURATED: Record<string, CatalogMeta> = {
   navigate: {
     group: "browser",
     useCases: ["Open a URL in the active tab", "Go to /s/{sap} PDP or login page"],
-    whenToUse: "Target URL is known and same-tab navigation is fine.",
-    whenNotToUse: "Need background tab — use open_tab; history back — use go_back.",
+    whenToUse: "Default for all browsing. Prefer over open_tab.",
+    whenNotToUse: "History back — use go_back. Parallel page only — open_tab with newTab:true.",
+  },
+  open_tab: {
+    group: "browser",
+    useCases: ["Rare: open a second tab to compare pages in parallel"],
+    whenToUse: "Only with newTab:true when navigate cannot work (need two pages at once).",
+    whenNotToUse: "Normal browsing — use navigate (open_tab without newTab already navigates).",
   },
   login: {
     group: "connectors",
@@ -97,6 +103,45 @@ const CURATED: Record<string, CatalogMeta> = {
     whenToUse: "Fact should survive chat turns and be searchable via recall.",
     whenNotToUse: "Ephemeral step output — put in tool result or scrape table instead.",
   },
+  ux_critique: {
+    group: "media",
+    useCases: [
+      "Visual UX critique of the current page or a component",
+      "Attach screenshot for vision without unlocking raw media tools",
+    ],
+    whenToUse: "User asks for design/UX feedback or a redesign mock — REQUIRED before answering.",
+    whenNotToUse: "Text-only page facts — use page_digest.",
+  },
+  open_preview: {
+    group: "meta",
+    useCases: [
+      "Show interactive HTML prototype inside chat",
+      "Before/after image compare via attachmentIds",
+    ],
+    whenToUse: "Surface a table, HTML mock, or image without leaving chat.",
+    whenNotToUse: "Only need a short text answer.",
+  },
+  annotate_screenshot: {
+    group: "media",
+    useCases: [
+      "Numbered callouts on a captured screenshot",
+      "Highlight hero/CTA/regions for UX findings",
+    ],
+    whenToUse: "After ux_critique — show markers matching critique numbers.",
+    whenNotToUse: "No screenshot attachmentId yet.",
+  },
+  page_css_preview: {
+    group: "media",
+    useCases: ["Live ephemeral CSS tweak for before/after UX proof"],
+    whenToUse: "Demonstrate a CSS fix on the live tab then re-capture.",
+    whenNotToUse: "Permanent page changes — use page-ext instead.",
+  },
+  page_css_clear: {
+    group: "media",
+    useCases: ["Remove ephemeral Combo-X preview CSS"],
+    whenToUse: "After before/after capture or when abandoning a CSS experiment.",
+    whenNotToUse: "No preview CSS injected.",
+  },
   screenshot_viewport: {
     group: "media",
     useCases: [
@@ -104,7 +149,7 @@ const CURATED: Record<string, CatalogMeta> = {
       "Quick visual proof of UI state",
     ],
     whenToUse: "Need PNG of current viewport; user approved capture.",
-    whenNotToUse: "Text fields suffice — prefer page_digest/extract to save tokens.",
+    whenNotToUse: "Text fields suffice — prefer page_digest/extract to save tokens. Prefer ux_critique for UX feedback.",
   },
   upsert_scrape_rows: {
     group: "data",
@@ -140,8 +185,21 @@ const CURATED: Record<string, CatalogMeta> = {
     group: "memory",
     useCases: ["Find prior notes by keyword", "Load user prefs saved via remember"],
     whenToUse: "Need durable memory, not current page content.",
-    whenNotToUse: "Searching chat history — use search_sessions.",
+    whenNotToUse: "Searching chat history — use search_sessions / get_session.",
   },
+  search_sessions: {
+    group: "meta",
+    useCases: ["List recent chats", "Find a prior conversation by keyword"],
+    whenToUse: "User asks about past chats or continuity across sessions.",
+    whenNotToUse: "Need full message bodies — use get_session with the hit id.",
+  },
+  get_session: {
+    group: "meta",
+    useCases: ["Read messages from a past session id"],
+    whenToUse: "After search_sessions, when titles/previews are not enough.",
+    whenNotToUse: "Current open chat — use the live thread.",
+  },
+
   wait: {
     group: "browser",
     useCases: ["Settle after navigation or click", "Short delay before page_digest"],
@@ -249,6 +307,11 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   rest_request: "connectors",
   mcp_list_tools: "connectors",
   mcp_call: "connectors",
+  ux_critique: "media",
+  open_preview: "meta",
+  annotate_screenshot: "media",
+  page_css_preview: "media",
+  page_css_clear: "media",
   screenshot_viewport: "media",
   screenshot_element: "media",
   screenshot_full: "media",
@@ -258,7 +321,12 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   save_bookmark: "meta",
   set_reminder: "meta",
   create_report: "meta",
+  create_map_report: "meta",
+  publish_upload: "connectors",
   search_sessions: "meta",
+  get_session: "meta",
+  list_custom_tools: "meta",
+  custom_tool_save: "meta",
   create_agent: "agentic",
   update_agent: "agentic",
   list_agents: "agentic",
@@ -266,6 +334,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   create_task: "meta",
   update_task: "meta",
   list_tasks: "meta",
+  reorder_tasks: "meta",
   create_page_extension: "agentic",
   update_page_extension: "agentic",
   list_page_extensions: "agentic",

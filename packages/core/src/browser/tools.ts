@@ -45,7 +45,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index.",
+        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index. When a dialog/modal OR high-z floating portal is open, the list is SCOPED to that layer only (scope=dialog) — re-call after opening a modal so Save/Plan title appear. Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
         properties: { limit: { type: "number" } },
@@ -70,7 +70,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "type_index",
-      description: "Type into interactive element by index from get_interactive.",
+      description:
+        "Type into interactive element by index from get_interactive. Check item.type — never put free text into type=time/date/number. For plan titles: click the Plan title button first so a text input appears, then type_index that input.",
       parameters: {
         type: "object",
         properties: {
@@ -217,7 +218,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "navigate",
-      description: "Navigate the active tab to a URL (same tab).",
+      description:
+        "Navigate the ACTIVE tab to a URL (preferred). Use this for almost all browsing — do not open new tabs.",
       parameters: {
         type: "object",
         properties: { url: { type: "string" } },
@@ -246,10 +248,21 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "open_tab",
-      description: "Open a URL in a new tab and focus it.",
+      description:
+        "DEFAULT navigates the active tab (same as navigate). Only pass newTab:true when you truly need a parallel tab. Those tabs auto-close at end of turn unless keepOpen:true.",
       parameters: {
         type: "object",
-        properties: { url: { type: "string", description: "https URL" } },
+        properties: {
+          url: { type: "string", description: "https URL" },
+          newTab: {
+            type: "boolean",
+            description: "true = open a real new tab (rare). Default false → navigate.",
+          },
+          keepOpen: {
+            type: "boolean",
+            description: "With newTab:true, leave the tab open after the turn (default false = auto-close).",
+          },
+        },
         required: ["url"],
         additionalProperties: false,
       },
@@ -286,22 +299,30 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "parse_data",
       description:
-        "Cheap worker LLM: extract structured JSON rows from text (or current page) for a given intent. Use after query_all/scrape_tables/get_page — do not dump huge HTML into the orchestrator.",
+        "Extract structured JSON rows. For uploaded CSV/order files ALWAYS pass attachmentId (full file) — never paste the truncated chat preview. Order CSVs with position/{name,index} are parsed deterministically (all rows). Otherwise uses a cheap worker LLM on text/page.",
       parameters: {
         type: "object",
         properties: {
           intent: {
             type: "string",
-            description: "What to extract, e.g. product name, EAN, price",
+            description: "What to extract, e.g. every product name + SAP index from CSV",
           },
-          text: { type: "string", description: "Raw text to parse; omit if use_page" },
+          attachmentId: {
+            type: "string",
+            description:
+              "Uploaded file id from list_attachments / inventory. Preferred for CSV — loads full text up to 200k chars.",
+          },
+          text: {
+            type: "string",
+            description: "Raw text to parse; omit if attachmentId or use_page. Do not paste truncated previews.",
+          },
           use_page: {
             type: "boolean",
             description: "If true, read truncated visible page text first",
           },
           schema_hint: {
             type: "string",
-            description: "Optional JSON shape hint, e.g. [{name,ean,price}]",
+            description: "Optional JSON shape hint, e.g. [{name,sap,ean}]",
           },
         },
         required: ["intent"],
@@ -370,13 +391,13 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "read_attachment",
       description:
-        "Read extracted text from an uploaded chat attachment by id or filename. Images are vision-attached on upload; this returns a short note for images.",
+        "Read extracted text from an uploaded chat attachment by id or filename. Default maxChars=200000. For full product lists from CSV prefer parse_data({attachmentId}) — do not paste truncated previews.",
       parameters: {
         type: "object",
         properties: {
           id: { type: "string", description: "Attachment id (preferred)" },
           name: { type: "string", description: "Filename if id unknown" },
-          maxChars: { type: "number" },
+          maxChars: { type: "number", description: "Cap (default 200000)" },
         },
         additionalProperties: false,
       },
@@ -493,12 +514,23 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "create_report",
-      description: "Create a local HTML report and download it.",
+      description:
+        "Create a local HTML report, open it in chat preview (interactive), and download it. Embed screenshots with src=\"attachment:<attachmentId>\" or pass attachmentIds (auto gallery). Prefer CSS :target/details over JS for clickable UI in the sandbox. Never paste base64.",
       parameters: {
         type: "object",
         properties: {
           title: { type: "string" },
-          bodyHtml: { type: "string" },
+          bodyHtml: {
+            type: "string",
+            description:
+              'HTML body. Use <img src="attachment:UUID"> for screenshots from ux_critique stubs.',
+          },
+          attachmentIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Screenshot attachmentIds to embed; if body has no attachment: refs, a gallery is appended.",
+          },
         },
         required: ["title", "bodyHtml"],
         additionalProperties: false,
@@ -508,15 +540,125 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "search_sessions",
-      description: "Search past chat sessions by keyword.",
+      name: "create_map_report",
+      description:
+        "Build an interactive MapLibre map (OpenFreeMap PL/EN vector basemap) from lat/lng markers, save as a local HTML report, and open chat preview. Prefer this over hand-writing map HTML. After preview, call publish_upload to get a shareable https://uploads… URL (CORS-friendly).",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string" },
+          title: { type: "string" },
+          markers: {
+            type: "array",
+            description: "Up to 500 pins",
+            items: {
+              type: "object",
+              properties: {
+                lat: { type: "number" },
+                lng: { type: "number" },
+                label: { type: "string" },
+                note: { type: "string" },
+              },
+              required: ["lat", "lng"],
+              additionalProperties: false,
+            },
+          },
+          locale: {
+            type: "string",
+            enum: ["pl", "en"],
+            description: "Place-label language for the basemap (default pl)",
+          },
+          center: {
+            type: "object",
+            properties: { lat: { type: "number" }, lng: { type: "number" } },
+            additionalProperties: false,
+          },
+          zoom: { type: "number" },
+        },
+        required: ["title", "markers"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "publish_upload",
+      description:
+        "Upload HTML/text/CSV/image to uploads.nextsolutions.studio and return a public file_url. Use after create_report / create_map_report to share maps and artifacts. Public tier needs no key (workspace combo-x). Optional connectorId=ns-uploads + vault fc_uploads_key for protected /v2/upload.",
+      parameters: {
+        type: "object",
+        properties: {
+          filename: {
+            type: "string",
+            description: "e.g. map.html, report.html, data.csv",
+          },
+          text: {
+            type: "string",
+            description: "UTF-8 body when not using reportId/attachmentId",
+          },
+          reportId: {
+            type: "string",
+            description: "Local report id from create_report / create_map_report",
+          },
+          attachmentId: {
+            type: "string",
+            description: "Chat attachment id (uses dataUrl or text)",
+          },
+          workspaceId: { type: "string", description: "Default combo-x" },
+          appName: { type: "string", description: "Default combo-x" },
+          connectorId: {
+            type: "string",
+            description: "Optional REST connector (ns-uploads) for protected tier",
+          },
+          path: {
+            type: "string",
+            description: "Optional protected-tier subpath",
+          },
+          openTab: {
+            type: "boolean",
+            description: "If true, navigate/open the file_url after upload (default true)",
+          },
+        },
+        required: ["filename"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_sessions",
+      description:
+        "List or search past chat sessions. Omit query (or pass \"\") for recent sessions by updatedAt. With a query, matches title + message text + tool names (any token). Use get_session to read full messages.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Keyword search; empty or omitted = recent list",
+          },
           limit: { type: "number" },
         },
-        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_session",
+      description:
+        "Load one past chat session by id (from search_sessions). Returns title + messages (role/content/createdAt). Prefer this when the user asks what was said earlier.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Session UUID" },
+          maxMessages: {
+            type: "number",
+            description: "Cap messages returned (default 40, max 80)",
+          },
+        },
+        required: ["id"],
         additionalProperties: false,
       },
     },
@@ -619,12 +761,18 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "skill_read",
       description:
-        "Load a skill body by id and unlock its toolHints (skill-gated tools) for the rest of this user turn. Skills are never auto-injected into the system prompt.",
+        "Load a skill body by UUID or seed name (e.g. combo-scrape, combo-rag) and unlock its toolHints for the rest of this user turn. Skill descriptions are already in the system index — use this for the full body + unlocks.",
       parameters: {
         type: "object",
         properties: {
-          id: { type: "string" },
-          name: { type: "string", description: "Optional name lookup if id unknown" },
+          id: {
+            type: "string",
+            description: "Skill UUID or seed name (combo-scrape, combo-rag, …)",
+          },
+          name: {
+            type: "string",
+            description: "Skill name lookup (same as id when using seed names)",
+          },
         },
         additionalProperties: false,
       },
@@ -634,7 +782,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "skill_save",
-      description: "Create or update a skill (playbook). scope=global|agent.",
+      description: "Create or update a skill (playbook). scope=global|agent. Use when this tool is in the ceiling.",
       parameters: {
         type: "object",
         properties: {
@@ -648,6 +796,45 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           toolHints: { type: "array", items: { type: "string" } },
         },
         required: ["name", "description", "body"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_custom_tools",
+      description: "List user-defined custom tools (schemas merged into the tool list).",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "custom_tool_save",
+      description:
+        "Create or update a user-defined custom tool (name/description/JSON-schema parameters). kind=guide|echo. Requires this tool in the ceiling.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: {
+            type: "string",
+            description: "snake_case tool name matching /^[a-z][a-z0-9_]{1,63}$/",
+          },
+          description: { type: "string" },
+          parametersJson: {
+            type: "string",
+            description: "JSON string of OpenAI function.parameters schema object",
+          },
+          kind: { type: "string", enum: ["guide", "echo"] },
+          handlerNote: { type: "string" },
+        },
+        required: ["name", "description"],
         additionalProperties: false,
       },
     },
@@ -879,8 +1066,169 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ux_critique",
+      description:
+        "REQUIRED for any visual UX audit. Captures the current page (or a component), shows a screenshot artifact in chat, and vision-attaches for the next model turn. Always-on — prefer over raw screenshot_*. Do not answer visual UX audits from get_page alone.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: {
+            type: "string",
+            enum: ["viewport", "element", "full"],
+            description: "What to capture (default viewport)",
+          },
+          selector: { type: "string", description: "CSS selector when scope=element" },
+          index: { type: "number", description: "Interactive index when scope=element" },
+          focus: {
+            type: "string",
+            description: "Optional critique focus, e.g. hero CTA, mobile nav, form density",
+          },
+          detail: {
+            type: "string",
+            enum: ["auto", "low", "high"],
+            description: "Image detail for vision (default from settings, usually low)",
+          },
+          tabId: { type: "number" },
+          windowId: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_preview",
+      description:
+        "Show a non-blocking preview inside chat: table, HTML prototype, text, image, or before/after compare. Prefer attachmentId(s). For HTML reports, use <img src=\"attachment:UUID\"> or attachmentIds — runtime embeds images. Prefer CSS-only tabs (details/summary, :target) so controls work even if scripts are limited. Never paste base64.",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["table", "html", "text", "image", "compare"],
+          },
+          title: { type: "string" },
+          headers: { type: "array", items: { type: "string" } },
+          rows: { type: "array", items: { type: "array" } },
+          html: {
+            type: "string",
+            description:
+              'HTML/CSS/JS for kind=html. Embed shots with src="attachment:UUID" from ux_critique.',
+          },
+          text: { type: "string" },
+          src: {
+            type: "string",
+            description: "Optional image URL. Prefer attachmentId instead of data: URLs.",
+          },
+          attachmentId: {
+            type: "string",
+            description: "Stored screenshot id from ux_critique / screenshot_* stub (kind=image)",
+          },
+          attachmentIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "For kind=html: embed these screenshots (gallery appended if no attachment: refs in html).",
+          },
+          beforeSrc: { type: "string", description: "before image URL for kind=compare" },
+          afterSrc: { type: "string", description: "after image URL for kind=compare" },
+          beforeAttachmentId: {
+            type: "string",
+            description: "Before screenshot attachmentId for kind=compare",
+          },
+          afterAttachmentId: {
+            type: "string",
+            description: "After screenshot attachmentId for kind=compare",
+          },
+          interactive: {
+            type: "boolean",
+            description: "For html: allow scripts in sandbox (default from settings)",
+          },
+        },
+        required: ["kind", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "annotate_screenshot",
+      description:
+        "Show a prior screenshot in chat with numbered markers / highlight boxes (percent coords 0–100). Use after ux_critique so the user sees callouts matching your critique. Never paste base64 — pass attachmentId from the capture stub.",
+      parameters: {
+        type: "object",
+        properties: {
+          attachmentId: { type: "string" },
+          title: { type: "string" },
+          markers: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                x: { type: "number", description: "Percent from left (0–100)" },
+                y: { type: "number", description: "Percent from top (0–100)" },
+                label: { type: "string" },
+                note: { type: "string" },
+              },
+              required: ["x", "y", "label"],
+            },
+          },
+          highlights: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                w: { type: "number" },
+                h: { type: "number" },
+                label: { type: "string" },
+              },
+              required: ["x", "y", "w", "h"],
+            },
+          },
+        },
+        required: ["attachmentId", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_css_preview",
+      description:
+        "Inject ephemeral CSS into the current page (isolated world, style#combo-x-css-preview). Use for live before/after UX tweaks, then ux_critique again and open_preview compare. Cleared on navigate/reload or page_css_clear. No remote @import/url().",
+      parameters: {
+        type: "object",
+        properties: {
+          css: { type: "string", description: "CSS text (max ~20KB)" },
+        },
+        required: ["css"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "page_css_clear",
+      description: "Remove ephemeral Combo-X preview CSS from the current page.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "screenshot_viewport",
-      description: "Capture visible tab screenshot (PNG data URL).",
+      description:
+        "Capture visible tab screenshot. Image is stored and vision-attached for the next model turn (not returned as base64 in the tool result). Unlock via skill_read combo-media, or prefer ux_critique.",
       parameters: {
         type: "object",
         properties: { windowId: { type: "number" } },
@@ -1038,7 +1386,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "create_task",
-      description: "Create a task on the agent task board (todo/doing/done/blocked).",
+      description:
+        "Create a conversation task (todo/doing/done/blocked). Defaults to this chat session; use for multi-step plans.",
       parameters: {
         type: "object",
         properties: {
@@ -1047,6 +1396,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           note: { type: "string" },
           planMarkdown: { type: "string" },
           status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
+          sortOrder: { type: "number", description: "Lower = higher priority" },
         },
         required: ["title"],
         additionalProperties: false,
@@ -1057,7 +1407,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "update_task",
-      description: "Update task status, title, note, or planMarkdown.",
+      description: "Update task status, title, note, planMarkdown, or sortOrder. Mark done when a step finishes.",
       parameters: {
         type: "object",
         properties: {
@@ -1066,6 +1416,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           title: { type: "string" },
           note: { type: "string" },
           planMarkdown: { type: "string" },
+          sortOrder: { type: "number" },
         },
         required: ["id"],
         additionalProperties: false,
@@ -1076,7 +1427,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "list_tasks",
-      description: "List tasks filtered by session, status, or global-only scope.",
+      description: "List tasks filtered by session, status, or global-only scope (ordered by sortOrder).",
       parameters: {
         type: "object",
         properties: {
@@ -1084,6 +1435,25 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           globalOnly: { type: "boolean" },
           status: { type: "string", enum: ["todo", "doing", "done", "blocked"] },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reorder_tasks",
+      description: "Set explicit priority order for tasks (orderedIds = highest priority first).",
+      parameters: {
+        type: "object",
+        properties: {
+          orderedIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "Task ids in desired order (first = top)",
+          },
+        },
+        required: ["orderedIds"],
         additionalProperties: false,
       },
     },
@@ -1368,6 +1738,11 @@ export function toolArgsToContentRequest(
         limit: typeof args.limit === "number" ? args.limit : 80,
         attributes: Array.isArray(args.attributes) ? args.attributes.map(String) : undefined,
       };
+    case "page_css_preview":
+      if (typeof args.css !== "string") return null;
+      return { op: "inject_css", css: args.css };
+    case "page_css_clear":
+      return { op: "clear_css" };
     default:
       return null;
   }

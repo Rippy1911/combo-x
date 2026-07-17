@@ -1,14 +1,14 @@
 import type {
   AgentProfileStore,
   ConnectorStore,
+  CustomToolStore,
   MemoryStore,
   RagMeta,
   RagStore,
   SkillStore,
   ViewStore,
 } from "@combo-x/core";
-import { useState } from "react";
-import { InspectorSubpanel } from "./InspectorSubpanel";
+import { useEffect, useState } from "react";
 import { IntegrationsSubpanel } from "./IntegrationsSubpanel";
 import { KnowledgeSubpanel } from "./KnowledgeSubpanel";
 import { MemoryBrowser } from "./MemoryBrowser";
@@ -22,8 +22,7 @@ export type LibSubNav =
   | "tools"
   | "knowledge"
   | "integrations"
-  | "tables"
-  | "inspector";
+  | "tables";
 
 export type LibrariesPanelProps = {
   memory: MemoryStore;
@@ -31,6 +30,7 @@ export type LibrariesPanelProps = {
   agents: AgentProfileStore;
   enabledTools: Set<string>;
   setEnabledTools?: (fn: (prev: Set<string>) => Set<string>) => void;
+  customTools?: CustomToolStore;
   rag: RagStore;
   ragMeta: RagMeta | null;
   setRagMeta: (m: RagMeta | null) => void;
@@ -42,16 +42,16 @@ export type LibrariesPanelProps = {
   views: ViewStore;
   onExport: (filename: string, text: string, mime: string) => void | Promise<void>;
   initialSubnav?: LibSubNav;
+  onSubnavChange?: (sub: LibSubNav) => void;
 };
 
 const SUBNAV: Array<{ id: LibSubNav; label: string }> = [
+  { id: "tables", label: "Tables" },
   { id: "memory", label: "Memory" },
   { id: "skills", label: "Skills" },
   { id: "tools", label: "Tools" },
   { id: "knowledge", label: "Knowledge" },
   { id: "integrations", label: "Integrations" },
-  { id: "tables", label: "Tables" },
-  { id: "inspector", label: "Inspector" },
 ];
 
 export function LibrariesPanel({
@@ -60,6 +60,7 @@ export function LibrariesPanel({
   agents,
   enabledTools,
   setEnabledTools,
+  customTools,
   rag,
   ragMeta,
   setRagMeta,
@@ -70,16 +71,25 @@ export function LibrariesPanel({
   connectorStore,
   views,
   onExport,
-  initialSubnav = "memory",
+  initialSubnav = "tables",
+  onSubnavChange,
 }: LibrariesPanelProps) {
   const [sub, setSub] = useState<LibSubNav>(initialSubnav);
+
+  useEffect(() => {
+    setSub(initialSubnav);
+  }, [initialSubnav]);
+
+  const selectSub = (id: LibSubNav) => {
+    setSub(id);
+    onSubnavChange?.(id);
+  };
 
   return (
     <div className="panel libraries-panel">
       <h2>Libraries</h2>
       <p className="hint wrap">
-        Memory, skills, tools, knowledge, and local data — how the agent remembers, unlocks, and
-        browses.
+        Tables (scrape views), memory, skills, tools, knowledge, and integrations.
       </p>
       <nav className="lib-subnav">
         {SUBNAV.map(({ id, label }) => (
@@ -87,7 +97,7 @@ export function LibrariesPanel({
             key={id}
             type="button"
             className={sub === id ? "tab active" : "tab"}
-            onClick={() => setSub(id)}
+            onClick={() => selectSub(id)}
           >
             {label}
           </button>
@@ -96,7 +106,11 @@ export function LibrariesPanel({
       {sub === "memory" ? <MemoryBrowser memory={memory} agents={agents} /> : null}
       {sub === "skills" ? <SkillsBrowser skills={skills} agents={agents} /> : null}
       {sub === "tools" ? (
-        <ToolsLibrary enabledTools={enabledTools} setEnabledTools={setEnabledTools} />
+        <ToolsLibrary
+          enabledTools={enabledTools}
+          setEnabledTools={setEnabledTools}
+          customTools={customTools}
+        />
       ) : null}
       {sub === "knowledge" ? (
         <KnowledgeSubpanel
@@ -113,7 +127,6 @@ export function LibrariesPanel({
         <IntegrationsSubpanel connectorStore={connectorStore} vaultUnlocked={vaultUnlocked} />
       ) : null}
       {sub === "tables" ? <TablesSubpanel views={views} onExport={onExport} /> : null}
-      {sub === "inspector" ? <InspectorSubpanel /> : null}
     </div>
   );
 }
