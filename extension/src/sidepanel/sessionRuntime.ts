@@ -26,6 +26,8 @@ export type SessionRuntime = {
   running: boolean;
   status: string;
   streamingId: string | null;
+  /** Opaque id for the in-flight send(); finally must match before clearing. */
+  activeRunId: string | null;
   sessionUsage: SessionUsageSplit;
   lastTurnUsage: SessionUsageSplit | null;
   unlockedThisRun: string[];
@@ -57,6 +59,7 @@ export function createEmptyRuntime(
     running: false,
     status: "",
     streamingId: null,
+    activeRunId: null,
     sessionUsage: emptyUsageSplit(zero),
     lastTurnUsage: null,
     unlockedThisRun: [],

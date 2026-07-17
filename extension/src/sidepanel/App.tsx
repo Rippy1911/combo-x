@@ -407,6 +407,7 @@ export function App() {
   };
   const [sendQueue, setSendQueue] = useState<QueuedSend[]>([]);
   const sendQueueRef = useRef<QueuedSend[]>([]);
+  const queueDrainLockRef = useRef(false);
   const runningRef = useRef(false);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRecord[]>([]);
   const [detectSecrets, setDetectSecrets] = useState(
@@ -1106,7 +1107,7 @@ export function App() {
 
   const stop = useCallback(() => {
     // Abort every in-flight session (active + background) so STOP always works.
-    for (const [sid, controller] of abortBySessionRef.current) {
+    for (const [sid, controller] of [...abortBySessionRef.current]) {
       controller.abort();
       abortBySessionRef.current.delete(sid);
       const pa = pendingApprovalBySessionRef.current.get(sid);
@@ -1117,10 +1118,15 @@ export function App() {
       const rt = runtimesRef.current.get(sid);
       if (rt) {
         rt.running = false;
+        rt.activeRunId = null;
+        rt.streamingId = null;
         rt.status = "Stopped";
         rt.lastTouchedAt = Date.now();
       }
     }
+    // Drop queued sends — STOP must not auto-drain into a new turn.
+    sendQueueRef.current = [];
+    setSendQueue([]);
     abortRef.current?.abort();
     abortRef.current = null;
     runningRef.current = false;
@@ -1256,14 +1262,17 @@ export function App() {
   ]);
 
   const send = useCallback(
-    async (overrideText?: string, queued?: QueuedSend) => {
+    async (overrideText?: string, queued?: QueuedSend): Promise<boolean> => {
       const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
-      if (activeId && runtimesRef.current.get(activeId)?.running) return;
-      if (!activeId && runningRef.current) return;
+      if (activeId && runtimesRef.current.get(activeId)?.running) return false;
+      if (!activeId && runningRef.current) return false;
       let text = (overrideText ?? (queued ? queued.text : input)).trim();
       const pending = queued?.attachments ?? pendingAttachments;
-      if (!text && pending.length === 0) return;
-      if (!vault.isUnlocked()) return setStatus("Unlock vault first");
+      if (!text && pending.length === 0) return false;
+      if (!vault.isUnlocked()) {
+        setStatus("Unlock vault first");
+        return false;
+      }
 
       // Embed queued secrets into the vault BEFORE send/history (no race with agent tools).
       const secretsSource = queued?.secrets ?? pendingSecrets;
@@ -1288,16 +1297,16 @@ export function App() {
           if (!queued) setPendingSecrets([]);
           setStatus(`Embedded ${toEmbed.length} secret(s) in vault`);
         } catch (err) {
-          return setStatus(
-            `Vault embed failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          setStatus(`Vault embed failed: ${err instanceof Error ? err.message : String(err)}`);
+          return false;
         }
       }
 
       const key = apiKey || (await vault.getByLabel(KEY_LABEL));
       if (!key) {
         setTab("settings");
-        return setStatus("Missing OpenRouter key");
+        setStatus("Missing OpenRouter key");
+        return false;
       }
 
       const displayText =
@@ -1319,17 +1328,26 @@ export function App() {
       const nowIso = new Date().toISOString();
       const editId = queued ? null : editingTurnId;
       setEditingTurnId(null);
-      let baseTurns = turns;
+      const boundId = session.id;
+      activeSessionIdRef.current = activeSessionIdRef.current ?? boundId;
+      const isBoundActive = () => activeSessionIdRef.current === boundId;
+      const rt = ensureRuntime(boundId);
+      // Prefer persisted runtime turns — React `turns` can lag on queue drain / switch.
+      let baseTurns = ((rt.turns as UiTurn[]) ?? []).length
+        ? ([...(rt.turns as UiTurn[])] as UiTurn[])
+        : turns;
+      if (rt.history?.length) historyRef.current = [...rt.history];
+      const priorTurnCount = baseTurns.length;
       if (editId) {
-        const idx = turns.findIndex((t) => t.id === editId && t.role === "user");
+        const idx = baseTurns.findIndex((t) => t.id === editId && t.role === "user");
         if (idx >= 0) {
           // UI turns ≠ lean history rows (multi-step crumbs). Rebuild from UI prefix.
-          baseTurns = turns.slice(0, idx);
+          baseTurns = baseTurns.slice(0, idx);
           historyRef.current = historyFromUiTurns(baseTurns);
         }
       }
       const userTurn: UiTurn = {
-        id: editId && baseTurns.length < turns.length ? editId : crypto.randomUUID(),
+        id: editId && baseTurns.length < priorTurnCount ? editId : crypto.randomUUID(),
         role: "user",
         content: displayText,
         createdAt: nowIso,
@@ -1347,13 +1365,11 @@ export function App() {
           delivery: "stream" as const,
         },
       ];
-      const boundId = session.id;
-      activeSessionIdRef.current = activeSessionIdRef.current ?? boundId;
-      const isBoundActive = () => activeSessionIdRef.current === boundId;
-      const rt = ensureRuntime(boundId);
+      const runId = crypto.randomUUID();
       rt.turns = nextTurns;
       rt.history = historyRef.current;
       rt.running = true;
+      rt.activeRunId = runId;
       rt.streamingId = assistantId;
       rt.status = pendingIds.length ? `Working with ${pendingIds.length} file(s)…` : "Working…";
       rt.lastTurnUsage = null;
@@ -1433,7 +1449,6 @@ export function App() {
       let liveReasoning = "";
       /** Captured from run_context — local nextTurns must not wipe React state at end-of-run. */
       let capturedRunContext: RunContextSnapshot | undefined;
-      const runId = crypto.randomUUID();
       const sessionIdForLog = session.id;
       const historyAtStart = [...historyRef.current];
 
@@ -1851,20 +1866,27 @@ export function App() {
           void refreshSessions();
         }
       } finally {
-        rt.running = false;
-        rt.streamingId = null;
-        rt.lastTouchedAt = Date.now();
-        abortBySessionRef.current.delete(boundId);
-        pendingApprovalBySessionRef.current.delete(boundId);
-        if (isBoundActive()) {
-          runningRef.current = false;
-          setRunning(false);
-          setStreamingId(null);
-          setPendingApproval(null);
-          abortRef.current = null;
+        // Only the owning run may clear — a newer send() may already own this session.
+        if (rt.activeRunId === runId) {
+          rt.running = false;
+          rt.streamingId = null;
+          rt.activeRunId = null;
+          rt.lastTouchedAt = Date.now();
+          if (abortBySessionRef.current.get(boundId) === controller) {
+            abortBySessionRef.current.delete(boundId);
+          }
+          pendingApprovalBySessionRef.current.delete(boundId);
+          if (isBoundActive()) {
+            runningRef.current = false;
+            setRunning(false);
+            setStreamingId(null);
+            setPendingApproval(null);
+            if (abortRef.current === controller) abortRef.current = null;
+          }
+          bump();
         }
-        bump();
       }
+      return true;
     },
     [
       activeAgentId,
@@ -1945,13 +1967,22 @@ export function App() {
     if (!activeId) return;
     const activeRunning =
       !!runtimesRef.current.get(activeId)?.running || running || runningRef.current;
-    if (activeRunning) return;
+    if (activeRunning || queueDrainLockRef.current) return;
     const idx = sendQueueRef.current.findIndex((q) => q.sessionId === activeId);
     if (idx < 0) return;
     const next = sendQueueRef.current[idx]!;
-    sendQueueRef.current = sendQueueRef.current.filter((_, i) => i !== idx);
-    setSendQueue([...sendQueueRef.current]);
-    void send(next.text, next);
+    queueDrainLockRef.current = true;
+    void (async () => {
+      try {
+        const ok = await send(next.text, next);
+        if (ok) {
+          sendQueueRef.current = sendQueueRef.current.filter((q) => q !== next);
+          setSendQueue([...sendQueueRef.current]);
+        }
+      } finally {
+        queueDrainLockRef.current = false;
+      }
+    })();
   }, [currentSession?.id, running, send]);
 
   if (!ready) {

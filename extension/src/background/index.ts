@@ -193,6 +193,21 @@ async function waitForHistoryNav(
     };
 
     chrome.tabs.onUpdated.addListener(onUpdated);
+    // Poll current state — go_back may finish before the listener is attached.
+    void chrome.tabs.get(tabId).then((t) => {
+      if (t.url) currentUrl = t.url;
+      if (t.status === "loading") sawLoading = true;
+      if (
+        isHistoryNavSettled({
+          startUrl,
+          currentUrl,
+          status: t.status,
+          sawLoading,
+        })
+      ) {
+        void finish();
+      }
+    });
     setTimeout(() => void finish(), timeoutMs);
   });
 }
@@ -435,8 +450,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const before = await chrome.tabs.get(id);
           const startUrl = before.url ?? "";
+          // Register wait *before* goBack so fast history events are not missed.
+          const settledP = waitForHistoryNav(id, startUrl, 15_000);
           await chrome.tabs.goBack(id);
-          const settled = await waitForHistoryNav(id, startUrl, 15_000);
+          const settled = await settledP;
           const ready = await ensureContentReady(id, settled.url || startUrl);
           sendResponse({
             ok: true,
