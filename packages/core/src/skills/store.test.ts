@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TOOL_PACKS } from "../tools/gating.js";
-import { SkillStore, seedSkillDefinitions } from "./store.js";
+import { SEED_REVISION, SkillStore, seedSkillDefinitions } from "./store.js";
 
 const EXPECTED_SEED_NAMES = [
   "combo-scrape",
@@ -13,6 +13,9 @@ const EXPECTED_SEED_NAMES = [
   "combo-memory",
   "combo-subagent",
   "combo-vault-setup",
+  "combo-map",
+  "combo-uploads",
+  "combo-ns-food",
   "combo-pdf-attach",
   "combo-openapi-call",
 ] as const;
@@ -23,11 +26,13 @@ const PLAYBOOK_ONLY = new Set([
   "combo-memory",
   "combo-subagent",
   "combo-vault-setup",
+  "combo-map",
+  "combo-uploads",
   "combo-pdf-attach",
 ]);
 
 describe("SkillStore", () => {
-  it("seeds twelve packs on empty db (unique names)", async () => {
+  it("seeds fifteen packs on empty db (unique names)", async () => {
     const defs = seedSkillDefinitions();
     expect(defs.map((d) => d.name).sort()).toEqual([...EXPECTED_SEED_NAMES].sort());
     expect(new Set(defs.map((d) => d.name)).size).toBe(EXPECTED_SEED_NAMES.length);
@@ -46,6 +51,7 @@ describe("SkillStore", () => {
       expect(byName.get(name)?.toolHints ?? []).toEqual([]);
     }
     expect(byName.get("combo-openapi-call")?.toolHints).toEqual([...TOOL_PACKS.rest]);
+    expect(byName.get("combo-ns-food")?.toolHints).toEqual([...TOOL_PACKS.rest]);
   });
 
   it("upserts missing seed skills on existing db", async () => {
@@ -95,5 +101,30 @@ describe("SkillStore", () => {
     expect(await store.get(row.id)).toBeTruthy();
     expect(await store.delete(row.id)).toBe(true);
     expect(await store.get(row.id)).toBeNull();
+  });
+
+  it("getByName resolves seed names exactly (prefers global)", async () => {
+    const store = new SkillStore({ dbName: `skills_${crypto.randomUUID()}` });
+    const byName = await store.getByName("combo-scrape");
+    expect(byName?.name).toBe("combo-scrape");
+    expect(byName?.scope).toBe("global");
+    expect(await store.getByName("no-such-skill")).toBeNull();
+  });
+
+  it("force-refreshes combo-ux-critique when seed revision advances", async () => {
+    const dbName = `skills_${crypto.randomUUID()}`;
+    const store = new SkillStore({ dbName, skipSeed: true });
+    await store.save({
+      name: "combo-ux-critique",
+      description: "old ux",
+      body: "old playbook",
+      tags: ["seed", "ux"],
+      toolHints: [],
+    });
+    const store2 = new SkillStore({ dbName });
+    const ux = (await store2.list()).find((s) => s.name === "combo-ux-critique");
+    expect(ux?.description).not.toBe("old ux");
+    expect(ux?.body).toContain("annotate_screenshot");
+    expect(ux?.tags).toContain(SEED_REVISION);
   });
 });

@@ -52,10 +52,12 @@ function stubBrowser(): BrowserBridge {
 }
 
 describe("skill gating runtime", () => {
-  it("rejects gated tool until skill_read unlocks it", async () => {
+  async function runUnlockScenario(
+    resolveArgs: (skills: SkillStore) => Promise<Record<string, string>> | Record<string, string>,
+  ) {
     const skills = new SkillStore({ dbName: `gate_${crypto.randomUUID()}` });
-    const scrape = (await skills.list()).find((s) => s.name === "combo-scrape")!;
-    expect(scrape).toBeTruthy();
+    expect((await skills.list()).some((s) => s.name === "combo-scrape")).toBe(true);
+    const skillReadArgs = await resolveArgs(skills);
 
     const llm = mockLlm([
       {
@@ -76,7 +78,7 @@ describe("skill gating runtime", () => {
           {
             id: "c2",
             name: "skill_read",
-            arguments: JSON.stringify({ id: scrape.id }),
+            arguments: JSON.stringify(skillReadArgs),
           },
         ],
       },
@@ -96,9 +98,13 @@ describe("skill gating runtime", () => {
       { content: "done" },
     ]);
 
-    const agent = new AgentLoop(llm, stubBrowser(), new MemoryStore({ dbName: `m_${crypto.randomUUID()}` }));
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `m_${crypto.randomUUID()}` }),
+    );
     const results: unknown[] = [];
-    const toolArgs: string[][] = [];
+    const unlocked: string[][] = [];
 
     await agent.run({
       model: "mock",
@@ -125,21 +131,75 @@ describe("skill gating runtime", () => {
       } as never,
       onEvent: (e) => {
         if (e.type === "tool_result") results.push(e.result);
-        if (e.type === "tool_start" && e.tool) {
-          // capture tools attached would need chat spy — results order is enough
-        }
         if (e.type === "tools_unlocked") {
-          toolArgs.push(e.unlockedTools ?? []);
+          unlocked.push(e.unlockedTools ?? []);
         }
       },
+    });
+
+    return { results, unlocked };
+  }
+
+  it("rejects gated tool until skill_read unlocks it (UUID id)", async () => {
+    const { results, unlocked } = await runUnlockScenario(async (skills) => {
+      const scrape = (await skills.list()).find((s) => s.name === "combo-scrape")!;
+      return { id: scrape.id };
     });
 
     const first = results[0] as { error?: string };
     expect(first?.error).toBe("tool_locked");
     const unlock = results[1] as { ok?: boolean; unlockedTools?: string[] };
     expect(unlock?.ok).toBe(true);
-    expect(toolArgs[0]?.length).toBeGreaterThan(0);
+    expect(unlocked[0]?.length).toBeGreaterThan(0);
     const after = results[2] as { ok?: boolean; error?: string };
     expect(after?.error).not.toBe("tool_locked");
+  });
+
+  it("skill_read unlocks when id is the seed name (combo-scrape)", async () => {
+    const { results, unlocked } = await runUnlockScenario(() => ({ id: "combo-scrape" }));
+
+    expect((results[0] as { error?: string })?.error).toBe("tool_locked");
+    const unlock = results[1] as { ok?: boolean; name?: string };
+    expect(unlock?.ok).toBe(true);
+    expect(unlock?.name).toBe("combo-scrape");
+    expect(unlocked[0]?.length).toBeGreaterThan(0);
+    expect((results[2] as { error?: string })?.error).not.toBe("tool_locked");
+  });
+
+  it("skill_read unlocks via name arg (combo-rag)", async () => {
+    const skills = new SkillStore({ dbName: `gate_${crypto.randomUUID()}` });
+    const llm = mockLlm([
+      {
+        toolCalls: [
+          {
+            id: "c1",
+            name: "skill_read",
+            arguments: JSON.stringify({ name: "combo-rag" }),
+          },
+        ],
+      },
+      { content: "done" },
+    ]);
+    const results: unknown[] = [];
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `m_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "load rag skill",
+      skills,
+      toolMode: "skill_gated",
+      enabledTools: AGENT_TOOLS.map((t) => t.function.name),
+      approvalMode: "auto_all",
+      maxSteps: 4,
+      onEvent: (e) => {
+        if (e.type === "tool_result") results.push(e.result);
+      },
+    });
+    const unlock = results[0] as { ok?: boolean; name?: string };
+    expect(unlock?.ok).toBe(true);
+    expect(unlock?.name).toBe("combo-rag");
   });
 });

@@ -17,6 +17,16 @@ import {
   handlePageExtBridge,
   injectPageExtensionsForTab,
 } from "../lib/page-ext-inject.js";
+import {
+  formatContentFailure,
+  isStaleContentAsset,
+  shouldAttemptContentRecovery,
+} from "./contentRecovery.js";
+import {
+  isHistoryNavSettled,
+  isNavigationSettled,
+  urlsMatchTarget,
+} from "./navWait.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -32,15 +42,230 @@ function contentScriptFiles(): string[] {
   return scripts.flatMap((s) => s.js ?? []);
 }
 
+const STABLE_CONTENT_LOADER = "assets/content-loader.js";
+
 async function reinjectContent(tabId: number): Promise<void> {
   const files = contentScriptFiles();
-  if (files.length === 0) return;
-  await chrome.scripting.executeScript({ target: { tabId }, files });
+  const primary = files.length > 0 ? files : [STABLE_CONTENT_LOADER];
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: primary });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // After vite rebuild, hashed loader may be gone while stable content-loader.js exists.
+    if (
+      isStaleContentAsset(msg) &&
+      !primary.includes(STABLE_CONTENT_LOADER)
+    ) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: [STABLE_CONTENT_LOADER],
+      });
+      return;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Wait for a load cycle to finish. Requires seeing `loading` first so we never
+ * resolve on the previous document's leftover `complete`.
+ */
+function waitTabComplete(tabId: number, timeoutMs = 15_000): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    let sawLoading = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+    const onUpdated = (id: number, info: chrome.tabs.TabChangeInfo) => {
+      if (id !== tabId) return;
+      if (info.status === "loading") sawLoading = true;
+      if (info.status === "complete" && sawLoading) finish();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    void chrome.tabs.get(tabId).then((t) => {
+      if (t.status === "loading") sawLoading = true;
+    });
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+async function waitForNavigation(
+  tabId: number,
+  targetUrl: string,
+  startUrl: string,
+  timeoutMs = 20_000,
+): Promise<{ url: string; title: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    let sawLoading = false;
+    let currentUrl = startUrl;
+
+    const finish = async () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        resolve({ url: t.url ?? currentUrl, title: t.title ?? "" });
+      } catch {
+        resolve({ url: currentUrl, title: "" });
+      }
+    };
+
+    const maybeSettle = (status: string | undefined, url: string | undefined) => {
+      if (url) currentUrl = url;
+      if (status === "loading") sawLoading = true;
+      if (
+        isNavigationSettled({
+          startUrl,
+          targetUrl,
+          currentUrl: url ?? currentUrl,
+          status,
+          sawLoading,
+        })
+      ) {
+        void finish();
+      }
+    };
+
+    const onUpdated = (
+      id: number,
+      info: chrome.tabs.TabChangeInfo,
+      tab: chrome.tabs.Tab,
+    ) => {
+      if (id !== tabId) return;
+      maybeSettle(info.status, info.url ?? tab.url);
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    void chrome.tabs.get(tabId).then((t) => {
+      maybeSettle(t.status, t.url);
+    });
+    setTimeout(() => void finish(), timeoutMs);
+  });
+}
+
+async function waitForHistoryNav(
+  tabId: number,
+  startUrl: string,
+  timeoutMs = 15_000,
+): Promise<{ url: string; title: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    let sawLoading = false;
+    let currentUrl = startUrl;
+
+    const finish = async () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        resolve({ url: t.url ?? currentUrl, title: t.title ?? "" });
+      } catch {
+        resolve({ url: currentUrl, title: "" });
+      }
+    };
+
+    const onUpdated = (
+      id: number,
+      info: chrome.tabs.TabChangeInfo,
+      tab: chrome.tabs.Tab,
+    ) => {
+      if (id !== tabId) return;
+      if (info.url) currentUrl = info.url;
+      else if (tab.url) currentUrl = tab.url;
+      if (info.status === "loading") sawLoading = true;
+      if (
+        isHistoryNavSettled({
+          startUrl,
+          currentUrl,
+          status: info.status,
+          sawLoading,
+        })
+      ) {
+        void finish();
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    setTimeout(() => void finish(), timeoutMs);
+  });
+}
+
+/** After document complete: reinject content and confirm it reports the new URL. */
+async function ensureContentReady(
+  tabId: number,
+  expectedUrl: string,
+  attempts = 6,
+): Promise<{ ok: boolean; url?: string; error?: string }> {
+  // SPA hydrate / late scripts
+  await new Promise((r) => setTimeout(r, 400));
+  let lastUrl = "";
+  let lastErr = "";
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await reinjectContent(tabId);
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+      await new Promise((r) => setTimeout(r, 250 * (i + 1)));
+      continue;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+    try {
+      const raw = await chrome.tabs.sendMessage(tabId, {
+        op: "get_page",
+        mode: "snippet",
+        maxChars: 200,
+      });
+      const url =
+        raw && typeof raw === "object" && raw.ok && raw.data && typeof raw.data === "object"
+          ? String((raw.data as { url?: unknown }).url ?? "")
+          : "";
+      lastUrl = url;
+      if (url && urlsMatchTarget(url, expectedUrl)) {
+        return { ok: true, url };
+      }
+      // Accept any non-empty URL that differs from chrome:// / about: if expected is http(s)
+      if (url && /^https?:/i.test(url) && !urlsMatchTarget(url, "about:blank")) {
+        // Redirect away from target host — still ready, just different final URL
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === "complete" && tab.url && urlsMatchTarget(url, tab.url)) {
+          return { ok: true, url };
+        }
+      }
+      lastErr = url ? `content still on ${url}` : "content missing url";
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return {
+    ok: false,
+    url: tab?.url ?? lastUrl,
+    error: lastErr || "content not ready after navigate",
+  };
 }
 
 async function runContent(request: ContentRequest, tabId?: number): Promise<ContentResponse> {
   const id = tabId ?? (await activeTabId());
   if (id == null) return { ok: false, error: "no active tab" };
+
+  // If a navigation is mid-flight, wait so we don't scrape the previous document.
+  try {
+    const tab = await chrome.tabs.get(id);
+    if (tab.status === "loading") {
+      await waitTabComplete(id, 15_000);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  } catch {
+    /* tab gone */
+  }
 
   const trySend = async (): Promise<ContentResponse> => {
     try {
@@ -55,20 +280,40 @@ async function runContent(request: ContentRequest, tabId?: number): Promise<Cont
   };
 
   let res = await trySend();
-  if (!res.ok && /Receiving end does not exist/i.test(res.error ?? "")) {
+  if (!res.ok && shouldAttemptContentRecovery(res.error)) {
+    // 1) Reinject from current manifest. Stale hashed assets → stop (need extension reload).
     try {
       await reinjectContent(id);
       await new Promise((r) => setTimeout(r, 300));
       res = await trySend();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (isStaleContentAsset(msg) || isStaleContentAsset(res.error)) {
+        return { ok: false, error: formatContentFailure(msg) };
+      }
       res = { ok: false, error: msg };
     }
+
+    if (!res.ok && isStaleContentAsset(res.error)) {
+      return { ok: false, error: formatContentFailure(res.error) };
+    }
+
+    // 2) One tab reload + reinject (orphaned listener after navigate / soft invalidate).
+    if (!res.ok && shouldAttemptContentRecovery(res.error)) {
+      try {
+        await chrome.tabs.reload(id);
+        await waitTabComplete(id);
+        await reinjectContent(id);
+        await new Promise((r) => setTimeout(r, 300));
+        res = await trySend();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        res = { ok: false, error: msg };
+      }
+    }
+
     if (!res.ok) {
-      res = {
-        ok: false,
-        error: `${res.error} — reload the tab so the Combo-X content script can inject`,
-      };
+      res = { ok: false, error: formatContentFailure(res.error) };
     }
   }
   return res;
@@ -104,13 +349,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case "open_tab": {
         try {
+          const targetUrl = parsed.data.url;
           const tab = await chrome.tabs.create({
-            url: parsed.data.url,
+            url: targetUrl,
             active: parsed.data.active ?? true,
           });
+          const id = tab.id;
+          if (id == null) {
+            sendResponse({ ok: false, error: "tab create returned no id" });
+            break;
+          }
+          const settled = await waitForNavigation(id, targetUrl, "chrome://newtab/", 20_000);
+          const ready = await ensureContentReady(id, settled.url || targetUrl);
           sendResponse({
             ok: true,
-            data: { id: tab.id!, url: tab.url ?? parsed.data.url },
+            data: {
+              id,
+              url: ready.url ?? settled.url,
+              title: settled.title,
+              contentReady: ready.ok,
+              ...(ready.ok ? {} : { warning: ready.error }),
+            },
           });
         } catch (e) {
           sendResponse({
@@ -141,8 +400,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ ok: false, error: "no active tab" });
             break;
           }
-          const tab = await chrome.tabs.update(id, { url: parsed.data.url });
-          sendResponse({ ok: true, data: { url: tab?.url ?? parsed.data.url } });
+          const targetUrl = parsed.data.url;
+          const before = await chrome.tabs.get(id);
+          const startUrl = before.url ?? "";
+          await chrome.tabs.update(id, { url: targetUrl });
+          const settled = await waitForNavigation(id, targetUrl, startUrl, 20_000);
+          const ready = await ensureContentReady(id, settled.url || targetUrl);
+          sendResponse({
+            ok: true,
+            data: {
+              url: ready.url ?? settled.url,
+              title: settled.title,
+              previousUrl: startUrl,
+              contentReady: ready.ok,
+              ...(ready.ok ? {} : { warning: ready.error }),
+            },
+          });
         } catch (e) {
           sendResponse({
             ok: false,
@@ -158,8 +431,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ ok: false, error: "no active tab" });
             break;
           }
+          const before = await chrome.tabs.get(id);
+          const startUrl = before.url ?? "";
           await chrome.tabs.goBack(id);
-          sendResponse({ ok: true });
+          const settled = await waitForHistoryNav(id, startUrl, 15_000);
+          const ready = await ensureContentReady(id, settled.url || startUrl);
+          sendResponse({
+            ok: true,
+            data: {
+              url: ready.url ?? settled.url,
+              title: settled.title,
+              contentReady: ready.ok,
+              ...(ready.ok ? {} : { warning: ready.error }),
+            },
+          });
         } catch (e) {
           sendResponse({
             ok: false,
@@ -182,15 +467,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case "download_text": {
         try {
+          const { toDownloadDataUrl, DOWNLOAD_DATA_URL_SOFT_MAX } = await import(
+            "../lib/downloadDataUrl.js"
+          );
           const mime = parsed.data.mime ?? "text/plain";
-          const blob = new Blob([parsed.data.text], { type: mime });
-          const url = URL.createObjectURL(blob);
+          const text = parsed.data.text;
+          const url = toDownloadDataUrl(text, mime);
+          if (url.length > DOWNLOAD_DATA_URL_SOFT_MAX) {
+            sendResponse({
+              ok: false,
+              error: `download too large for data URL (${url.length} chars; max ~${DOWNLOAD_DATA_URL_SOFT_MAX}). Use Open tab on the in-chat preview instead.`,
+            });
+            break;
+          }
           await chrome.downloads.download({
             url,
             filename: parsed.data.filename,
             saveAs: true,
           });
-          setTimeout(() => URL.revokeObjectURL(url), 60_000);
           sendResponse({ ok: true });
         } catch (e) {
           sendResponse({

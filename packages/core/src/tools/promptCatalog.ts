@@ -1,5 +1,6 @@
 /**
- * Compact skill index + tool schemas for system-prompt inject (once per user turn).
+ * Compact skill index + schema-less tool index for system-prompt inject (once per user turn).
+ * Full JSON schemas stay on the OpenAI `tools[]` array for ACTIVE tools only.
  */
 
 import type { Skill } from "../skills/store.js";
@@ -7,9 +8,23 @@ import type { ToolDefinition } from "../llm/openrouter.js";
 import { AGENT_TOOLS } from "../browser/tools.js";
 import { catalogEntry } from "./catalog.js";
 import type { CustomTool } from "./customStore.js";
+import {
+  TOOL_PACKS,
+  packForTool,
+  type ToolPackId,
+} from "./gating.js";
 
-const DEFAULT_TOOL_CHARS = 14_000;
+const DEFAULT_TOOL_CHARS = 6_000;
 const DEFAULT_SKILL_LIMIT = 40;
+
+/** Seed skill that unlocks each gated pack. */
+export const PACK_SKILL_NAMES: Record<ToolPackId, string> = {
+  scrape: "combo-scrape",
+  rest: "combo-rest",
+  rag: "combo-rag",
+  "page-ext": "combo-page-ext",
+  media: "combo-media",
+};
 
 /** Skill name/description/hints only — bodies stay on-demand via skill_read. */
 export function formatSkillIndexBlock(
@@ -31,21 +46,18 @@ export function formatSkillIndexBlock(
   );
 }
 
-function schemaLine(def: ToolDefinition): string {
-  const params = def.function.parameters ?? { type: "object", properties: {} };
-  let json: string;
-  try {
-    json = JSON.stringify(params);
-  } catch {
-    json = "{}";
-  }
-  if (json.length > 900) json = `${json.slice(0, 900)}…`;
-  return json;
+function shortDesc(def: ToolDefinition): string {
+  const meta = catalogEntry(def.function.name);
+  const when = meta?.whenToUse ? ` When: ${meta.whenToUse}` : "";
+  const desc = (def.function.description ?? "").replace(/\s+/g, " ").trim();
+  const clipped = desc.length > 160 ? `${desc.slice(0, 160)}…` : desc;
+  return `${clipped}${when}`;
 }
 
 /**
- * Tool descriptions + JSON-schema parameters for tools in the ceiling.
- * Marks skill-gated tools that are not yet active.
+ * Schema-less tool index for the system prompt.
+ * - ACTIVE tools: one-line name + description (no JSON parameters — those live on tools[]).
+ * - LOCKED packs in the ceiling: pack → skill name + tool name list.
  */
 export function formatToolSchemaBlock(
   ceilingNames: string[],
@@ -60,20 +72,47 @@ export function formatToolSchemaBlock(
   }
 
   const lines: string[] = [
-    "AVAILABLE TOOLS (also exposed as callable tool schemas; prefer tools over inventing):",
+    "TOOL INDEX (no parameter schemas here — callable JSON schemas are attached only for ACTIVE tools via the API tools[] array):",
+    "Locked specialty packs need skill_search → skill_read (e.g. combo-scrape) before they become ACTIVE.",
   ];
-  for (const name of ceilingNames) {
-    const def = byName.get(name);
-    if (!def) continue;
-    const meta = catalogEntry(name);
-    const locked = !active.has(name);
-    const lockNote = locked ? " [LOCKED until skill_read]" : "";
-    const when = meta?.whenToUse ? ` When: ${meta.whenToUse}` : "";
-    lines.push(
-      `### ${def.function.name}${lockNote}\n${def.function.description}${when}\nparameters: ${schemaLine(def)}`,
-    );
+
+  const activeListed = ceilingNames.filter((n) => active.has(n) && byName.has(n));
+  if (activeListed.length) {
+    lines.push(`ACTIVE (${activeListed.length}):`);
+    for (const name of activeListed) {
+      const def = byName.get(name)!;
+      lines.push(`- ${name} — ${shortDesc(def)}`);
+    }
   }
-  let out = lines.join("\n\n");
+
+  const lockedByPack = new Map<ToolPackId, string[]>();
+  const lockedOther: string[] = [];
+  for (const name of ceilingNames) {
+    if (active.has(name) || !byName.has(name)) continue;
+    const pack = packForTool(name);
+    if (pack) {
+      const list = lockedByPack.get(pack) ?? [];
+      list.push(name);
+      lockedByPack.set(pack, list);
+    } else {
+      lockedOther.push(name);
+    }
+  }
+
+  if (lockedByPack.size || lockedOther.length) {
+    lines.push("LOCKED packs (skill_read to unlock; schemas appear after unlock):");
+    for (const pack of Object.keys(TOOL_PACKS) as ToolPackId[]) {
+      const tools = lockedByPack.get(pack);
+      if (!tools?.length) continue;
+      const skill = PACK_SKILL_NAMES[pack];
+      lines.push(`- ${pack} → ${skill}: ${tools.join(", ")}`);
+    }
+    for (const name of lockedOther) {
+      lines.push(`- ${name} [LOCKED until skill_read] — ${shortDesc(byName.get(name)!)}`);
+    }
+  }
+
+  let out = lines.join("\n");
   if (out.length > maxChars) {
     out = `${out.slice(0, maxChars)}\n…(tool catalog truncated)`;
   }

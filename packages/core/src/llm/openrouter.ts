@@ -86,10 +86,29 @@ type RawUsage = {
 
 export interface ChatResult {
   content: string | null;
+  /** Model reasoning / thinking (OpenRouter reasoning tokens). Not sent back in history. */
+  reasoning?: string | null;
   toolCalls: ToolCall[];
   model: string;
   usage: LlmUsage;
   finishReason: string | null;
+}
+
+/** Pull reasoning text from an OpenRouter/OpenAI-compat delta or message. */
+export function extractReasoningText(part: {
+  reasoning?: string | null;
+  reasoning_content?: string | null;
+  reasoning_details?: Array<{ text?: string | null; type?: string } | string> | null;
+} | null | undefined): string {
+  if (!part) return "";
+  const direct = part.reasoning_content ?? part.reasoning;
+  if (typeof direct === "string" && direct) return direct;
+  const details = part.reasoning_details;
+  if (!Array.isArray(details) || details.length === 0) return "";
+  return details
+    .map((d) => (typeof d === "string" ? d : (d?.text ?? "")))
+    .filter(Boolean)
+    .join("");
 }
 
 export interface OpenRouterOptions {
@@ -256,9 +275,20 @@ export class OpenRouterClient {
     }
 
     const choice = json.choices?.[0];
+    const message = choice?.message as
+      | {
+          content?: string | null;
+          tool_calls?: ToolCall[];
+          reasoning?: string | null;
+          reasoning_content?: string | null;
+          reasoning_details?: Array<{ text?: string | null } | string> | null;
+        }
+      | undefined;
+    const reasoning = extractReasoningText(message);
     return {
-      content: choice?.message?.content ?? null,
-      toolCalls: choice?.message?.tool_calls ?? [],
+      content: message?.content ?? null,
+      reasoning: reasoning || null,
+      toolCalls: message?.tool_calls ?? [],
       model: json.model ?? input.model,
       usage: this.estimate(json.usage ?? {}),
       finishReason: choice?.finish_reason ?? null,
@@ -267,7 +297,7 @@ export class OpenRouterClient {
 
   /**
    * Streaming chat with optional tools (OpenAI-compatible SSE).
-   * Calls onDelta with accumulated assistant text as tokens arrive.
+   * Calls onDelta with accumulated assistant text; onReasoning for thinking tokens.
    */
   async chatStreaming(input: {
     model: string;
@@ -277,6 +307,7 @@ export class OpenRouterClient {
     maxTokens?: number;
     signal?: AbortSignal;
     onDelta?: (accumulated: string) => void;
+    onReasoning?: (accumulated: string) => void;
   }): Promise<ChatResult> {
     const body: Record<string, unknown> = {
       model: input.model,
@@ -304,6 +335,7 @@ export class OpenRouterClient {
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    let reasoning = "";
     let finishReason: string | null = null;
     let usage = emptyUsage();
     const toolAcc = new Map<
@@ -329,6 +361,9 @@ export class OpenRouterClient {
               finish_reason?: string | null;
               delta?: {
                 content?: string | null;
+                reasoning?: string | null;
+                reasoning_content?: string | null;
+                reasoning_details?: Array<{ text?: string | null } | string> | null;
                 tool_calls?: Array<{
                   index?: number;
                   id?: string;
@@ -352,6 +387,11 @@ export class OpenRouterClient {
           if (delta?.content) {
             content += delta.content;
             input.onDelta?.(content);
+          }
+          const reasonChunk = extractReasoningText(delta);
+          if (reasonChunk) {
+            reasoning += reasonChunk;
+            input.onReasoning?.(reasoning);
           }
           for (const tc of delta?.tool_calls ?? []) {
             const idx = tc.index ?? 0;
@@ -382,6 +422,7 @@ export class OpenRouterClient {
 
     return {
       content: content || null,
+      reasoning: reasoning || null,
       toolCalls,
       model: input.model,
       usage,

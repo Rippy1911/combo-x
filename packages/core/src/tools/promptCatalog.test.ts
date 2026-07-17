@@ -24,12 +24,14 @@ describe("promptCatalog inject", () => {
     expect(block).not.toContain("SECRET BODY");
   });
 
-  it("includes parameters schema and lock marker", () => {
+  it("schema-less index: active lines + locked pack→skill (no parameters JSON)", () => {
     const block = formatToolSchemaBlock(["navigate", "scrape_pdps"], ["navigate"]);
-    expect(block).toContain("### navigate");
-    expect(block).toContain("parameters:");
+    expect(block).toContain("TOOL INDEX");
+    expect(block).toContain("ACTIVE");
+    expect(block).toContain("- navigate —");
+    expect(block).toContain("scrape → combo-scrape");
     expect(block).toContain("scrape_pdps");
-    expect(block).toContain("[LOCKED until skill_read]");
-    expect(block).not.toMatch(/### navigate\[LOCKED/);
+    expect(block).not.toContain("parameters:");
+    expect(block).not.toMatch(/"type"\s*:\s*"object"/);
   });
 });

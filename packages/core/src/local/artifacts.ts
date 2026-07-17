@@ -118,10 +118,40 @@ export class ArtifactStore {
     return row;
   }
 
+  async getReport(id: string): Promise<ReportArtifact | null> {
+    await this.getDb();
+    const row = await idbReq<ReportArtifact | undefined>(
+      this.store("reports", "readonly").get(id),
+    );
+    return row ?? null;
+  }
+
   async listReports(): Promise<ReportArtifact[]> {
     await this.getDb();
     const rows = await idbReq<ReportArtifact[]>(this.store("reports", "readonly").getAll());
     return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async deleteReport(id: string): Promise<boolean> {
+    await this.getDb();
+    const existing = await this.getReport(id);
+    if (!existing) return false;
+    await idbReq(this.store("reports", "readwrite").delete(id));
+    return true;
+  }
+
+  async clearReports(): Promise<number> {
+    const rows = await this.listReports();
+    if (rows.length === 0) return 0;
+    await this.getDb();
+    await idbReq(this.store("reports", "readwrite").clear());
+    return rows.length;
+  }
+
+  /** Approx UTF-16 / storage footprint of report HTML bodies. */
+  async reportsBytes(): Promise<number> {
+    const rows = await this.listReports();
+    return rows.reduce((n, r) => n + (r.bodyHtml?.length ?? 0) * 2 + r.title.length * 2, 0);
   }
 }
 

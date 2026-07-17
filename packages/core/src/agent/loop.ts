@@ -6,9 +6,13 @@ import {
 } from "../attachments/parse.js";
 import type { ViewChartSpec, ViewStore } from "../local/views.js";
 import { ensureView, upsertRows } from "../local/views.js";
+import type { ApprovalPolicyStore } from "../local/approvalPolicy.js";
+import type { ChangeLogStore } from "../local/changeLog.js";
 import type { ConnectorStore } from "../connectors/store.js";
 import { restRequest } from "../connectors/rest.js";
 import { mcpCall, mcpListTools } from "../connectors/mcp.js";
+import { buildMapHtml, fetchMapStyleJson } from "../maps/buildMapHtml.js";
+import { dataUrlToBytes, publishUpload } from "../uploads/publish.js";
 import {
   resolveAgentProfile,
   type AgentProfile,
@@ -21,6 +25,7 @@ import { formatOpenTasksBlock } from "../tasks/inject.js";
 import { providerFromModel, type UsageEvent, type UsageStore } from "../usage/store.js";
 import { TOOL_CATALOG } from "../tools/catalog.js";
 import {
+  ensureForceAttachTools,
   initialActiveTools,
   isSkillGatedTool,
   unlockFromHints,
@@ -36,7 +41,7 @@ import {
   type CustomTool,
   type CustomToolStore,
 } from "../tools/customStore.js";
-import type { SkillStore } from "../skills/store.js";
+import type { Skill, SkillStore } from "../skills/store.js";
 import {
   BUDGET_SYSTEM_ADDON,
   preferPageDigest,
@@ -73,6 +78,13 @@ import {
   type PendingVision,
 } from "../vision/promote.js";
 import {
+  buildAnnotateScreenshotHtml,
+  isSafeDataUrlForSrcDoc,
+  type AnnotateHighlight,
+  type AnnotateMarker,
+} from "../vision/annotateHtml.js";
+import { embedAttachmentsInHtml } from "../vision/embedAttachments.js";
+import {
   mergeVisionSettings,
   type ImageDetail,
   type VisionSettings,
@@ -83,10 +95,25 @@ export type ApprovalMode = "ask" | "auto_llm" | "auto_all";
 export interface BrowserBridge {
   runContent(request: ContentRequest, tabId?: number): Promise<ContentResponse>;
   listTabs(): Promise<Array<{ id: number; title: string; url: string }>>;
-  openTab(url: string, active?: boolean): Promise<{ id: number; url: string }>;
+  openTab(
+    url: string,
+    active?: boolean,
+  ): Promise<{ id: number; url: string; title?: string; contentReady?: boolean; warning?: string }>;
   activateTab(tabId: number): Promise<{ ok: boolean }>;
-  navigate(url: string, tabId?: number): Promise<{ ok: boolean; url: string }>;
-  goBack(tabId?: number): Promise<{ ok: boolean }>;
+  navigate(
+    url: string,
+    tabId?: number,
+  ): Promise<{
+    ok: boolean;
+    url: string;
+    title?: string;
+    previousUrl?: string;
+    contentReady?: boolean;
+    warning?: string;
+  }>;
+  goBack(
+    tabId?: number,
+  ): Promise<{ ok: boolean; url?: string; title?: string; contentReady?: boolean; warning?: string }>;
   closeTab(tabId: number): Promise<{ ok: boolean }>;
   downloadText(filename: string, text: string, mime?: string): Promise<{ ok: boolean }>;
   captureViewport?(windowId?: number): Promise<import("../media/capture.js").ScreenshotResult>;
@@ -138,7 +165,7 @@ export type RunContextSnapshot = {
   taskBlock: string;
   /** Skill name/description index (bodies via skill_read). */
   skillBlock: string;
-  /** Tool descriptions + JSON-schema parameters for ceiling tools. */
+  /** Schema-less tool index (pack→skill); JSON schemas live on API tools[] only. */
   toolCatalogBlock: string;
   toolNames: string[];
   model: string;
@@ -157,6 +184,10 @@ export type ChatPreviewPayload = {
   src?: string;
   beforeSrc?: string;
   afterSrc?: string;
+  /** Prefer over embedding data URLs when persisting the chat timeline. */
+  attachmentId?: string;
+  beforeAttachmentId?: string;
+  afterAttachmentId?: string;
   /** html only — scripts allowed when true (sandbox never includes allow-same-origin). */
   interactive?: boolean;
 };
@@ -168,6 +199,7 @@ export interface AgentEvent {
     | "tool_result"
     | "tool_approval"
     | "assistant_delta"
+    | "reasoning_delta"
     | "done"
     | "error"
     | "usage"
@@ -261,6 +293,10 @@ export interface AgentRunOptions {
   openRouterVision?: ReadonlyMap<string, boolean> | Record<string, boolean>;
   /** Named Views (Views tab / save_view) */
   views?: ViewStore;
+  /** Per-action Always Allow policies (tool ± target). */
+  approvalPolicies?: ApprovalPolicyStore;
+  /** Table mutation delta log (Changes tab). */
+  changeLog?: ChangeLogStore;
   /** Minimize steps/tokens — prefer page_digest + worker parse */
   budgetMode?: AgentBudgetMode;
   /** Sub-agent nesting depth (0 = root orchestrator). */
@@ -289,15 +325,16 @@ export interface AgentRunResult {
 }
 
 const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
-You CAN open tabs (open_tab), navigate the current tab (navigate), go_back, and close_tab.
-For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS.
+Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
+For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time.
 SKILLS vs MEMORY:
 - Memories are already prepended in the system message each turn (global + active agent). Do not re-fetch them mid-stream.
 - Skill descriptions are listed in AVAILABLE SKILLS below. Use skill_search / skill_read for the full body AND to unlock specialized tools (scrape, rest, rag, page-ext, media).
 - Use skill_save to create/update playbooks when that tool is enabled. Use custom_tool_save / list_custom_tools for user-defined tools when enabled.
-- If a tool is marked [LOCKED until skill_read], skill_search → skill_read the matching skill (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media).
+- TOOL INDEX lists ACTIVE tools (one-liners) and LOCKED packs (pack → combo-* skill). Parameter schemas are NOT in the system prompt — only on the attached tools[] for ACTIVE tools.
+- For LOCKED packs: skill_search → skill_read (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media) to unlock; then those tools join tools[] with full schemas.
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
-UX Vision Lab: ux_critique (always-on) captures + vision-attaches a screenshot for the next turn. Prefer it for design feedback. open_preview shows HTML/image prototypes inside chat. Raw screenshot_* tools need combo-media. Tool results are stubs (attachmentId) — never paste base64.
+UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) — do not answer from get_page alone. It captures, shows a chat screenshot artifact, and vision-attaches for the next turn. Then annotate_screenshot({ attachmentId, markers }) and/or open_preview with attachmentId / beforeAttachmentId / afterAttachmentId. Optional live CSS: page_css_preview → ux_critique again → compare → page_css_clear. Raw screenshot_* need combo-media. Never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 Rules:
 - Prefer page_digest over full get_page dumps.
@@ -359,7 +396,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-const META_TASK_TOOLS = ["create_task", "list_tasks", "update_task"];
+const META_TASK_TOOLS = ["create_task", "list_tasks", "update_task", "reorder_tasks"];
 
 function mergeToolNames(...groups: string[][]): string[] {
   const seen = new Set<string>();
@@ -409,6 +446,8 @@ interface RunContext {
   connectors?: ConnectorRuntime;
   attachments?: AttachmentStore;
   views?: ViewStore;
+  approvalPolicies?: ApprovalPolicyStore;
+  changeLog?: ChangeLogStore;
   approvalMode?: ApprovalMode;
   getApprovalMode?: () => ApprovalMode;
   approvalModel?: string;
@@ -417,6 +456,8 @@ interface RunContext {
   pendingVision: PendingVision | null;
   visionSettings: VisionSettings;
   openRouterVision?: ReadonlyMap<string, boolean> | Record<string, boolean>;
+  /** Tabs opened via open_tab(newTab:true) this run — closed on finish unless keepOpen. */
+  ephemeralTabIds: number[];
 }
 
 export class AgentLoop {
@@ -485,6 +526,8 @@ export class AgentLoop {
       options.enabledTools != null
         ? [...options.enabledTools]
         : AGENT_TOOLS.map((t) => t.function.name);
+    // Stale allowlists often omit Vision Lab — force-attach so "MUST call ux_critique" is callable.
+    enabledToolNames = ensureForceAttachTools(enabledToolNames);
     // Custom tools always join the ceiling when present (unless explicitly stripped).
     for (const c of customRows) {
       if (!enabledToolNames.includes(c.name)) enabledToolNames.push(c.name);
@@ -528,7 +571,7 @@ export class AgentLoop {
     const skillBlock = await this.formatSkillInject(options.agentId, options.skills);
     const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
       custom: customRows,
-      maxChars: budgetMode === "budget" ? 8_000 : 14_000,
+      maxChars: budgetMode === "budget" ? 4_000 : 6_000,
     });
     const systemParts = [
       systemBase,
@@ -589,6 +632,8 @@ export class AgentLoop {
       connectors: options.connectors,
       attachments: options.attachments,
       views: options.views,
+      approvalPolicies: options.approvalPolicies,
+      changeLog: options.changeLog,
       approvalMode: options.approvalMode ?? resolvedProfile?.approvalMode,
       getApprovalMode: options.getApprovalMode,
       approvalModel: options.approvalModel,
@@ -597,6 +642,7 @@ export class AgentLoop {
       pendingVision: null,
       visionSettings,
       openRouterVision: options.openRouterVision,
+      ephemeralTabIds: [],
     };
     // Point rebuild at runCtx so unlocks sync both arrays.
     runCtx.rebuildTools = () => {
@@ -604,10 +650,40 @@ export class AgentLoop {
       rebuildTools();
     };
 
+    const finishRun = async (
+      outcome: {
+        finalText: string;
+        aborted: boolean;
+        hitStepLimit: boolean;
+        doneMessage?: string;
+      },
+    ) => {
+      for (const tabId of runCtx.ephemeralTabIds) {
+        try {
+          await this.browser.closeTab(tabId);
+        } catch {
+          /* tab may already be closed */
+        }
+      }
+      runCtx.ephemeralTabIds = [];
+      emit({
+        type: "done",
+        message: outcome.doneMessage ?? outcome.finalText,
+        usage,
+      });
+      return {
+        messages,
+        finalText: outcome.finalText,
+        steps,
+        usage,
+        aborted: outcome.aborted,
+        hitStepLimit: outcome.hitStepLimit,
+      };
+    };
+
     for (let step = 0; step < maxSteps; step += 1) {
       if (options.signal?.aborted) {
-        emit({ type: "done", message: "aborted", usage });
-        return { messages, finalText, steps, usage, aborted: true, hitStepLimit: false };
+        return finishRun({ finalText, aborted: true, hitStepLimit: false, doneMessage: "aborted" });
       }
 
       // Refresh schemas after possible skill_read unlocks from the previous step.
@@ -637,6 +713,9 @@ export class AgentLoop {
             onDelta: (accumulated) => {
               emit({ type: "assistant_delta", message: accumulated });
             },
+            onReasoning: (accumulated) => {
+              emit({ type: "reasoning_delta", message: accumulated });
+            },
           });
         } else {
           result = await this.llm.chat({
@@ -645,6 +724,9 @@ export class AgentLoop {
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
           });
+          if (result.reasoning?.trim()) {
+            emit({ type: "reasoning_delta", message: result.reasoning });
+          }
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -670,8 +752,7 @@ export class AgentLoop {
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });
         await logUsage({ kind: "message", role: "assistant" });
-        emit({ type: "done", usage });
-        return { messages, finalText, steps, usage, aborted: false, hitStepLimit: false };
+        return finishRun({ finalText, aborted: false, hitStepLimit: false });
       }
 
       messages.push({
@@ -682,8 +763,12 @@ export class AgentLoop {
 
       for (const call of result.toolCalls) {
         if (options.signal?.aborted) {
-          emit({ type: "done", message: "aborted", usage });
-          return { messages, finalText, steps, usage, aborted: true, hitStepLimit: false };
+          return finishRun({
+            finalText,
+            aborted: true,
+            hitStepLimit: false,
+            doneMessage: "aborted",
+          });
         }
 
         const args = parseToolArguments(call.function.arguments);
@@ -708,6 +793,7 @@ export class AgentLoop {
               estimatedCostUsd: u.estimatedCostUsd,
             });
           },
+          options.approvalPolicies,
         );
         const decision = approvalDecisionFor(modeNow, allowed, sensitive);
         if (!allowed) {
@@ -761,8 +847,7 @@ export class AgentLoop {
       `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + parse_data + export_csv).`;
     messages.push({ role: "assistant", content: finalText });
     await logUsage({ kind: "message", role: "assistant" });
-    emit({ type: "done", message: finalText, usage });
-    return { messages, finalText, steps, usage, aborted: false, hitStepLimit: true };
+    return finishRun({ finalText, aborted: false, hitStepLimit: true, doneMessage: finalText });
   }
 
   private async approve(
@@ -773,6 +858,7 @@ export class AgentLoop {
     emit: (e: AgentEvent) => void,
     signal: AbortSignal | undefined,
     onUsage: (u: LlmUsage) => void,
+    approvalPolicies?: ApprovalPolicyStore,
   ): Promise<boolean> {
     if (!SENSITIVE_TOOLS.has(call.function.name)) return true;
     // Page-extension lifecycle that installs MAIN-world JS must never auto-approve.
@@ -781,6 +867,13 @@ export class AgentLoop {
       "set_page_extension_bridge",
       "inject_page_extension",
     ]);
+    if (
+      !alwaysAskUser.has(call.function.name) &&
+      approvalPolicies &&
+      (await approvalPolicies.allows(call.function.name, args))
+    ) {
+      return true;
+    }
     if (alwaysAskUser.has(call.function.name)) {
       /* fall through to ask / UI gate even under auto_all */
     } else if (mode === "auto_all") {
@@ -833,6 +926,88 @@ export class AgentLoop {
         },
       });
     });
+  }
+
+  /**
+   * Same system/memory/tasks/skills/tool-index blocks as the next run(), without calling the LLM.
+   * Used by the composer “Preview” button.
+   */
+  async previewRunContext(
+    options: AgentRunOptions,
+  ): Promise<RunContextSnapshot & { userPreview: string; historyTurns: number }> {
+    let resolvedProfile: ResolvedAgentProfile | null = null;
+    if (options.agentId && options.agents) {
+      const profile = await options.agents.get(options.agentId);
+      if (profile) resolvedProfile = resolveAgentProfile(profile);
+    }
+    const budgetMode =
+      options.budgetMode ?? resolvedProfile?.budgetMode ?? "normal";
+    const orchestratorModel = resolvedProfile?.orchestratorModel ?? options.model;
+    let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
+    if (budgetMode === "budget") systemBase = `${systemBase}\n\n${BUDGET_SYSTEM_ADDON}`;
+
+    const customRows = options.customTools ? await options.customTools.list() : [];
+    let enabledToolNames =
+      options.enabledTools != null
+        ? [...options.enabledTools]
+        : AGENT_TOOLS.map((t) => t.function.name);
+    enabledToolNames = ensureForceAttachTools(enabledToolNames);
+    for (const c of customRows) {
+      if (!enabledToolNames.includes(c.name)) enabledToolNames.push(c.name);
+    }
+    if (resolvedProfile && !resolvedProfile.canSelfEdit) {
+      enabledToolNames = enabledToolNames.filter(
+        (n) => n !== "create_agent" && n !== "update_agent",
+      );
+    }
+    if (resolvedProfile && !resolvedProfile.canDelegate) {
+      enabledToolNames = enabledToolNames.filter((n) => n !== "spawn_subagent");
+    }
+    const ceiling = new Set(enabledToolNames);
+    const toolMode: AgentToolMode =
+      options.toolMode ??
+      resolvedProfile?.toolMode ??
+      (options.skills ? "skill_gated" : "static");
+    let activeToolNames =
+      toolMode === "skill_gated"
+        ? [
+            ...initialActiveTools(ceiling),
+            ...customRows.map((c) => c.name).filter((n) => ceiling.has(n)),
+          ]
+        : enabledToolNames.filter((n) => ceiling.has(n));
+    activeToolNames = [...new Set(activeToolNames)];
+
+    const memoryBlock = await this.formatMemoryInject(options.agentId);
+    const taskBlock = await this.formatTaskInject(options.sessionId, options.tasks);
+    const skillBlock = await this.formatSkillInject(options.agentId, options.skills);
+    const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
+      custom: customRows,
+      maxChars: budgetMode === "budget" ? 4_000 : 6_000,
+    });
+    const userContent = await this.buildUserContent(options);
+    const userPreview =
+      typeof userContent === "string"
+        ? userContent
+        : userContent
+            .map((p) => {
+              if (p.type === "text") return p.text;
+              if (p.type === "image_url") return "[image attachment]";
+              return "[content part]";
+            })
+            .join("\n");
+    const preferStream = typeof this.llm.chatStreaming === "function";
+    return {
+      systemPrompt: systemBase,
+      memoryBlock,
+      taskBlock,
+      skillBlock,
+      toolCatalogBlock,
+      toolNames: activeToolNames,
+      model: orchestratorModel,
+      transport: preferStream ? "stream" : "full",
+      userPreview,
+      historyTurns: options.history?.length ?? 0,
+    };
   }
 
   /** First-call inject: always prepend global + active-agent memories (not mid-stream). */
@@ -1018,6 +1193,7 @@ export class AgentLoop {
         kind: "image",
         title: `Screenshot · ${label}`,
         src: promoted.dataUrl,
+        attachmentId,
       },
     });
 
@@ -1091,11 +1267,29 @@ export class AgentLoop {
     };
   }
 
-  private handleOpenPreview(
+  private async resolveAttachmentDataUrl(
+    id: unknown,
+    runCtx: RunContext | undefined,
+  ): Promise<string | null> {
+    if (typeof id !== "string" || !id.trim() || !runCtx?.attachments) return null;
+    const row = await runCtx.attachments.get(id.trim());
+    const src = row?.dataUrl;
+    if (!src || !src.startsWith("data:image/")) return null;
+    return src;
+  }
+
+  /** Drop megabase64 image args — models must use attachmentId instead. */
+  private sanitizePreviewSrc(raw: unknown): string | undefined {
+    if (typeof raw !== "string" || !raw.trim()) return undefined;
+    if (raw.startsWith("data:image/") && raw.length > 8_000) return undefined;
+    return raw;
+  }
+
+  private async handleOpenPreview(
     args: Record<string, unknown>,
     runCtx: RunContext | undefined,
     emit: (e: AgentEvent) => void,
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
     const kindRaw = String(args.kind ?? "text");
     const allowedKinds = new Set(["table", "html", "text", "image", "compare"]);
     const kind = allowedKinds.has(kindRaw)
@@ -1112,6 +1306,55 @@ export class AgentLoop {
             : interactiveSetting
         : false;
 
+    let src = this.sanitizePreviewSrc(args.src);
+    let beforeSrc = this.sanitizePreviewSrc(args.beforeSrc);
+    let afterSrc = this.sanitizePreviewSrc(args.afterSrc);
+
+    if (kind === "image" || kind === "compare") {
+      const fromAtt = await this.resolveAttachmentDataUrl(args.attachmentId, runCtx);
+      if (fromAtt) src = fromAtt;
+      const beforeAtt = await this.resolveAttachmentDataUrl(
+        args.beforeAttachmentId,
+        runCtx,
+      );
+      if (beforeAtt) beforeSrc = beforeAtt;
+      const afterAtt = await this.resolveAttachmentDataUrl(
+        args.afterAttachmentId,
+        runCtx,
+      );
+      if (afterAtt) afterSrc = afterAtt;
+    }
+
+    if (kind === "image" && !src) {
+      return {
+        ok: false,
+        error: "image preview needs attachmentId (or a small non-data src)",
+      };
+    }
+    if (kind === "compare" && !beforeSrc && !afterSrc) {
+      return {
+        ok: false,
+        error: "compare needs beforeAttachmentId/afterAttachmentId (or small srcs)",
+      };
+    }
+
+    let html = typeof args.html === "string" ? args.html : undefined;
+    const attachIds = Array.isArray(args.attachmentIds)
+      ? args.attachmentIds.map(String)
+      : undefined;
+    let embedded: string[] = [];
+    let missingAtt: string[] = [];
+    if (kind === "html" && html) {
+      const emb = await embedAttachmentsInHtml(
+        html,
+        (id) => this.resolveAttachmentDataUrl(id, runCtx),
+        { attachmentIds: attachIds, maxHtmlChars: 2_000_000 },
+      );
+      html = emb.html;
+      embedded = emb.embedded;
+      missingAtt = emb.missing;
+    }
+
     const preview: ChatPreviewPayload = {
       kind,
       title: String(args.title ?? "Preview"),
@@ -1123,17 +1366,18 @@ export class AgentLoop {
             Array.isArray(r) ? r.map(String) : [String(r)],
           )
         : undefined,
-      html: typeof args.html === "string" ? args.html : undefined,
+      html,
       text: typeof args.text === "string" ? args.text : undefined,
-      src: typeof args.src === "string" ? args.src : undefined,
-      beforeSrc: typeof args.beforeSrc === "string" ? args.beforeSrc : undefined,
-      afterSrc: typeof args.afterSrc === "string" ? args.afterSrc : undefined,
+      src,
+      beforeSrc,
+      afterSrc,
       interactive,
     };
 
-    // Hard cap HTML size to avoid sidepanel OOM
-    if (preview.html && preview.html.length > 400_000) {
-      return { ok: false, error: "html too large (max 400KB)" };
+    // Hard cap HTML size to avoid sidepanel OOM (raised when embedding screenshots)
+    const htmlCap = embedded.length ? 2_000_000 : 400_000;
+    if (preview.html && preview.html.length > htmlCap) {
+      return { ok: false, error: `html too large (max ${htmlCap} chars)` };
     }
 
     emit({ type: "preview", preview });
@@ -1142,6 +1386,74 @@ export class AgentLoop {
       opened: preview.kind,
       title: preview.title,
       interactive: preview.interactive ?? false,
+      embeddedAttachments: embedded,
+      missingAttachments: missingAtt.length ? missingAtt : undefined,
+      resolvedFromAttachment: Boolean(
+        args.attachmentId ||
+          args.beforeAttachmentId ||
+          args.afterAttachmentId ||
+          embedded.length,
+      ),
+    };
+  }
+
+  private async handleAnnotateScreenshot(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+    emit: (e: AgentEvent) => void,
+  ): Promise<Record<string, unknown>> {
+    const attachmentId =
+      typeof args.attachmentId === "string" ? args.attachmentId.trim() : "";
+    if (!attachmentId) return { ok: false, error: "attachmentId required" };
+    const src = await this.resolveAttachmentDataUrl(attachmentId, runCtx);
+    if (!src) return { ok: false, error: "attachment not found or not an image" };
+    if (!isSafeDataUrlForSrcDoc(src)) {
+      return { ok: false, error: "screenshot too large to embed in annotate preview" };
+    }
+
+    const markers: AnnotateMarker[] = Array.isArray(args.markers)
+      ? args.markers
+          .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+          .map((m) => ({
+            x: Number(m.x),
+            y: Number(m.y),
+            label: String(m.label ?? ""),
+            note: typeof m.note === "string" ? m.note : undefined,
+          }))
+          .filter((m) => m.label)
+      : [];
+    const highlights: AnnotateHighlight[] = Array.isArray(args.highlights)
+      ? args.highlights
+          .filter((h): h is Record<string, unknown> => !!h && typeof h === "object")
+          .map((h) => ({
+            x: Number(h.x),
+            y: Number(h.y),
+            w: Number(h.w),
+            h: Number(h.h),
+            label: typeof h.label === "string" ? h.label : undefined,
+          }))
+      : [];
+
+    const title = String(args.title ?? "Annotated screenshot");
+    const html = buildAnnotateScreenshotHtml({ title, src, markers, highlights });
+    if (html.length > 400_000) {
+      return { ok: false, error: "annotate html too large (max 400KB)" };
+    }
+
+    const preview: ChatPreviewPayload = {
+      kind: "html",
+      title,
+      html,
+      interactive: false,
+    };
+    emit({ type: "preview", preview });
+    return {
+      ok: true,
+      opened: "html",
+      title,
+      attachmentId,
+      markerCount: markers.length,
+      highlightCount: highlights.length,
     };
   }
 
@@ -1173,13 +1485,14 @@ export class AgentLoop {
     for (const r of rows) {
       if (r.kind === "image" || !r.text) continue;
       const slice = r.text.slice(0, ATTACH_INLINE_PREVIEW);
-      previews.push(
-        `--- ${r.name} (id=${r.id}) preview ---\n${slice}${
-          r.text.length > ATTACH_INLINE_PREVIEW || r.truncated
-            ? "\n…(truncated; use read_attachment for more)"
-            : ""
-        }`,
-      );
+      const truncated = r.text.length > ATTACH_INLINE_PREVIEW || r.truncated;
+      const csvHint =
+        r.kind === "csv" || /\.csv$/i.test(r.name)
+          ? `\n⚠️ CSV preview only (${r.text.length} chars total). For ALL rows call parse_data({ attachmentId: "${r.id}", intent: "…" }) — do NOT paste this preview into text=.`
+          : truncated
+            ? `\n…(truncated; use read_attachment id=${r.id} or parse_data attachmentId)`
+            : "";
+      previews.push(`--- ${r.name} (id=${r.id}) preview ---\n${slice}${csvHint}`);
     }
 
     const textBlock = [
@@ -1268,7 +1581,31 @@ export class AgentLoop {
         result = { tabs: await this.browser.listTabs() };
       } else if (name === "open_tab") {
         const url = String(args.url ?? "");
-        result = await this.browser.openTab(url, true);
+        const forceNew = args.newTab === true || args.forceNew === true;
+        if (!forceNew) {
+          // Default: same-tab navigate — models over-use open_tab and litter windows.
+          const nav = await this.browser.navigate(url);
+          result = {
+            ok: nav.ok,
+            url: nav.url,
+            mode: "navigated",
+            note: "Used navigate on the active tab. Pass newTab:true only when a parallel tab is required.",
+          };
+        } else {
+          const opened = await this.browser.openTab(url, true);
+          const keepOpen = args.keepOpen === true;
+          if (!keepOpen && typeof opened.id === "number") {
+            runCtx?.ephemeralTabIds.push(opened.id);
+          }
+          result = {
+            ...opened,
+            mode: "new_tab",
+            keepOpen,
+            note: keepOpen
+              ? "Tab left open (keepOpen:true). Close with close_tab when done."
+              : "Tab will auto-close at end of this turn.",
+          };
+        }
       } else if (name === "activate_tab") {
         result = await this.browser.activateTab(Number(args.tabId));
       } else if (name === "navigate") {
@@ -1278,7 +1615,7 @@ export class AgentLoop {
       } else if (name === "close_tab") {
         result = await this.browser.closeTab(Number(args.tabId));
       } else if (name === "parse_data") {
-        result = await this.parseData(args, workerModel, emit, workerOnUsage);
+        result = await this.parseData(args, workerModel, emit, workerOnUsage, attachments);
       } else if (name === "rag_status") {
         if (!rag) result = { ok: false, error: "rag store unavailable" };
         else {
@@ -1351,7 +1688,7 @@ export class AgentLoop {
         if (!attachments) result = { ok: false, error: "attachment store unavailable" };
         else {
           const id = String(args.id ?? args.name ?? "");
-          const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
+          const maxChars = typeof args.maxChars === "number" ? args.maxChars : 200_000;
           const file = await attachments.read(id, maxChars);
           result = file
             ? { ok: true, ...file }
@@ -1426,17 +1763,22 @@ export class AgentLoop {
       } else if (name === "skill_read") {
         if (!runCtx?.skills) result = { ok: false, error: "skills store unavailable" };
         else {
-          let skill =
-            typeof args.id === "string" && args.id.trim()
-              ? await runCtx.skills.get(args.id.trim())
-              : null;
-          if (!skill && typeof args.name === "string" && args.name.trim()) {
-            const skillName = args.name.trim();
-            const hits = await runCtx.skills.search(skillName, {
-              agentId: runCtx.agentId,
-              limit: 5,
-            });
-            skill = hits.find((h) => h.name === skillName) ?? hits[0] ?? null;
+          const idArg = typeof args.id === "string" ? args.id.trim() : "";
+          const nameArg = typeof args.name === "string" ? args.name.trim() : "";
+          let skill: Skill | null = idArg ? await runCtx.skills.get(idArg) : null;
+          // Models often pass seed names as id (index lists names, not UUIDs).
+          if (!skill && idArg) {
+            skill = await runCtx.skills.getByName(idArg, { agentId: runCtx.agentId });
+          }
+          if (!skill && nameArg) {
+            skill = await runCtx.skills.getByName(nameArg, { agentId: runCtx.agentId });
+            if (!skill) {
+              const hits = await runCtx.skills.search(nameArg, {
+                agentId: runCtx.agentId,
+                limit: 5,
+              });
+              skill = hits.find((h) => h.name === nameArg) ?? hits[0] ?? null;
+            }
           }
           if (!skill) result = { ok: false, error: "skill not found" };
           else {
@@ -1564,30 +1906,110 @@ export class AgentLoop {
         });
       } else if (name === "create_report") {
         const title = String(args.title ?? "Report");
-        const bodyHtml = String(args.bodyHtml ?? "");
+        let bodyHtml = String(args.bodyHtml ?? "");
+        const attachIds = Array.isArray(args.attachmentIds)
+          ? args.attachmentIds.map(String)
+          : undefined;
+        const emb = await embedAttachmentsInHtml(
+          bodyHtml,
+          (id) => this.resolveAttachmentDataUrl(id, runCtx),
+          { attachmentIds: attachIds, maxHtmlChars: 2_000_000 },
+        );
+        bodyHtml = emb.html;
         const saved = await this.artifacts.saveReport({ title, bodyHtml });
         const html = buildReportHtml(title, bodyHtml);
-        const dl = await this.browser.downloadText(
-          `${title.replace(/[^\w.-]+/g, "_").slice(0, 40)}.html`,
-          html,
-          "text/html",
-        );
-        result = { ...saved, download: dl };
+        // Always surface in chat (download may still fail on huge payloads).
+        emit({
+          type: "preview",
+          preview: {
+            kind: "html",
+            title,
+            html,
+            interactive: true,
+          },
+        });
+        let download: { ok: boolean; error?: string } = { ok: true };
+        try {
+          download = await this.browser.downloadText(
+            `${title.replace(/[^\w.-]+/g, "_").slice(0, 40)}.html`,
+            html,
+            "text/html",
+          );
+        } catch (e) {
+          download = {
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+        result = {
+          ...saved,
+          download,
+          embeddedAttachments: emb.embedded,
+          missingAttachments: emb.missing.length ? emb.missing : undefined,
+          hint: download.ok
+            ? "Report downloaded + opened in chat preview. Use Open tab for fullscreen."
+            : `Saved + opened in chat preview; download failed (${download.error ?? "unknown"}). Use Open tab.`,
+        };
+      } else if (name === "create_map_report") {
+        result = await this.handleCreateMapReport(args, emit);
+      } else if (name === "publish_upload") {
+        result = await this.handlePublishUpload(args, connectors, runCtx);
       } else if (name === "search_sessions") {
         if (!this.sessions) {
           result = { hits: [], error: "session store not available" };
         } else {
           const query = String(args.query ?? "");
-          const limit = typeof args.limit === "number" ? args.limit : 8;
+          const limit = typeof args.limit === "number" ? args.limit : 20;
           const hits = await this.sessions.search(query, limit);
           result = {
-            hits: hits.map((s) => ({
+            query: query || null,
+            mode: query.trim() ? "search" : "recent",
+            hits: hits.map((s) => {
+              const lastUser = [...s.messages].reverse().find((m) => m.role === "user");
+              const lastAsst = [...s.messages].reverse().find((m) => m.role === "assistant");
+              return {
+                id: s.id,
+                title: s.title,
+                updatedAt: s.updatedAt,
+                messageCount: s.messages.length,
+                preview: (lastUser?.content || lastAsst?.content || "").slice(0, 200),
+              };
+            }),
+          };
+        }
+      } else if (name === "get_session") {
+        if (!this.sessions) {
+          result = { error: "session store not available" };
+        } else {
+          const id = String(args.id ?? "");
+          const maxMessages =
+            typeof args.maxMessages === "number"
+              ? Math.min(80, Math.max(1, Math.floor(args.maxMessages)))
+              : 40;
+          const s = await this.sessions.get(id);
+          if (!s) {
+            result = { error: "session not found", id };
+          } else {
+            const msgs = s.messages
+              .filter((m) => m.role === "user" || m.role === "assistant")
+              .slice(-maxMessages)
+              .map((m) => ({
+                id: m.id,
+                role: m.role,
+                content: m.content.slice(0, 12_000),
+                createdAt: m.createdAt,
+                toolNames: m.tools?.map((t) => t.name),
+              }));
+            result = {
               id: s.id,
               title: s.title,
               updatedAt: s.updatedAt,
-              preview: s.messages.find((m) => m.role === "user")?.content?.slice(0, 160),
-            })),
-          };
+              bookmarked: !!s.bookmarked,
+              totalMessages: s.messages.length,
+              returned: msgs.length,
+              messages: msgs,
+            };
+          }
         }
       } else if (name === "save_view") {
         if (!views) result = { ok: false, error: "view store unavailable" };
@@ -1609,6 +2031,19 @@ export class AgentLoop {
                 ? (args.chart as ViewChartSpec)
                 : undefined,
           });
+          if (runCtx?.changeLog) {
+            const n = Math.max(0, (saved.rows?.length ?? 1) - 1);
+            void runCtx.changeLog.append({
+              viewId: saved.id,
+              viewName: saved.name,
+              op: "replace",
+              added: n,
+              updated: 0,
+              removed: 0,
+              sourceTool: "save_view",
+              sessionId: runCtx.sessionId,
+            });
+          }
           result = {
             ok: true,
             id: saved.id,
@@ -1697,12 +2132,31 @@ export class AgentLoop {
                 ? m[1]!.split(",").map((s) => s.trim()).filter(Boolean)
                 : (existing.rows?.[0] ?? existing.columns ?? []).slice(0, 1);
             }
-            const saved = await upsertRows(views, existing.id, rows, keyColumns);
+            const { view: saved, delta } = await upsertRows(
+              views,
+              existing.id,
+              rows,
+              keyColumns,
+            );
+            if (runCtx?.changeLog) {
+              void runCtx.changeLog.append({
+                viewId: saved.id,
+                viewName: saved.name,
+                op: delta.op,
+                added: delta.added,
+                updated: delta.updated,
+                removed: delta.removed,
+                sampleKeys: delta.sampleKeys,
+                sourceTool: "upsert_scrape_rows",
+                sessionId: runCtx.sessionId,
+              });
+            }
             result = {
               ok: true,
               id: saved.id,
               name: saved.name,
               rowCount: Math.max(0, (saved.rows?.length ?? 1) - 1),
+              delta,
             };
           }
         }
@@ -1722,7 +2176,7 @@ export class AgentLoop {
             : { ok: false, error: "view not found" };
         }
       } else if (name === "scrape_pdps") {
-        result = await this.scrapePdps(args, views, pageTemplates, emit);
+        result = await this.scrapePdps(args, views, pageTemplates, emit, runCtx);
       } else if (name === "rest_request") {
         result = await this.runRestRequest(args, connectors);
       } else if (name === "mcp_list_tools") {
@@ -1732,7 +2186,9 @@ export class AgentLoop {
       } else if (name === "ux_critique") {
         result = await this.handleUxCritique(args, runCtx, emit);
       } else if (name === "open_preview") {
-        result = this.handleOpenPreview(args, runCtx, emit);
+        result = await this.handleOpenPreview(args, runCtx, emit);
+      } else if (name === "annotate_screenshot") {
+        result = await this.handleAnnotateScreenshot(args, runCtx, emit);
       } else if (name === "screenshot_viewport") {
         if (!this.browser.captureViewport) result = { ok: false, error: "capture unavailable" };
         else {
@@ -1799,6 +2255,8 @@ export class AgentLoop {
         result = await this.updateTask(args, runCtx);
       } else if (name === "list_tasks") {
         result = await this.listTasks(args, runCtx);
+      } else if (name === "reorder_tasks") {
+        result = await this.reorderTasks(args, runCtx);
       } else if (
         name === "create_page_extension" ||
         name === "update_page_extension" ||
@@ -2048,15 +2506,22 @@ export class AgentLoop {
         ? args.status
         : "todo";
 
+    const sessionId =
+      typeof args.sessionId === "string" ? args.sessionId : (runCtx.sessionId ?? null);
+    const sortOrder =
+      typeof args.sortOrder === "number" && Number.isFinite(args.sortOrder)
+        ? args.sortOrder
+        : undefined;
+
     const task = await runCtx.tasks.put({
       id: crypto.randomUUID(),
       title: title.trim(),
       status,
-      sessionId:
-        typeof args.sessionId === "string" ? args.sessionId : (runCtx.sessionId ?? null),
+      sessionId,
       agentId: runCtx.agentId,
       note: typeof args.note === "string" ? args.note : undefined,
       planMarkdown: typeof args.planMarkdown === "string" ? args.planMarkdown : undefined,
+      ...(sortOrder !== undefined ? { sortOrder } : {}),
     });
     return { ok: true, task };
   }
@@ -2080,9 +2545,15 @@ export class AgentLoop {
         ? args.status
         : existing.status;
 
+    const sortOrder =
+      typeof args.sortOrder === "number" && Number.isFinite(args.sortOrder)
+        ? args.sortOrder
+        : existing.sortOrder;
+
     const task = await runCtx.tasks.put({
       ...existing,
       status,
+      sortOrder,
       title: typeof args.title === "string" ? args.title : existing.title,
       note: typeof args.note === "string" ? args.note : existing.note,
       planMarkdown:
@@ -2109,6 +2580,20 @@ export class AgentLoop {
       status,
     });
     return { ok: true, tasks };
+  }
+
+  private async reorderTasks(
+    args: Record<string, unknown>,
+    runCtx: RunContext | undefined,
+  ): Promise<unknown> {
+    if (!runCtx?.tasks) return { ok: false, error: "task store unavailable" };
+    const raw = args.orderedIds;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return { ok: false, error: "orderedIds required (non-empty string[])" };
+    }
+    const orderedIds = raw.map((x) => String(x)).filter(Boolean);
+    const tasks = await runCtx.tasks.reorder(orderedIds);
+    return { ok: true, tasks, count: tasks.length };
   }
 
   private async spawnSubagent(
@@ -2427,12 +2912,39 @@ export class AgentLoop {
     workerModel: string,
     emit: (e: AgentEvent) => void,
     onUsage: (u: LlmUsage) => void,
+    attachments?: AttachmentStore,
   ): Promise<unknown> {
     const intent = String(args.intent ?? "");
     const schemaHint = args.schema_hint != null ? String(args.schema_hint) : "";
     let text = typeof args.text === "string" ? args.text : "";
-    let pageSource: "text" | "page_digest" | "get_page" = "text";
-    if (args.use_page || !text.trim()) {
+    let pageSource:
+      | "text"
+      | "attachment"
+      | "page_digest"
+      | "get_page" = text.trim() ? "text" : "text";
+    const attachmentId =
+      typeof args.attachmentId === "string"
+        ? args.attachmentId.trim()
+        : typeof args.attachment_id === "string"
+          ? args.attachment_id.trim()
+          : "";
+
+    if (attachmentId) {
+      if (!attachments) {
+        return { ok: false, error: "attachments store unavailable" };
+      }
+      // Full file (ATTACH_MAX_TEXT) — never the 4k chat preview.
+      const file = await attachments.read(attachmentId, 200_000);
+      if (!file) return { ok: false, error: `attachment not found: ${attachmentId}` };
+      text = file.content;
+      pageSource = "attachment";
+      if (file.truncated) {
+        emit({
+          type: "status",
+          message: `Attachment truncated at ${text.length} chars — parse may be incomplete`,
+        });
+      }
+    } else if (args.use_page || !text.trim()) {
       const digest = await this.browser.runContent({ op: "page_digest" });
       if (digest.ok && digest.data) {
         pageSource = "page_digest";
@@ -2448,6 +2960,7 @@ export class AgentLoop {
         text = [data?.title, data?.url, data?.text].filter(Boolean).join("\n").slice(0, 10_000);
       }
     }
+
     if (!text.trim()) {
       return {
         ok: false,
@@ -2456,7 +2969,40 @@ export class AgentLoop {
       };
     }
 
+    // Deterministic path: order CSVs with position/{name,index} — LLM truncates long lists.
+    const { extractProductsFromOrderCsv, wantsProductListFromCsv } = await import(
+      "../local/csvProducts.js"
+    );
+    const looksCsv =
+      pageSource === "attachment" ||
+      (text.includes("\n") &&
+        text.includes(",") &&
+        /position|index|sap/i.test(text.slice(0, 800)));
+    if (looksCsv && wantsProductListFromCsv(intent)) {
+      const extracted = extractProductsFromOrderCsv(text);
+      if (extracted.rows.length > 0) {
+        emit({
+          type: "status",
+          message: `CSV products: ${extracted.rows.length} rows (deterministic)`,
+        });
+        return {
+          ok: true,
+          model: "deterministic/csv",
+          data: { rows: extracted.rows, notes: extracted.notes },
+          meta: {
+            workerModel: "deterministic/csv",
+            source: pageSource,
+            inputChars: text.length,
+            fallback: false,
+            notes: extracted.notes,
+            count: extracted.rows.length,
+          },
+        };
+      }
+    }
+
     emit({ type: "status", message: `Worker parse (${workerModel})…` });
+    const maxTokens = Math.min(16_384, Math.max(4096, Math.ceil(text.length / 4)));
     const result = await this.llm.chat({
       model: workerModel,
       messages: [
@@ -2467,7 +3013,7 @@ export class AgentLoop {
         },
       ],
       temperature: 0.1,
-      maxTokens: 4096,
+      maxTokens,
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "worker" });
@@ -2639,6 +3185,7 @@ export class AgentLoop {
     views: ViewStore | undefined,
     pageTemplates: PageTemplateCache | undefined,
     emit: (e: AgentEvent) => void,
+    runCtx?: RunContext,
   ): Promise<unknown> {
     if (!views) return { ok: false, error: "view store unavailable" };
     const saps = Array.isArray(args.saps) ? args.saps.map(String).filter(Boolean) : [];
@@ -2671,6 +3218,10 @@ export class AgentLoop {
     const view = await ensureView(views, { name: viewName, columns, keyColumns });
     const rowsOut: string[][] = [];
     const errors: string[] = [];
+    let added = 0;
+    let updated = 0;
+    let removed = 0;
+    const sampleKeys: string[] = [];
 
     for (let i = 0; i < targets.length; i += 1) {
       const t = targets[i]!;
@@ -2714,11 +3265,33 @@ export class AgentLoop {
           url: String(data.url ?? t.url),
         };
         const row = columns.map((c) => rowMap[c] ?? "");
-        await upsertRows(views, view.id, [row], keyColumns);
+        const { delta } = await upsertRows(views, view.id, [row], keyColumns);
+        added += delta.added;
+        updated += delta.updated;
+        removed += delta.removed;
+        for (const k of delta.sampleKeys) {
+          if (sampleKeys.length < 8) sampleKeys.push(k);
+        }
         rowsOut.push(row);
       } catch (e) {
         errors.push(`${t.sap || t.url}: ${e instanceof Error ? e.message : String(e)}`);
       }
+    }
+
+    if (runCtx?.changeLog && (added || updated || removed || rowsOut.length)) {
+      const op =
+        added && updated ? "mixed" : added ? "add" : updated ? "update" : "mixed";
+      void runCtx.changeLog.append({
+        viewId: view.id,
+        viewName: view.name,
+        op,
+        added,
+        updated,
+        removed,
+        sampleKeys,
+        sourceTool: "scrape_pdps",
+        sessionId: runCtx.sessionId,
+      });
     }
 
     const refreshed = await views.get(view.id);
@@ -2731,6 +3304,183 @@ export class AgentLoop {
       rows: rowsOut,
       rowCount: Math.max(0, (refreshed?.rows?.length ?? 1) - 1),
       errors: errors.length ? errors : undefined,
+    };
+  }
+
+  private async handleCreateMapReport(
+    args: Record<string, unknown>,
+    emit: (e: AgentEvent) => void,
+  ): Promise<unknown> {
+    const title = String(args.title ?? "Map").slice(0, 120);
+    const locale = args.locale === "en" ? "en" : "pl";
+    const rawMarkers = Array.isArray(args.markers) ? args.markers : [];
+    const markers = rawMarkers
+      .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+      .map((m) => ({
+        lat: Number(m.lat),
+        lng: Number(m.lng),
+        label: m.label != null ? String(m.label) : undefined,
+        note: m.note != null ? String(m.note) : undefined,
+      }));
+    const center =
+      args.center && typeof args.center === "object"
+        ? {
+            lat: Number((args.center as { lat?: unknown }).lat),
+            lng: Number((args.center as { lng?: unknown }).lng),
+          }
+        : undefined;
+    const zoom = typeof args.zoom === "number" ? args.zoom : undefined;
+
+    const styleFetch = await fetchMapStyleJson(locale);
+    const styleJson = "style" in styleFetch ? styleFetch.style : undefined;
+    const html = buildMapHtml({
+      title,
+      markers,
+      locale,
+      center:
+        center && Number.isFinite(center.lat) && Number.isFinite(center.lng)
+          ? center
+          : undefined,
+      zoom,
+      styleJson,
+      styleUrl: "url" in styleFetch ? styleFetch.url : undefined,
+    });
+    // Store full document as the report body so publish_upload can re-host it as-is.
+    const saved = await this.artifacts.saveReport({ title, bodyHtml: html });
+    emit({
+      type: "preview",
+      preview: {
+        kind: "html",
+        title,
+        html,
+        interactive: true,
+      },
+    });
+    let download: { ok: boolean; error?: string } = { ok: true };
+    try {
+      download = await this.browser.downloadText(
+        `${title.replace(/[^\w.-]+/g, "_").slice(0, 40)}.html`,
+        html,
+        "text/html",
+      );
+    } catch (e) {
+      download = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    return {
+      ok: true,
+      reportId: saved.id,
+      title: saved.title,
+      markerCount: markers.filter(
+        (m) => Number.isFinite(m.lat) && Number.isFinite(m.lng),
+      ).length,
+      locale,
+      styleInlined: Boolean(styleJson),
+      styleNote:
+        "style" in styleFetch
+          ? undefined
+          : `style fetch failed (${styleFetch.error}); HTML references CDN URL`,
+      download,
+      hint: "Map opened in preview. Call publish_upload({ filename:\"map.html\", reportId }) for a public https URL.",
+    };
+  }
+
+  private async handlePublishUpload(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+    runCtx?: RunContext,
+  ): Promise<unknown> {
+    const filename = String(args.filename ?? "").trim();
+    if (!filename) return { ok: false, error: "filename required" };
+
+    let body: string | Uint8Array | undefined;
+    let contentType: string | undefined;
+
+    if (typeof args.reportId === "string" && args.reportId.trim()) {
+      const report = await this.artifacts.getReport(args.reportId.trim());
+      if (!report) return { ok: false, error: `report not found: ${args.reportId}` };
+      body = report.bodyHtml;
+      contentType = "text/html; charset=utf-8";
+    } else if (typeof args.attachmentId === "string" && args.attachmentId.trim()) {
+      if (!runCtx?.attachments) return { ok: false, error: "attachments unavailable" };
+      const row = await runCtx.attachments.get(args.attachmentId.trim());
+      if (!row) return { ok: false, error: `attachment not found: ${args.attachmentId}` };
+      if (row.dataUrl) {
+        const decoded = dataUrlToBytes(row.dataUrl);
+        if (!decoded) return { ok: false, error: "attachment dataUrl decode failed" };
+        body = decoded.bytes;
+        contentType = decoded.mime;
+      } else if (row.text) {
+        body = row.text;
+        contentType = row.mime || "text/plain; charset=utf-8";
+      } else {
+        return { ok: false, error: "attachment has no dataUrl or text" };
+      }
+    } else if (typeof args.text === "string") {
+      body = args.text;
+    } else {
+      return {
+        ok: false,
+        error: "provide text, reportId, or attachmentId",
+      };
+    }
+    if (body == null) return { ok: false, error: "empty upload body" };
+    const uploadBody: string | Uint8Array = body;
+
+    let bearerToken: string | undefined;
+    const connectorId =
+      typeof args.connectorId === "string" ? args.connectorId.trim() : "";
+    if (connectorId) {
+      if (!connectors?.store || !connectors.getSecret) {
+        return { ok: false, error: "connectors unavailable for protected upload" };
+      }
+      if (connectors.allowedIds && !connectors.allowedIds.includes(connectorId)) {
+        return { ok: false, error: `connector not allowed: ${connectorId}` };
+      }
+      const conn = await connectors.store.get(connectorId);
+      if (!conn || conn.kind !== "rest") {
+        return { ok: false, error: `REST connector not found: ${connectorId}` };
+      }
+      const auth = conn.headers.Authorization ?? conn.headers.authorization;
+      if (auth && typeof auth === "object" && "vaultLabel" in auth) {
+        bearerToken = (await connectors.getSecret(auth.vaultLabel)) ?? undefined;
+        if (!bearerToken) {
+          return { ok: false, error: `vault secret missing: ${auth.vaultLabel}` };
+        }
+      } else if (typeof auth === "string") {
+        bearerToken = auth.replace(/^Bearer\s+/i, "");
+      } else {
+        return {
+          ok: false,
+          error: "connector missing Authorization vault ref (fc_uploads_key)",
+        };
+      }
+    }
+
+    const uploaded = await publishUpload({
+      filename,
+      body: uploadBody,
+      contentType,
+      workspaceId: typeof args.workspaceId === "string" ? args.workspaceId : undefined,
+      appName: typeof args.appName === "string" ? args.appName : undefined,
+      bearerToken,
+      path: typeof args.path === "string" ? args.path : undefined,
+    });
+    if (!uploaded.ok) return uploaded;
+
+    const openTab = args.openTab !== false;
+    let opened: unknown;
+    if (openTab) {
+      try {
+        opened = await this.browser.openTab(uploaded.file_url, true);
+      } catch (e) {
+        opened = { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+
+    return {
+      ...uploaded,
+      opened,
+      hint: `Shareable URL: ${uploaded.file_url}`,
     };
   }
 

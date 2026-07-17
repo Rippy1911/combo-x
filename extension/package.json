@@ -1,6 +1,6 @@
 {
   "name": "@combo-x/extension",
-  "version": "1.6.1",
+  "version": "1.6.27",
   "private": true,
   "type": "module",
   "scripts": {

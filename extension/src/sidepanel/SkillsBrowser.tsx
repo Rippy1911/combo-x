@@ -171,45 +171,61 @@ export function SkillsBrowser({
         <ul className="list">
           {filtered.map((s) => (
             <li key={s.id}>
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
-                <strong>{s.name}</strong>
-                <span
-                  className={`scope-badge${s.scope === "agent" ? " agent" : " global"}`}
-                >
-                  {s.scope === "agent" ? agentName(s.agentId) : "global"}
-                  {isSeeded(s) ? " · seed" : ""}
-                </span>
-              </div>
-              <p className="hint wrap" style={{ margin: "4px 0" }}>
-                {s.description}
-              </p>
-              <p className="hint clamp-2" style={{ margin: "0 0 4px" }}>
-                {s.body}
-              </p>
-              {(s.toolHints?.length ?? 0) > 0 ? (
-                <div className="row" style={{ alignItems: "center", gap: 6 }}>
-                  <span className="hint">Unlocks:</span>
-                  <div className="tool-chip-grid">
-                    {s.toolHints!.map((h) => (
-                      <span key={h} className="chip-toggle on">
-                        {h}
-                      </span>
-                    ))}
+              <div className="list-card-top">
+                <div className="list-card-body">
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <strong>{s.name}</strong>
+                    <span
+                      className={`scope-badge${s.scope === "agent" ? " agent" : " global"}`}
+                    >
+                      {s.scope === "agent" ? agentName(s.agentId) : "global"}
+                      {isSeeded(s) ? " · seed" : ""}
+                    </span>
                   </div>
+                  <p className="hint wrap" style={{ margin: "4px 0" }}>
+                    {s.description}
+                  </p>
+                  <p className="hint clamp-2" style={{ margin: "0 0 4px" }}>
+                    {s.body}
+                  </p>
+                  {(s.toolHints?.length ?? 0) > 0 ? (
+                    <div className="row" style={{ alignItems: "center", gap: 6 }}>
+                      <span className="hint">Unlocks:</span>
+                      <div className="tool-chip-grid">
+                        {s.toolHints!.map((h) => (
+                          <span key={h} className="chip-toggle on">
+                            {h}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-              <div className="row" style={{ marginTop: 8 }}>
-                <button type="button" onClick={() => openEdit(s)}>
-                  {expandedId === s.id ? "Editing…" : "Edit"}
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  disabled={busy}
-                  onClick={() => void deleteSkill(s.id)}
-                >
-                  Delete
-                </button>
+                <div className="list-row-actions">
+                  <button
+                    type="button"
+                    className={
+                      expandedId === s.id
+                        ? "msg-action icon-btn active"
+                        : "msg-action icon-btn"
+                    }
+                    title={expandedId === s.id ? "Editing…" : "Edit"}
+                    aria-label="Edit"
+                    onClick={() => openEdit(s)}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="msg-action icon-btn dangerish"
+                    title="Delete"
+                    aria-label="Delete"
+                    disabled={busy}
+                    onClick={() => void deleteSkill(s.id)}
+                  >
+                    ⌫
+                  </button>
+                </div>
               </div>
               {expandedId === s.id ? (
                 <div className="agent-editor" style={{ marginTop: 8 }}>

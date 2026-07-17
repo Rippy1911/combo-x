@@ -24,8 +24,9 @@ export function MessageToolbar({
       ) : null}
       <button
         type="button"
-        className="msg-action"
+        className="msg-action icon-btn"
         title="Copy full message"
+        aria-label="Copy message"
         disabled={!content.trim()}
         onClick={() => {
           void (async () => {
@@ -37,16 +38,17 @@ export function MessageToolbar({
           })();
         }}
       >
-        {copied ? "Copied" : "Copy"}
+        {copied ? "✓" : "⎘"}
       </button>
       <button
         type="button"
-        className={bookmarked ? "msg-action active" : "msg-action"}
+        className={bookmarked ? "msg-action icon-btn active" : "msg-action icon-btn"}
         title={bookmarked ? "Remove bookmark" : "Bookmark message"}
+        aria-label={bookmarked ? "Remove bookmark" : "Bookmark"}
         aria-pressed={!!bookmarked}
         onClick={onToggleBookmark}
       >
-        {bookmarked ? "Bookmarked" : "Bookmark"}
+        {bookmarked ? "★" : "☆"}
       </button>
     </div>
   );

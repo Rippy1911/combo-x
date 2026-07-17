@@ -83,27 +83,39 @@ export function TablesSubpanel({
             <ul className="list">
               {library.map((v) => (
                 <li key={v.id}>
-                  <strong>{v.name}</strong>
-                  <div className="hint">
-                    {v.source} · {v.rows?.length ?? 0} rows ·{" "}
-                    {new Date(v.updatedAt).toLocaleString()}
-                  </div>
-                  <div className="row">
-                    <button type="button" className="primary" onClick={() => void openView(v)}>
-                      Open
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() =>
-                        void (async () => {
-                          await views.delete(v.id);
-                          await refreshLibrary();
-                        })()
-                      }
-                    >
-                      Delete
-                    </button>
+                  <div className="list-card-top">
+                    <div className="list-card-body">
+                      <strong>{v.name}</strong>
+                      <div className="hint">
+                        {v.source} · {v.rows?.length ?? 0} rows ·{" "}
+                        {new Date(v.updatedAt).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="list-row-actions">
+                      <button
+                        type="button"
+                        className="msg-action icon-btn"
+                        title="Open"
+                        aria-label="Open"
+                        onClick={() => void openView(v)}
+                      >
+                        ↗
+                      </button>
+                      <button
+                        type="button"
+                        className="msg-action icon-btn dangerish"
+                        title="Delete"
+                        aria-label="Delete"
+                        onClick={() =>
+                          void (async () => {
+                            await views.delete(v.id);
+                            await refreshLibrary();
+                          })()
+                        }
+                      >
+                        ⌫
+                      </button>
+                    </div>
                   </div>
                 </li>
               ))}

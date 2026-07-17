@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenRouterClient, parseSse } from "./openrouter.js";
+import { OpenRouterClient, extractReasoningText, parseSse } from "./openrouter.js";
 
 async function* chunks(...parts: string[]) {
   for (const p of parts) yield p;
@@ -21,7 +21,44 @@ describe("parseSse", () => {
   });
 });
 
+describe("extractReasoningText", () => {
+  it("reads reasoning, reasoning_content, and reasoning_details", () => {
+    expect(extractReasoningText({ reasoning: "a" })).toBe("a");
+    expect(extractReasoningText({ reasoning_content: "b" })).toBe("b");
+    expect(
+      extractReasoningText({
+        reasoning_details: [{ text: "c" }, { text: "d" }],
+      }),
+    ).toBe("cd");
+  });
+});
+
 describe("OpenRouterClient.chatStreaming", () => {
+  it("streams reasoning tokens separately from content", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"reasoning":"Think "}}]}\n',
+      'data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"hard"}]}}]}\n',
+      'data: {"choices":[{"delta":{"content":"Answer"}}]}\n',
+      'data: {"choices":[{"finish_reason":"stop"}]}\n',
+      "data: [DONE]\n",
+    ].join("");
+    const fetchImpl: typeof fetch = async () =>
+      new Response(sse, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const reasoning: string[] = [];
+    const result = await client.chatStreaming({
+      model: "m",
+      messages: [{ role: "user", content: "x" }],
+      onReasoning: (s) => reasoning.push(s),
+    });
+    expect(reasoning.at(-1)).toBe("Think hard");
+    expect(result.reasoning).toBe("Think hard");
+    expect(result.content).toBe("Answer");
+  });
+
   it("accumulates content deltas and tool_calls", async () => {
     const sse = [
       'data: {"choices":[{"delta":{"content":"Hi "}}]}\n',

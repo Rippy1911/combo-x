@@ -36,6 +36,7 @@ Local-first **browser agent** Chrome extension (MV3).
 | [`docs/PAGE_EXTENSIONS.md`](./docs/PAGE_EXTENSIONS.md) | Page scripts / isolation / bridge |
 | [`docs/BUDGET.md`](./docs/BUDGET.md) | Budget mode |
 | [`docs/CONNECTORS.md`](./docs/CONNECTORS.md) | REST/MCP |
+| [`docs/MAPS_AND_UPLOADS.md`](./docs/MAPS_AND_UPLOADS.md) | MapLibre reports + uploads CDN |
 | [`docs/VIEWS.md`](./docs/VIEWS.md) | Progressive tables |
 | [`docs/LOCAL_RAG.md`](./docs/LOCAL_RAG.md) | Device RAG |
 

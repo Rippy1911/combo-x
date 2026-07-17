@@ -63,9 +63,9 @@ export function ToolsLibrary({
   return (
     <div className="lib-section">
       <p className="hint wrap">
-        Global ceiling persists in localStorage (additive migrate — disabling tools no longer resets
-        on reload). With an active agent profile, toggles also update that agent&apos;s allowlist.
-        Skill-gated tools still need skill_read during a run.
+        Global ceiling persists in localStorage. Setup page only overwrites tools when you click
+        Apply (focus/reload no longer reverts toggles). Active agent profiles sync allowlist on
+        toggle. Skill-gated tools still need skill_read during a run.
       </p>
       {!readOnly ? (
         <div className="row">
@@ -129,7 +129,9 @@ export function ToolsLibrary({
                 </div>
                 <button
                   type="button"
-                  className="msg-action dangerish"
+                  className="msg-action icon-btn dangerish"
+                  title="Delete"
+                  aria-label="Delete"
                   onClick={() =>
                     void (async () => {
                       await customTools.delete(t.id);
@@ -138,7 +140,7 @@ export function ToolsLibrary({
                     })()
                   }
                 >
-                  Delete
+                  ⌫
                 </button>
               </li>
             ))}

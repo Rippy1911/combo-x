@@ -41,6 +41,7 @@ const TOOL_NAMES = [
   "set_reminder",
   "create_report",
   "search_sessions",
+  "get_session",
   "remember",
   "recall",
 ];
@@ -167,6 +168,13 @@ function render() {
     const msg = document.getElementById("msg")!;
     try {
       await chrome.storage.local.set({ combo_x_setup_payload: payload });
+      // Same origin as side panel — persist ceiling so toggles aren't lost when the
+      // panel wasn't open to receive chrome.storage.onChanged (Apply with syncTools).
+      try {
+        localStorage.setItem("combo_x_enabled_tools", JSON.stringify(payload.tools));
+      } catch {
+        /* ignore */
+      }
       msg.textContent = `Sent — ${payload.tools.length} tools, approval=${payload.approvalMode}. Open the Combo-X side panel.`;
     } catch (e) {
       msg.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;

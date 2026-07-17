@@ -27,8 +27,22 @@ export {
 } from "./protocol/messages.js";
 
 export { Vault, VaultLockedError, VaultSealedError, VAULT_KDF_ITERATIONS } from "./vault/vault.js";
+export {
+  detectChatSecrets,
+  assignUniqueLabels,
+  embedSecretsInMessage,
+  maskSecretValue,
+} from "./vault/chatSecrets.js";
+export type { ChatSecretHit, ChatSecretEmbed, ChatSecretKind } from "./vault/chatSecrets.js";
 
-export { OpenRouterClient, LlmError, parseSse } from "./llm/openrouter.js";
+export {
+  extractProductsFromOrderCsv,
+  parseCsv,
+  wantsProductListFromCsv,
+} from "./local/csvProducts.js";
+export type { CsvProductRow } from "./local/csvProducts.js";
+
+export { OpenRouterClient, LlmError, parseSse, extractReasoningText } from "./llm/openrouter.js";
 export {
   messageContentAsText,
   stripImageParts,
@@ -60,7 +74,7 @@ export type { AttachmentKind, ParseResult } from "./attachments/parse.js";
 export { MemoryStore, rankMemories } from "./memory/store.js";
 export type { MemoryEntry, MemoryKind, MemoryScope } from "./memory/store.js";
 
-export { SkillStore, seedSkillDefinitions } from "./skills/store.js";
+export { SkillStore, seedSkillDefinitions, SEED_REVISION } from "./skills/store.js";
 export type { Skill, SkillScope } from "./skills/store.js";
 
 export {
@@ -108,6 +122,18 @@ export {
   dataUrlByteLength,
 } from "./vision/promote.js";
 export type { PendingVision, PromoteResult } from "./vision/promote.js";
+export {
+  buildAnnotateScreenshotHtml,
+  validatePreviewCss,
+  isSafeDataUrlForSrcDoc,
+  PREVIEW_STYLE_ID,
+} from "./vision/annotateHtml.js";
+export type { AnnotateMarker, AnnotateHighlight } from "./vision/annotateHtml.js";
+export {
+  embedAttachmentsInHtml,
+  extractAttachmentPlaceholders,
+  appendAttachmentGallery,
+} from "./vision/embedAttachments.js";
 export {
   resolveVisionCapability,
   modalitySupportsVision,
@@ -163,7 +189,23 @@ export type { ParsedSecret, ParseMcpDefinitionResult } from "./connectors/secret
 export { resolveHeaders, restRequest } from "./connectors/rest.js";
 export type { GetSecretFn, RestRequestOptions } from "./connectors/rest.js";
 export { mcpListTools, mcpCall } from "./connectors/mcp.js";
-export { githubRestTemplate } from "./connectors/templates.js";
+export {
+  githubRestTemplate,
+  uploadsRestTemplate,
+  nsFoodRestTemplate,
+} from "./connectors/templates.js";
+export {
+  publishUpload,
+  dataUrlToBytes,
+  DEFAULT_UPLOADS_BASE,
+} from "./uploads/publish.js";
+export type { PublishUploadInput, PublishUploadResult } from "./uploads/publish.js";
+export {
+  buildMapHtml,
+  fetchMapStyleJson,
+  MAP_STYLE_URLS,
+} from "./maps/buildMapHtml.js";
+export type { MapMarker, BuildMapHtmlInput } from "./maps/buildMapHtml.js";
 
 export { AgentProfileStore, resolveAgentProfile } from "./agents/profiles.js";
 export type {
@@ -185,6 +227,7 @@ export {
   formatSkillIndexBlock,
   formatToolSchemaBlock,
   customToolToDefinition,
+  PACK_SKILL_NAMES,
 } from "./tools/promptCatalog.js";
 export { CustomToolStore, runCustomTool } from "./tools/customStore.js";
 export type { CustomTool, CustomToolKind } from "./tools/customStore.js";
@@ -194,6 +237,7 @@ export type { ToolPickerLlm } from "./tools/pickTools.js";
 
 export {
   ALWAYS_ON_TOOL_NAMES,
+  FORCE_ATTACH_TOOL_NAMES,
   SKILL_GATED_TOOL_NAMES,
   SKILL_META_TOOLS,
   TOOL_PACKS,
@@ -201,6 +245,7 @@ export {
   isSkillGatedTool,
   packForTool,
   initialActiveTools,
+  ensureForceAttachTools,
   unlockFromHints,
 } from "./tools/gating.js";
 export type { ToolPackId } from "./tools/gating.js";
@@ -217,6 +262,7 @@ export type {
 
 export { TaskStore } from "./tasks/store.js";
 export type { Task, TaskStatus, TaskListOptions } from "./tasks/store.js";
+export { compareTasksByOrder, taskProgress } from "./tasks/store.js";
 export { formatOpenTasksBlock, pickOpenTasksForInject } from "./tasks/inject.js";
 
 export {
@@ -228,8 +274,20 @@ export {
 } from "./models.js";
 export type { ModelPreset } from "./models.js";
 
-export { SessionStore } from "./sessions/store.js";
-export type { ChatSession, SessionMessage } from "./sessions/store.js";
+export {
+  SessionStore,
+  cloneJsonSafe,
+  sanitizeSessionTools,
+  sanitizeSessionBlocks,
+  slimRunContextForStorage,
+} from "./sessions/store.js";
+export type {
+  ChatSession,
+  SessionMessage,
+  SessionArtifactPayload,
+  SessionRunContext,
+  SessionTurnBlock,
+} from "./sessions/store.js";
 
 export {
   ArtifactStore,
@@ -246,6 +304,19 @@ export {
   siteProfileLabelName,
 } from "./local/views.js";
 export type { SavedView, ViewChartSpec, ViewSource } from "./local/views.js";
+
+export {
+  ApprovalPolicyStore,
+  targetKeyFromArgs,
+  policyMatches,
+} from "./local/approvalPolicy.js";
+export type { ApprovalPolicy } from "./local/approvalPolicy.js";
+
+export {
+  ChangeLogStore,
+  computeUpsertDelta,
+} from "./local/changeLog.js";
+export type { ChangeLogEntry, ChangeOp, UpsertDelta } from "./local/changeLog.js";
 
 export {
   sortTableRows,

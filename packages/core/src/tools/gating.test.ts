@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { AGENT_TOOLS } from "../browser/tools.js";
 import {
   ALWAYS_ON_TOOL_NAMES,
+  FORCE_ATTACH_TOOL_NAMES,
   SKILL_GATED_TOOL_NAMES,
   TOOL_PACKS,
+  ensureForceAttachTools,
   initialActiveTools,
   isSkillGatedTool,
   unlockFromHints,
@@ -36,6 +38,16 @@ describe("tool gating", () => {
     expect(active).toContain("navigate");
     expect(active).toContain("skill_search");
     expect(active).not.toContain("scrape_pdps");
+  });
+
+  it("ensureForceAttachTools merges Vision Lab into non-empty allowlists", () => {
+    expect(FORCE_ATTACH_TOOL_NAMES).toContain("ux_critique");
+    const next = ensureForceAttachTools(["navigate", "get_page"]);
+    expect(next).toContain("navigate");
+    expect(next).toContain("ux_critique");
+    expect(next).toContain("annotate_screenshot");
+    expect(next).toContain("page_css_preview");
+    expect(ensureForceAttachTools([])).toEqual([]);
   });
 
   it("unlockFromHints expands active set", () => {

@@ -43,10 +43,12 @@ export function TabBar({
   tabs,
   active,
   onSelect,
+  className,
 }: {
   tabs: TabDef[];
   active: string;
   onSelect: (id: string) => void;
+  className?: string;
 }) {
   const defaultIds = useMemo(() => tabs.map((t) => t.id), [tabs]);
   const labelById = useMemo(() => new Map(tabs.map((t) => [t.id, t.label])), [tabs]);
@@ -155,7 +157,7 @@ export function TabBar({
   };
 
   return (
-    <nav className="tabs" ref={navRef} aria-label="Main">
+    <nav className={className ? `tabs ${className}` : "tabs"} ref={navRef} aria-label="Main">
       <div className="tabs-measure" ref={measureRef} aria-hidden>
         {orderedTabs.map((t) => (
           <button key={t.id} type="button" className="tab" data-measure-tab={t.id} tabIndex={-1}>

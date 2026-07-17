@@ -13,12 +13,17 @@ export function ToolAccessPicker({
   setEnabledTools,
   toolMode,
   unlockedThisRun,
+  onInspectContext,
+  inspectDisabled,
 }: {
   enabledTools: Set<string>;
   setEnabledTools: (fn: (prev: Set<string>) => Set<string>) => void;
   toolMode: AgentToolMode;
   /** Tools unlocked via skill_read in the current run (session chrome). */
   unlockedThisRun: string[];
+  /** Preview what Send will attach (system / tools / ≈tokens). */
+  onInspectContext?: () => void;
+  inspectDisabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -49,15 +54,30 @@ export function ToolAccessPicker({
 
   return (
     <div className="tool-access">
-      <button
-        type="button"
-        className={open ? "msg-action active" : "msg-action"}
-        title="Tools attached this turn vs skill-gated (need skill_read)"
-        onClick={() => setOpen((o) => !o)}
-      >
-        Tools {activeNow.length}/{ceiling.size}
-        {toolMode === "skill_gated" ? " · gated" : " · static"}
-      </button>
+      <div className="tool-access-trigger">
+        <button
+          type="button"
+          className={open ? "msg-action active" : "msg-action"}
+          title="Tools attached this turn vs skill-gated (need skill_read)"
+          onClick={() => setOpen((o) => !o)}
+        >
+          Tools {activeNow.length}/{ceiling.size}
+          {toolMode === "skill_gated" ? " · gated" : " · static"}
+        </button>
+        <button
+          type="button"
+          className="msg-action icon-btn tool-access-help"
+          title="Context — what will be sent on Send (system, tools, ≈tokens)"
+          aria-label="Preview outbound context"
+          disabled={inspectDisabled || !onInspectContext}
+          onClick={() => onInspectContext?.()}
+        >
+          ⌗
+        </button>
+      </div>
+      {unlockedThisRun.length > 0 ? (
+        <span className="hint">+{unlockedThisRun.length} unlocked this run</span>
+      ) : null}
       {open ? (
         <div className="tool-access-pop">
           <p className="hint wrap">

@@ -1,4 +1,8 @@
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
+import {
+  PREVIEW_STYLE_ID,
+  validatePreviewCss,
+} from "../vision/annotateHtml.js";
 
 /** Pure DOM helpers used by the content script (and unit-tested with jsdom). */
 
@@ -95,7 +99,8 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         return { ok: true, data: { clicked: request.selector } };
       }
       case "type_text": {
-        return typeInto(doc.querySelector(request.selector), request.text, request.submit);
+        const nodes = Array.from(doc.querySelectorAll(request.selector));
+        return typeInto(pickTypableTarget(nodes, request.text), request.text, request.submit);
       }
       case "extract": {
         const nodes = Array.from(doc.querySelectorAll(request.selector)).slice(0, 50);
@@ -156,9 +161,9 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
       }
       case "get_interactive": {
         const limit = request.limit ?? 80;
-        const els = collectInteractive(doc, limit);
-        interactiveMaps.set(doc, els);
-        const items = els.map((el, index) => ({
+        const collected = collectInteractive(doc, limit);
+        interactiveMaps.set(doc, collected.els);
+        const items = collected.els.map((el, index) => ({
           i: index,
           tag: el.tagName.toLowerCase(),
           role: el.getAttribute("role") ?? undefined,
@@ -166,11 +171,25 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             .trim()
             .replace(/\s+/g, " ")
             .slice(0, 100),
-          href: el instanceof HTMLAnchorElement ? el.href : undefined,
-          type: el instanceof HTMLInputElement ? el.type : undefined,
+          href: el.tagName === "A" ? (el as HTMLAnchorElement).href : undefined,
+          type: isInputEl(el) ? resolveInputType(el) : undefined,
+          placeholder:
+            isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
           name: el.getAttribute("name") ?? undefined,
         }));
-        return { ok: true, data: { items, count: items.length } };
+        return {
+          ok: true,
+          data: {
+            items,
+            count: items.length,
+            /** dialog = open modal/sheet; page = full document */
+            scope: collected.scope,
+            hint:
+              collected.scope === "dialog"
+                ? "Scoped to topmost dialog/overlay (ARIA or high-z portal) — indices are only inside that layer, not the page behind."
+                : undefined,
+          },
+        };
       }
       case "click_index": {
         const map = interactiveMaps.get(doc);
@@ -248,6 +267,28 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           },
         };
       }
+      case "inject_css": {
+        const checked = validatePreviewCss(request.css);
+        if (!checked.ok) return { ok: false, error: checked.error };
+        const head = doc.head ?? doc.documentElement;
+        if (!head) return { ok: false, error: "no document head" };
+        let style = doc.getElementById(PREVIEW_STYLE_ID) as HTMLStyleElement | null;
+        if (!style) {
+          style = doc.createElement("style");
+          style.id = PREVIEW_STYLE_ID;
+          head.appendChild(style);
+        }
+        style.textContent = checked.css;
+        return {
+          ok: true,
+          data: { injected: true, id: PREVIEW_STYLE_ID, bytes: checked.css.length },
+        };
+      }
+      case "clear_css": {
+        const el = doc.getElementById(PREVIEW_STYLE_ID);
+        if (el) el.remove();
+        return { ok: true, data: { cleared: true, id: PREVIEW_STYLE_ID } };
+      }
       default:
         return { ok: false, error: "unknown op" };
     }
@@ -259,30 +300,151 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
   }
 }
 
+/** Inputs that accept free-text titles (not temporal/numeric constrained types). */
+const FREE_TEXT_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "password",
+  "email",
+  "url",
+  "tel",
+  "",
+]);
+
+/** Prefer tagName — content-script `instanceof` can fail across JS realms. */
+function isInputEl(el: Element): el is HTMLInputElement {
+  return el.tagName === "INPUT";
+}
+function isTextAreaEl(el: Element): el is HTMLTextAreaElement {
+  return el.tagName === "TEXTAREA";
+}
+function isContentEditable(el: Element): el is HTMLElement {
+  return el instanceof HTMLElement && el.isContentEditable;
+}
+
+function resolveInputType(el: HTMLInputElement): string {
+  const attr = (el.getAttribute("type") || "").toLowerCase().trim();
+  const prop = (typeof el.type === "string" ? el.type : "").toLowerCase().trim();
+  return attr || prop || "text";
+}
+
+function looksLikeFreeTextTitle(text: string): boolean {
+  const v = text.trim();
+  if (!v) return false;
+  // "Test Push Day", names, etc. — not HH:mm / YYYY-MM-DD / pure numbers
+  if (/^\d{1,2}:\d{2}/.test(v)) return false;
+  if (/^\d{4}-\d{2}-\d{2}/.test(v)) return false;
+  if (/^-?\d+(\.\d+)?$/.test(v)) return false;
+  return /[A-Za-z\u00C0-\u024F]/.test(v) || /\s/.test(v);
+}
+
+/**
+ * Constrained HTML input types reject free text.
+ * Chrome logs (and may throw) "does not conform to the required format" if we assign anyway —
+ * so we must never call the value setter for invalid temporal values.
+ */
+function constrainedInputError(el: HTMLInputElement, text: string): string | null {
+  const kind = resolveInputType(el);
+  const v = text.trim();
+  const show = text.length > 48 ? `${text.slice(0, 48)}…` : text;
+
+  if (looksLikeFreeTextTitle(text) && !FREE_TEXT_INPUT_TYPES.has(kind)) {
+    return (
+      `Refusing to type free text into input[type=${kind || "unknown"}] (got "${show}"). ` +
+      `For a plan/workout title: click the "Plan title" pencil first, then type into the text input — not time/date/number fields.`
+    );
+  }
+
+  if (kind === "time" && !/^\d{1,2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(v)) {
+    return `Cannot type into input[type=time] — value must be HH:mm (got "${show}").`;
+  }
+  if (kind === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    return `Cannot type into input[type=date] — value must be YYYY-MM-DD (got "${show}").`;
+  }
+  if (kind === "datetime-local" && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) {
+    return `Cannot type into input[type=datetime-local] — value must be YYYY-MM-DDTHH:mm (got "${show}").`;
+  }
+  if (kind === "month" && !/^\d{4}-\d{2}$/.test(v)) {
+    return `Cannot type into input[type=month] — value must be YYYY-MM (got "${show}").`;
+  }
+  if (kind === "week" && !/^\d{4}-W\d{2}$/i.test(v)) {
+    return `Cannot type into input[type=week] — value must be YYYY-Www (got "${show}").`;
+  }
+  if (kind === "number" && v !== "" && Number.isNaN(Number(v))) {
+    return `Cannot type into input[type=number] — value must be numeric (got "${show}").`;
+  }
+  return null;
+}
+
+/** When type_text selector matches many nodes, prefer a field that can accept this value. */
+function pickTypableTarget(nodes: Element[], text: string): Element | null {
+  if (!nodes.length) return null;
+  if (!looksLikeFreeTextTitle(text)) return nodes[0] ?? null;
+  const textual = nodes.find((n) => {
+    if (isTextAreaEl(n) || isContentEditable(n)) return true;
+    if (!isInputEl(n)) return false;
+    return FREE_TEXT_INPUT_TYPES.has(resolveInputType(n));
+  });
+  return textual ?? nodes[0] ?? null;
+}
+
+function setInputValue(el: HTMLInputElement | HTMLTextAreaElement, text: string): void {
+  // Prefer native setter so React controlled inputs pick up the change.
+  const proto = isTextAreaEl(el) ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, "value");
+  if (desc?.set) desc.set.call(el, text);
+  else el.value = text;
+}
+
 function typeInto(el: Element | null, text: string, submit?: boolean): ContentResponse {
   if (!el) return { ok: false, error: "no element" };
-  if (
-    !(el instanceof HTMLInputElement) &&
-    !(el instanceof HTMLTextAreaElement) &&
-    !(el instanceof HTMLElement && el.isContentEditable)
-  ) {
+  if (!isInputEl(el) && !isTextAreaEl(el) && !isContentEditable(el)) {
     return { ok: false, error: "element is not typable" };
   }
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    el.focus();
-    el.value = text;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    if (submit) {
-      el.form?.requestSubmit?.() ??
-        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  try {
+    if (isInputEl(el) || isTextAreaEl(el)) {
+      if (isInputEl(el)) {
+        const bad = constrainedInputError(el, text);
+        if (bad) return { ok: false, error: bad };
+      }
+      el.focus();
+      setInputValue(el, text);
+      // If the browser rejected a temporal value, .value stays empty / unchanged — treat as failure.
+      if (isInputEl(el)) {
+        const kind = resolveInputType(el);
+        if (
+          (kind === "time" || kind === "date" || kind === "datetime-local" || kind === "month" || kind === "week") &&
+          text.trim() &&
+          !el.value
+        ) {
+          return {
+            ok: false,
+            error: `Browser rejected value for input[type=${kind}] (got "${text.slice(0, 48)}"). Wrong field — use a text input for titles.`,
+          };
+        }
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      if (submit) {
+        el.form?.requestSubmit?.() ??
+          el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      }
+    } else {
+      el.focus();
+      el.textContent = text;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
     }
-  } else {
-    (el as HTMLElement).focus();
-    (el as HTMLElement).textContent = text;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    return { ok: true, data: { typed: text.length } };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error:
+        msg.includes("required format") || msg.includes("HH:mm")
+          ? `${msg} — wrong field (likely typed a title into a time/date input). Click Plan title / text input, then retry.`
+          : msg,
+    };
   }
-  return { ok: true, data: { typed: text.length } };
 }
 
 function doScroll(
@@ -315,21 +477,108 @@ function doScroll(
   return { ok: true, data: { scrolled: direction, percent: percent ?? null } };
 }
 
-function collectInteractive(doc: Document, limit: number): HTMLElement[] {
-  const sel =
-    'a[href], button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], summary, [contenteditable="true"]';
-  const raw = Array.from(doc.querySelectorAll(sel)) as HTMLElement[];
+const INTERACTIVE_SEL =
+  'a[href], button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], summary, [contenteditable="true"]';
+
+/**
+ * Topmost open dialog/modal.
+ * 1) ARIA: [aria-modal], role=dialog, dialog[open]
+ * 2) Heuristic (Nanobrowser-style stacking): high-z fixed/absolute portals on
+ *    document.body — e.g. airon.coach FloatingWorkoutEditor (z-index 9999) which
+ *    historically lacked role=dialog, so calendar buttons filled the index.
+ */
+function findTopModal(doc: Document): HTMLElement | null {
+  const candidates = Array.from(
+    doc.querySelectorAll('[aria-modal="true"], dialog[open], [role="dialog"]'),
+  ) as HTMLElement[];
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const el = candidates[i]!;
+    if (!isVisible(el)) continue;
+    if (el.getAttribute("aria-hidden") === "true") continue;
+    return el;
+  }
+  return findTopStackedOverlay(doc);
+}
+
+/** Body-level fixed/absolute portals with high z-index + interactive children. */
+function findTopStackedOverlay(doc: Document): HTMLElement | null {
+  const view = doc.defaultView;
+  const body = doc.body;
+  if (!view || !body) return null;
+
+  type Hit = { el: HTMLElement; z: number; score: number };
+  const hits: Hit[] = [];
+
+  const consider = (el: HTMLElement) => {
+    if (!isVisible(el)) return;
+    if (el.getAttribute("aria-hidden") === "true") return;
+    const style = view.getComputedStyle(el);
+    // Prefer computed; fall back to inline (jsdom / React style props).
+    const pos = style.position !== "static" ? style.position : el.style.position || style.position;
+    if (pos !== "fixed" && pos !== "absolute") return;
+    const zRaw = style.zIndex !== "auto" && style.zIndex !== "" ? style.zIndex : el.style.zIndex || "0";
+    const z = zRaw === "auto" ? 0 : Number.parseInt(zRaw, 10);
+    if (!Number.isFinite(z) || z < 50) return;
+    const interactives = el.querySelectorAll(INTERACTIVE_SEL);
+    if (interactives.length < 2) return; // need a real panel, not a lone FAB
+    const rect = el.getBoundingClientRect?.();
+    if (!rect || (rect.width < 120 && rect.height < 120)) return;
+    // Prefer compact floating panels over full-viewport shells that wrap the app.
+    const vw = view.innerWidth || 1;
+    const vh = view.innerHeight || 1;
+    const cover = (rect.width * rect.height) / (vw * vh);
+    // Full-screen dimmers (cover≈1) are OK if they host the dialog content.
+    const score = z * 1000 + interactives.length * 10 - (cover > 0.95 ? 0 : cover * 5);
+    hits.push({ el, z, score });
+  };
+
+  // Portals almost always append as direct body children (React createPortal).
+  for (const child of Array.from(body.children) as HTMLElement[]) {
+    consider(child);
+    // One level deeper: wrapper > panel (mobile sheet pattern).
+    for (const nested of Array.from(child.children).slice(0, 8) as HTMLElement[]) {
+      consider(nested);
+    }
+  }
+
+  if (!hits.length) return null;
+  hits.sort((a, b) => b.score - a.score || b.z - a.z);
+  return hits[0]!.el;
+}
+
+function collectInteractive(
+  doc: Document,
+  limit: number,
+): { els: HTMLElement[]; scope: "dialog" | "page" } {
+  const modal = findTopModal(doc);
+  const root: ParentNode = modal ?? doc;
+  const raw = Array.from(root.querySelectorAll(INTERACTIVE_SEL)) as HTMLElement[];
   const out: HTMLElement[] = [];
   for (const el of raw) {
     if (out.length >= limit) break;
     if (!isVisible(el)) continue;
+    // When scoped to dialog, keep everything visible inside it.
+    // On full page, skip nodes under aria-hidden / inert ancestors.
+    if (!modal && isOccluded(el)) continue;
     out.push(el);
   }
-  return out;
+  return { els: out, scope: modal ? "dialog" : "page" };
+}
+
+/** Hidden by an ancestor (common for closed drawers / offscreen menus). */
+function isOccluded(el: HTMLElement): boolean {
+  if (el.closest("[inert]")) return true;
+  let p: HTMLElement | null = el.parentElement;
+  while (p) {
+    if (p.getAttribute("aria-hidden") === "true") return true;
+    p = p.parentElement;
+  }
+  return false;
 }
 
 function isVisible(el: HTMLElement): boolean {
   if (el.getAttribute("aria-hidden") === "true") return false;
+  if (el.hasAttribute("inert")) return false;
   const style = el.ownerDocument.defaultView?.getComputedStyle?.(el);
   if (style && (style.display === "none" || style.visibility === "hidden")) return false;
   const rect = el.getBoundingClientRect?.();

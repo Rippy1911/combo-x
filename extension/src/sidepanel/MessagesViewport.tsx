@@ -11,42 +11,60 @@ import {
 const WINDOW = 50;
 const HALF = 25;
 const EST_ROW_PX = 120;
+/** Hysteresis: stick when within this of bottom; unstick only when further away. */
+const STICK_PX = 96;
+const UNSTICK_PX = 160;
 
 export type MessagesViewportProps = {
   itemCount: number;
   /** Re-anchor to bottom when this changes (session id / load). */
   stickKey: string | null;
+  /** Bump when streaming content grows so we re-stick without changing itemCount. */
+  contentTick?: number | string;
   children: (range: { start: number; end: number }) => ReactNode;
 };
 
 /**
  * Windowed message list: at most 50 turns.
- * - Stuck to bottom → last 50 (50 above)
- * - Near top → first 50
- * - Mid-scroll → ~25 above / 25 below estimated center
+ * Sticks to bottom while the user is near the bottom; ResizeObserver follows
+ * content growth without fighting mid-scroll.
  */
-export function MessagesViewport({ itemCount, stickKey, children }: MessagesViewportProps) {
+export function MessagesViewport({
+  itemCount,
+  stickKey,
+  contentTick = 0,
+  children,
+}: MessagesViewportProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: Math.min(WINDOW, itemCount) });
+  const [showJump, setShowJump] = useState(false);
   const stickBottomRef = useRef(true);
   const lastStickKey = useRef<string | null>(null);
+  const scrollingProgrammatically = useRef(false);
 
-  const recompute = useCallback(() => {
+  const scrollToBottom = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el || !stickBottomRef.current) return;
+    scrollingProgrammatically.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      scrollingProgrammatically.current = false;
+    });
+  }, []);
+
+  const recomputeWindow = useCallback(() => {
     const el = scrollerRef.current;
     if (!el || itemCount <= WINDOW) {
       setRange({ start: 0, end: itemCount });
       return;
     }
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    const atBottom = scrollTop + clientHeight >= scrollHeight - 48;
-    const atTop = scrollTop <= 48;
-
-    if (stickBottomRef.current || atBottom) {
-      stickBottomRef.current = atBottom;
+    if (stickBottomRef.current) {
       setRange({ start: itemCount - WINDOW, end: itemCount });
       return;
     }
-    if (atTop) {
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    if (scrollTop <= 48) {
       setRange({ start: 0, end: WINDOW });
       return;
     }
@@ -61,44 +79,73 @@ export function MessagesViewport({ itemCount, stickKey, children }: MessagesView
     if (stickKey !== lastStickKey.current) {
       lastStickKey.current = stickKey;
       stickBottomRef.current = true;
+      setShowJump(false);
       if (itemCount > WINDOW) {
         setRange({ start: itemCount - WINDOW, end: itemCount });
       } else {
         setRange({ start: 0, end: itemCount });
       }
     } else if (stickBottomRef.current && itemCount > WINDOW) {
-      setRange({ start: itemCount - WINDOW, end: itemCount });
+      setRange((r) => {
+        const next = { start: itemCount - WINDOW, end: itemCount };
+        return r.start === next.start && r.end === next.end ? r : next;
+      });
     } else if (itemCount <= WINDOW) {
-      setRange({ start: 0, end: itemCount });
+      setRange((r) => (r.start === 0 && r.end === itemCount ? r : { start: 0, end: itemCount }));
     }
   }, [stickKey, itemCount]);
 
   useLayoutEffect(() => {
-    const el = scrollerRef.current;
-    if (!el || !stickBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [stickKey, itemCount, range.end]);
+    scrollToBottom();
+  }, [stickKey, itemCount, range.end, contentTick, scrollToBottom]);
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const onScroll = () => {
+      if (scrollingProgrammatically.current) return;
       const { scrollTop, scrollHeight, clientHeight } = el;
-      stickBottomRef.current = scrollTop + clientHeight >= scrollHeight - 48;
-      recompute();
+      const dist = scrollHeight - clientHeight - scrollTop;
+      if (stickBottomRef.current) {
+        if (dist > UNSTICK_PX) {
+          stickBottomRef.current = false;
+          setShowJump(true);
+          recomputeWindow();
+        }
+      } else if (dist <= STICK_PX) {
+        stickBottomRef.current = true;
+        setShowJump(false);
+        recomputeWindow();
+        scrollToBottom();
+      } else {
+        recomputeWindow();
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [recompute]);
+  }, [recomputeWindow, scrollToBottom]);
+
+  // Follow content height while stuck (streaming / tool chips).
+  useEffect(() => {
+    const root = scrollerRef.current;
+    const inner = contentRef.current;
+    if (!root) return;
+    const ro = new ResizeObserver(() => {
+      if (stickBottomRef.current) scrollToBottom();
+    });
+    ro.observe(root);
+    if (inner) ro.observe(inner);
+    return () => ro.disconnect();
+  }, [scrollToBottom, itemCount, range.end]);
 
   const topSpacer = range.start * EST_ROW_PX;
   const bottomSpacer = Math.max(0, itemCount - range.end) * EST_ROW_PX;
-
   const hiddenAbove = range.start;
   const hiddenBelow = Math.max(0, itemCount - range.end);
 
   const jumpOlder = () => {
     stickBottomRef.current = false;
+    setShowJump(true);
     setRange((r) => {
       const start = Math.max(0, r.start - HALF);
       return { start, end: Math.min(itemCount, start + WINDOW) };
@@ -119,15 +166,13 @@ export function MessagesViewport({ itemCount, stickKey, children }: MessagesView
 
   const jumpBottom = () => {
     stickBottomRef.current = true;
+    setShowJump(false);
     setRange(
       itemCount > WINDOW
         ? { start: itemCount - WINDOW, end: itemCount }
         : { start: 0, end: itemCount },
     );
-    requestAnimationFrame(() => {
-      const el = scrollerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
+    requestAnimationFrame(() => scrollToBottom());
   };
 
   const label = useMemo(() => {
@@ -144,14 +189,16 @@ export function MessagesViewport({ itemCount, stickKey, children }: MessagesView
         </button>
       ) : null}
       <div style={{ height: topSpacer }} aria-hidden />
-      {children(range)}
+      <div ref={contentRef} className="messages-virtual-inner">
+        {children(range)}
+      </div>
       <div style={{ height: bottomSpacer }} aria-hidden />
       {hiddenBelow > 0 ? (
         <button type="button" className="virt-jump" onClick={jumpNewer}>
           ↓ {hiddenBelow} newer message{hiddenBelow === 1 ? "" : "s"}
         </button>
       ) : null}
-      {!stickBottomRef.current && itemCount > 0 ? (
+      {showJump && itemCount > 0 ? (
         <button type="button" className="virt-jump bottom" onClick={jumpBottom}>
           Jump to latest
         </button>

@@ -72,18 +72,29 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+/** Bump when a seed body must refresh existing IDB rows (see SEED_FORCE_REFRESH). */
+export const SEED_REVISION = "v1.6.16";
+
+/** Seed skills rewritten in-place when revision tag is missing. */
+const SEED_FORCE_REFRESH = new Set([
+  "combo-ux-critique",
+  "combo-tasks",
+  "combo-vault-setup",
+]);
+
 export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "updatedAt">[] {
-  const nowTag = ["seed", "tools"];
+  const nowTag = ["seed", "tools", SEED_REVISION];
   return [
     {
       name: "combo-scrape",
       description: "Progressive scrape tables, PDPs, catalog, login, CSV/views export",
       body: `SCRAPE PLAYBOOK
 1) ensure_scrape_table with columns + merge keys BEFORE first navigate
-2) Prefer scrape_pdps or scrape_catalog; else page_digest + upsert_scrape_rows per item
-3) Never dump full get_page for multi-item scrapes
-4) export_csv / save_view when done
-5) Use login + site profile when credentials needed`,
+2) Order/product CSV attachments: parse_data({ attachmentId, intent: "every product name + SAP/index" }) — NEVER paste the truncated chat preview into text=
+3) Prefer scrape_pdps or scrape_catalog; else page_digest + upsert_scrape_rows per item
+4) Never dump full get_page for multi-item scrapes
+5) export_csv / save_view when done
+6) Use login + site profile when credentials needed`,
       tags: [...nowTag, "scrape"],
       scope: "global",
       toolHints: [...TOOL_PACKS.scrape],
@@ -136,27 +147,42 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
     },
     {
       name: "combo-ux-critique",
-      description: "Visual UX critique + in-chat HTML prototype playbook",
-      body: `UX VISION LAB PLAYBOOK
-1) Call ux_critique({ scope, focus?, selector? }) — always-on; captures + vision-attaches
-2) Critique with rubric: hierarchy, contrast, CTA, density, mobile, a11y, copy
-3) Propose fixes, then open_preview({ kind:"html", title, html, interactive:true }) for an interactive redesign in chat
-4) For before/after images: open_preview({ kind:"compare", beforeSrc, afterSrc })
-5) Do NOT unlock combo-media unless you need raw screenshot_* / recording tools
-6) Never paste base64 into chat — the runtime attaches images`,
+      description: "Visual UX critique + annotated screenshots + live CSS before/after",
+      body: `UX VISION LAB PLAYBOOK (MANDATORY for visual UX audits)
+
+NEVER answer a visual UX audit from get_page / get_links alone.
+
+1) navigate to the target URL (or confirm active tab)
+2) ux_critique({ scope:"viewport"|"full"|"element", focus? }) — REQUIRED
+   - Shows a screenshot artifact in chat
+   - Returns stub { attachmentId } — save that id
+   - Image is vision-attached for the NEXT model turn
+3) On the turn after vision: critique with rubric (hierarchy, contrast, CTA, density, mobile, a11y, copy)
+   - Number findings 1..N
+4) annotate_screenshot({ attachmentId, title, markers:[{x,y,label,note}] })
+   - x/y are percent 0–100; labels must match finding numbers
+5) Propose fixes / full report:
+   a) open_preview({ kind:"html", title, html, interactive:true, attachmentIds:[…] })
+      — embed shots with <img src="attachment:UUID"> (UUID from ux_critique stubs)
+      — prefer CSS-only UI (details/summary, radio+:checked, :target); JS may be sandboxed
+   b) create_report({ title, bodyHtml, attachmentIds }) — downloads + opens preview
+   c) Live proof: page_css_preview → ux_critique → compare → page_css_clear
+6) Never paste base64 — always attachmentId / attachment:UUID / beforeAttachmentId
+7) Do NOT unlock combo-media unless you need raw screenshot_* / recording`,
       tags: [...nowTag, "ux", "vision", "design"],
       scope: "global",
-      // M6: do not duplicate combo-media unlock — ux_critique/open_preview are ALWAYS_ON
+      // ALWAYS_ON: ux_critique, open_preview, annotate_screenshot, page_css_*
       toolHints: [],
     },
     {
       name: "combo-tasks",
-      description: "Plan work with the conversation / global task board",
+      description: "Plan work with conversation tasks (session checklist + global backlog)",
       body: `TASKS PLAYBOOK
-- list_tasks to see open work (session + global)
-- create_task with a clear title; update_task status as you progress
-- Prefer one task per discrete deliverable; keep titles short
-- Tools are always-on — no pack unlock needed`,
+- For multi-step work in this chat: create_task (defaults to this session). One task per discrete deliverable; short titles.
+- Set status=doing on the active item; update_task status=done when a step finishes — never invent completion.
+- list_tasks to inspect; reorder_tasks({ orderedIds }) to set priority (first = top).
+- Global backlog: create_task with sessionId omitted only when work is cross-chat; prefer session tasks for a plan.
+- Tools are always-on — no pack unlock needed. Operator sees Conversation Tasks drawer in Chat.`,
       tags: [...nowTag, "tasks", "planning"],
       scope: "global",
       toolHints: [],
@@ -167,7 +193,7 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       body: `MEMORY PLAYBOOK
 - remember / save_memory for facts that should survive turns (scope global|agent)
 - recall / memory_list before inventing user preferences
-- search_sessions for prior chats; save_bookmark / set_reminder / create_report for artifacts
+- search_sessions (empty query = recent) + get_session for prior chats; save_bookmark / set_reminder / create_report for artifacts
 - Tools are always-on — no pack unlock needed`,
       tags: [...nowTag, "memory", "notes"],
       scope: "global",
@@ -187,16 +213,63 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
     },
     {
       name: "combo-vault-setup",
-      description: "First-run vault: passphrase, OpenRouter key, optional GitHub token",
+      description: "First-run vault: passphrase, OpenRouter key, optional GitHub/uploads/food tokens",
       body: `VAULT SETUP PLAYBOOK
 1) User sets a passphrase in Settings (UI) — never ask them to paste it in chat
 2) Save openrouter_api_key + openrouter_model via Settings → Vault / API keys
-3) Optional: github_token for the GitHub REST connector template
+3) Optional vault labels + Settings → Connectors templates:
+   - github_token → GitHub REST
+   - fc_uploads_key (fcu_*) → NS Uploads (protected tier; public publish_upload needs no key)
+   - ns_food_key (nsk_*) → NS Food (search/product/autocomplete via rest_request)
 4) Lock vault when done; secrets stay AES-GCM encrypted locally
 5) Do not echo secret values in tool args or replies`,
       tags: [...nowTag, "vault", "onboarding"],
       scope: "global",
       toolHints: [],
+    },
+    {
+      name: "combo-map",
+      description: "Plot lat/lng markers on OpenFreeMap PL/EN basemap and share via uploads",
+      body: `MAP PLAYBOOK
+1) Collect markers as {lat, lng, label?, note?} (from scrape rows, Nominatim, or user)
+2) create_map_report({ title, markers, locale: "pl"|"en" }) — opens interactive MapLibre preview (style inlined; tiles from OpenFreeMap)
+3) To share: publish_upload({ filename: "map.html", reportId: <id from step 2> }) → file_url on uploads.nextsolutions.studio
+4) Prefer publish_upload over chrome-extension:// links (CORS + shareability)
+5) Do NOT invent coordinates; geocode via a REST connector or ask the user
+6) skill_read this skill for the playbook (tools are always-on)`,
+      tags: [...nowTag, "map", "geo", "uploads"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-uploads",
+      description: "Publish HTML reports, maps, CSV to uploads.nextsolutions.studio",
+      body: `UPLOADS PLAYBOOK
+- publish_upload({ filename, text }) for ad-hoc HTML/CSV/JSON
+- publish_upload({ filename, reportId }) after create_report / create_map_report
+- publish_upload({ filename, attachmentId }) for chat files (images/PDF when dataUrl present)
+- Public tier (default): no API key; workspace/app = combo-x → https://uploads…/f/<sha>.<ext>
+- Protected tier: Settings → Add NS Uploads template + vault fc_uploads_key → publish_upload({ connectorId: "ns-uploads", … })
+- openTab defaults true — share the returned file_url
+- Never echo vault secrets; uploads are world-readable on public tier — do not upload passwords`,
+      tags: [...nowTag, "uploads", "cdn", "share"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-ns-food",
+      description: "Enrich scrapes with ns-food macros / barcode lookup via REST connector",
+      body: `NS-FOOD PLAYBOOK
+1) Settings → Vault label ns_food_key (nsk_…) + Connectors → Add NS Food template (id ns-food)
+2) skill_read combo-ns-food (or combo-rest) to unlock rest_request if gated
+3) Search: rest_request({ connectorId:"ns-food", method:"GET", path:"/v1/search", query:{ q, locale:"pl", page_size:"10" } })
+4) Barcode: rest_request({ connectorId:"ns-food", method:"GET", path:"/v1/product/"+ean })
+5) Autocomplete: path /v1/autocomplete ?q=&locale=
+6) Merge macros into Views via upsert_scrape_rows / save_view — never invent nutrition
+7) Alternate without nsk_: anatome.nextsolutions.studio /v1/food/* (anon, rate-limited)`,
+      tags: [...nowTag, "food", "nutrition", "rest"],
+      scope: "global",
+      toolHints: [...TOOL_PACKS.rest],
     },
     {
       name: "combo-pdf-attach",
@@ -258,11 +331,28 @@ export class SkillStore {
       const byName = new Map(all.map((s) => [s.name, s]));
       const now = new Date().toISOString();
       for (const def of seedSkillDefinitions()) {
-        if (byName.has(def.name)) continue;
+        const existing = byName.get(def.name);
+        if (!existing) {
+          const row: Skill = {
+            ...def,
+            id: crypto.randomUUID(),
+            createdAt: now,
+            updatedAt: now,
+          };
+          await idbReq(this.store("readwrite").put(row));
+          continue;
+        }
+        const needsRefresh =
+          SEED_FORCE_REFRESH.has(def.name) &&
+          (existing.tags ?? []).includes("seed") &&
+          !(existing.tags ?? []).includes(SEED_REVISION);
+        if (!needsRefresh) continue;
         const row: Skill = {
-          ...def,
-          id: crypto.randomUUID(),
-          createdAt: now,
+          ...existing,
+          description: def.description,
+          body: def.body,
+          tags: def.tags ?? existing.tags,
+          toolHints: def.toolHints,
           updatedAt: now,
         };
         await idbReq(this.store("readwrite").put(row));
@@ -308,6 +398,19 @@ export class SkillStore {
   async get(id: string): Promise<Skill | null> {
     await this.ensureSeed();
     return (await idbReq<Skill | undefined>(this.store("readonly").get(id))) ?? null;
+  }
+
+  /**
+   * Exact name match. Prefers global over agent-scoped when both exist.
+   * Used when models pass seed names (e.g. combo-scrape) as skill_read id.
+   */
+  async getByName(name: string, opts: { agentId?: string } = {}): Promise<Skill | null> {
+    const needle = name.trim();
+    if (!needle) return null;
+    const candidates = await this.list({ agentId: opts.agentId, limit: 500 });
+    const matches = candidates.filter((s) => s.name === needle);
+    if (!matches.length) return null;
+    return matches.find((s) => s.scope === "global") ?? matches[0] ?? null;
   }
 
   async delete(id: string): Promise<boolean> {

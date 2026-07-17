@@ -35,9 +35,13 @@ export function createChromeBridge(): BrowserBridge {
         type: "open_tab",
         url,
         active,
-      })) as { ok: boolean; data?: { id: number; url: string }; error?: string };
+      })) as {
+        ok: boolean;
+        data?: { id: number; url: string; title?: string; contentReady?: boolean; warning?: string };
+        error?: string;
+      };
       if (!res.ok || !res.data) throw new Error(res.error ?? "open_tab failed");
-      await sleep(600);
+      // SW already waits for load + content ready — no fixed sleep race.
       return res.data;
     },
     async activateTab(tabId: number) {
@@ -46,7 +50,7 @@ export function createChromeBridge(): BrowserBridge {
         tabId,
       })) as { ok: boolean; error?: string };
       if (!res.ok) throw new Error(res.error ?? "activate_tab failed");
-      await sleep(300);
+      await sleep(200);
       return { ok: true };
     },
     async navigate(url: string, tabId?: number) {
@@ -54,19 +58,44 @@ export function createChromeBridge(): BrowserBridge {
         type: "navigate",
         url,
         tabId,
-      })) as { ok: boolean; data?: { url: string }; error?: string };
+      })) as {
+        ok: boolean;
+        data?: {
+          url: string;
+          title?: string;
+          previousUrl?: string;
+          contentReady?: boolean;
+          warning?: string;
+        };
+        error?: string;
+      };
       if (!res.ok) throw new Error(res.error ?? "navigate failed");
-      await sleep(600);
-      return { ok: true, url: res.data?.url ?? url };
+      return {
+        ok: true,
+        url: res.data?.url ?? url,
+        title: res.data?.title,
+        previousUrl: res.data?.previousUrl,
+        contentReady: res.data?.contentReady !== false,
+        warning: res.data?.warning,
+      };
     },
     async goBack(tabId?: number) {
       const res = (await chrome.runtime.sendMessage({
         type: "go_back",
         tabId,
-      })) as { ok: boolean; error?: string };
+      })) as {
+        ok: boolean;
+        data?: { url?: string; title?: string; contentReady?: boolean; warning?: string };
+        error?: string;
+      };
       if (!res.ok) throw new Error(res.error ?? "go_back failed");
-      await sleep(400);
-      return { ok: true };
+      return {
+        ok: true,
+        url: res.data?.url,
+        title: res.data?.title,
+        contentReady: res.data?.contentReady !== false,
+        warning: res.data?.warning,
+      };
     },
     async closeTab(tabId: number) {
       const res = (await chrome.runtime.sendMessage({

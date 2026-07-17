@@ -181,38 +181,50 @@ export function MemoryBrowser({
         <ul className="list">
           {filtered.map((e) => (
             <li key={e.id}>
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
-                <span
-                  className={`scope-badge${e.scope === "agent" ? " agent" : " global"}`}
-                >
-                  {e.scope === "agent" ? agentName(e.agentId) : "global"}
-                </span>
-                <span className="hint">{new Date(e.createdAt).toLocaleString()}</span>
-              </div>
-              {e.tags.length > 0 ? (
-                <div className="chips tool-chip-grid" style={{ marginTop: 6 }}>
-                  {e.tags.map((t) => (
-                    <span key={t} className="chip-toggle on">
-                      {t}
+              <div className="list-card-top">
+                <div className="list-card-body">
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <span
+                      className={`scope-badge${e.scope === "agent" ? " agent" : " global"}`}
+                    >
+                      {e.scope === "agent" ? agentName(e.agentId) : "global"}
                     </span>
-                  ))}
+                    <span className="hint">{new Date(e.createdAt).toLocaleString()}</span>
+                  </div>
+                  {e.tags.length > 0 ? (
+                    <div className="chips tool-chip-grid" style={{ marginTop: 6 }}>
+                      {e.tags.map((t) => (
+                        <span key={t} className="chip-toggle on">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="clamp-2" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                    {e.text}
+                  </p>
                 </div>
-              ) : null}
-              <p className="clamp-2" style={{ margin: "6px 0 0", fontSize: 12 }}>
-                {e.text}
-              </p>
-              <div className="row" style={{ marginTop: 8 }}>
-                <button type="button" onClick={() => openEdit(e)}>
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  disabled={busy}
-                  onClick={() => void deleteEntry(e.id)}
-                >
-                  Delete
-                </button>
+                <div className="list-row-actions">
+                  <button
+                    type="button"
+                    className="msg-action icon-btn"
+                    title="Edit"
+                    aria-label="Edit"
+                    onClick={() => openEdit(e)}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="msg-action icon-btn dangerish"
+                    title="Delete"
+                    aria-label="Delete"
+                    disabled={busy}
+                    onClick={() => void deleteEntry(e.id)}
+                  >
+                    ⌫
+                  </button>
+                </div>
               </div>
             </li>
           ))}
