@@ -22,8 +22,11 @@ full internal documentation, and several security/quality fixes — all verified
   degrades gracefully instead of crashing.
 
 ### Documentation
+- `docs/USER_GUIDE.md` — end-user guide with **screenshots** (`docs/images/`),
+  user stories, and 6 concrete use cases.
 - `docs/FEATURES.md` — authoritative internal feature map (78 tools, skills, memory,
   context management, agents/sub-agents, approvals/audit, all stores, LLM client).
+- `docs/TESTING.md` — honest coverage map (~76%) + prioritized gaps.
 - `docs/AUDIT.md`, `docs/COMPETITORS.md`, `docs/ROADMAP.md`, `docs/FIREFOX.md`,
   `docs/DEBUGGING.md`.
 
@@ -40,7 +43,8 @@ full internal documentation, and several security/quality fixes — all verified
 
 ## Verification
 - `pnpm typecheck` — clean
-- `pnpm test` — 160 passed, 6 skipped
+- `pnpm test` — 173 passed, 6 skipped
+- `pnpm test:coverage` — ~76% statements (`packages/core`)
 - `pnpm build` (Chrome) — ok
 - `pnpm build:firefox` + `web-ext lint` — 0 errors
 - `pnpm test:e2e` — 6 passed
