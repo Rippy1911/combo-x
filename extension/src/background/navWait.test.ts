@@ -54,6 +54,18 @@ describe("navWait", () => {
     ).toBe(true);
   });
 
+  it("does not settle on unrelated origin after leaving start", () => {
+    expect(
+      isNavigationSettled({
+        startUrl: "https://www.google.com/",
+        targetUrl: "https://airon.coach/",
+        currentUrl: "https://accounts.google.com/",
+        status: "complete",
+        sawLoading: true,
+      }),
+    ).toBe(false);
+  });
+
   it("idempotent navigate when already on target", () => {
     expect(
       isNavigationSettled({

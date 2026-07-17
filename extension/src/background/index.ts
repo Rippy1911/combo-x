@@ -197,7 +197,7 @@ async function waitForHistoryNav(
   });
 }
 
-/** After document complete: reinject content and confirm it reports the new URL. */
+/** After document complete: confirm content script reports the new URL. */
 async function ensureContentReady(
   tabId: number,
   expectedUrl: string,
@@ -207,15 +207,8 @@ async function ensureContentReady(
   await new Promise((r) => setTimeout(r, 400));
   let lastUrl = "";
   let lastErr = "";
+  let reinjected = false;
   for (let i = 0; i < attempts; i += 1) {
-    try {
-      await reinjectContent(tabId);
-    } catch (e) {
-      lastErr = e instanceof Error ? e.message : String(e);
-      await new Promise((r) => setTimeout(r, 250 * (i + 1)));
-      continue;
-    }
-    await new Promise((r) => setTimeout(r, 150));
     try {
       const raw = await chrome.tabs.sendMessage(tabId, {
         op: "get_page",
@@ -230,17 +223,26 @@ async function ensureContentReady(
       if (url && urlsMatchTarget(url, expectedUrl)) {
         return { ok: true, url };
       }
-      // Accept any non-empty URL that differs from chrome:// / about: if expected is http(s)
-      if (url && /^https?:/i.test(url) && !urlsMatchTarget(url, "about:blank")) {
-        // Redirect away from target host — still ready, just different final URL
+      // Content alive on final tab URL (same-host redirect already accepted by urlsMatchTarget).
+      if (url && /^https?:/i.test(url)) {
         const tab = await chrome.tabs.get(tabId);
-        if (tab.status === "complete" && tab.url && urlsMatchTarget(url, tab.url)) {
+        if (tab.status === "complete" && tab.url && urlsMatchTarget(url, tab.url) && urlsMatchTarget(url, expectedUrl)) {
           return { ok: true, url };
         }
       }
       lastErr = url ? `content still on ${url}` : "content missing url";
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e);
+      // Reinject at most once — repeated executeScript stacks onMessage listeners.
+      if (!reinjected && shouldAttemptContentRecovery(lastErr)) {
+        reinjected = true;
+        try {
+          await reinjectContent(tabId);
+          await new Promise((r) => setTimeout(r, 200));
+        } catch (inj) {
+          lastErr = inj instanceof Error ? inj.message : String(inj);
+        }
+      }
     }
     await new Promise((r) => setTimeout(r, 300 * (i + 1)));
   }

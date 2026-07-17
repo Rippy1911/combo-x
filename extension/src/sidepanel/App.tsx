@@ -400,6 +400,7 @@ export function App() {
   const [lastTurnUsage, setLastTurnUsage] = useState<UsageSplit | null>(null);
   const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
   type QueuedSend = {
+    sessionId: string;
     text: string;
     attachments: AttachmentRecord[];
     secrets: PendingSecret[];
@@ -788,12 +789,17 @@ export function App() {
       };
       try {
         await sessions.save(updated);
-        setCurrentSession(updated);
-        localStorage.setItem(LAST_SESSION_KEY, updated.id);
+        // Never hijack the open chat when a background run persists.
+        if (activeSessionIdRef.current === updated.id) {
+          setCurrentSession(updated);
+          localStorage.setItem(LAST_SESSION_KEY, updated.id);
+        }
         await refreshSessions();
       } catch (err) {
         console.error("[persistSession] failed", err);
-        setStatus("Warning: could not save session history");
+        if (activeSessionIdRef.current === updated.id) {
+          setStatus("Warning: could not save session history");
+        }
       }
     },
     [refreshSessions, sessions],
@@ -1099,16 +1105,16 @@ export function App() {
   }, [bumpRuntimeMeta, ensureRuntime, sessions, stashActiveWorkspace]);
 
   const stop = useCallback(() => {
-    const id = activeSessionIdRef.current;
-    if (id) {
-      abortBySessionRef.current.get(id)?.abort();
-      abortBySessionRef.current.delete(id);
-      const pa = pendingApprovalBySessionRef.current.get(id);
+    // Abort every in-flight session (active + background) so STOP always works.
+    for (const [sid, controller] of abortBySessionRef.current) {
+      controller.abort();
+      abortBySessionRef.current.delete(sid);
+      const pa = pendingApprovalBySessionRef.current.get(sid);
       if (pa) {
         pa.resolve(false);
-        pendingApprovalBySessionRef.current.delete(id);
+        pendingApprovalBySessionRef.current.delete(sid);
       }
-      const rt = runtimesRef.current.get(id);
+      const rt = runtimesRef.current.get(sid);
       if (rt) {
         rt.running = false;
         rt.status = "Stopped";
@@ -1801,11 +1807,8 @@ export function App() {
         publishTurns(nextTurns);
         publishLastTurn(turnSplit);
         if (session) {
-          await persistSession(
-            session,
-            nextTurns,
-            addUsage(rt.sessionUsage.total, turnSplit.total),
-          );
+          // rt.sessionUsage already includes this turn via publishSessionUsage.
+          await persistSession(session, nextTurns, rt.sessionUsage.total);
         }
         const doneStatus = result.hitStepLimit
           ? "Step limit — say “continue” to keep going"
@@ -1821,21 +1824,27 @@ export function App() {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const errText = `Error: ${msg}`;
-        publishTurns((prev) =>
-          prev.map((t) => {
-            if (t.id !== assistantId) return t;
-            const content = t.content?.trim() ? t.content : errText;
-            const hasMsg = (t.blocks ?? []).some((b) => b.kind === "message");
-            const blocks = hasMsg
-              ? t.blocks
-              : [
-                  ...(t.blocks ?? []),
-                  { id: crypto.randomUUID(), kind: "message" as const, text: content },
-                ];
-            return { ...t, content, blocks };
-          }),
-        );
+        const erroredTurns = (rt.turns as UiTurn[]).map((t) => {
+          if (t.id !== assistantId) return t;
+          const content = t.content?.trim() ? t.content : errText;
+          const hasMsg = (t.blocks ?? []).some((b) => b.kind === "message");
+          const blocks = hasMsg
+            ? t.blocks
+            : [
+                ...(t.blocks ?? []),
+                { id: crypto.randomUUID(), kind: "message" as const, text: content },
+              ];
+          return { ...t, content, blocks };
+        });
+        publishTurns(erroredTurns);
         publishStatus("Error");
+        if (session) {
+          try {
+            await persistSession(session, erroredTurns, rt.sessionUsage.total);
+          } catch {
+            /* already logged in persistSession */
+          }
+        }
         if (!isBoundActive()) {
           rt.unread = true;
           bump();
@@ -1910,7 +1919,9 @@ export function App() {
     const activeRunning =
       (activeId ? !!runtimesRef.current.get(activeId)?.running : false) || runningRef.current;
     if (activeRunning) {
+      if (!activeId) return;
       const item: QueuedSend = {
+        sessionId: activeId,
         text:
           text ||
           `Analyze ${pending.length} attachment(s): ${pending.map((p) => p.name).join(", ")}`,
@@ -1931,12 +1942,14 @@ export function App() {
 
   useEffect(() => {
     const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
+    if (!activeId) return;
     const activeRunning =
-      (activeId ? !!runtimesRef.current.get(activeId)?.running : false) || running;
-    if (activeRunning || runningRef.current) return;
-    const next = sendQueueRef.current[0];
-    if (!next) return;
-    sendQueueRef.current = sendQueueRef.current.slice(1);
+      !!runtimesRef.current.get(activeId)?.running || running || runningRef.current;
+    if (activeRunning) return;
+    const idx = sendQueueRef.current.findIndex((q) => q.sessionId === activeId);
+    if (idx < 0) return;
+    const next = sendQueueRef.current[idx]!;
+    sendQueueRef.current = sendQueueRef.current.filter((_, i) => i !== idx);
     setSendQueue([...sendQueueRef.current]);
     void send(next.text, next);
   }, [currentSession?.id, running, send]);
@@ -2759,7 +2772,19 @@ export function App() {
               >
                 {running ? "Queue" : "Send"}
               </button>
-              <button type="button" className="danger" disabled={!running} onClick={stop}>
+              <button
+                type="button"
+                className="danger"
+                disabled={!running && !runtimeMeta.some((m) => m.running)}
+                title={
+                  running
+                    ? "Stop this conversation"
+                    : runtimeMeta.some((m) => m.running)
+                      ? "Stop all background runs"
+                      : "Nothing running"
+                }
+                onClick={stop}
+              >
                 STOP
               </button>
             </div>

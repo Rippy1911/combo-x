@@ -61,12 +61,10 @@ export function isNavigationSettled(opts: {
   // Classic race: still complete on the *old* page — keep waiting.
   if (stillOnStart && !opts.sawLoading) return false;
 
-  if (atTarget) return true;
-
-  // Redirect to same site after we left the start URL.
-  if (opts.sawLoading && !stillOnStart) return true;
-
-  return false;
+  // Settle only when the document matches the intended target (incl. same-host
+  // redirects via urlsMatchTarget). Never settle on an unrelated origin just
+  // because we left startUrl.
+  return atTarget;
 }
 
 /** For go_back / reload: settle once we leave startUrl after seeing loading. */
