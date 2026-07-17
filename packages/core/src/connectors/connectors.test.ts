@@ -68,6 +68,28 @@ describe("resolveHeaders", () => {
     );
     expect(headers.Authorization).toBe("Bearer ghp_abc");
   });
+
+  it("does not double-prefix an already-Bearer secret", async () => {
+    const headers = await resolveHeaders(
+      { Authorization: { vaultLabel: "t" } },
+      async () => "Bearer already",
+    );
+    expect(headers.Authorization).toBe("Bearer already");
+  });
+
+  it("passes non-Authorization secret headers through verbatim", async () => {
+    const headers = await resolveHeaders(
+      { "X-Api-Key": { vaultLabel: "k" } },
+      async () => "raw-key",
+    );
+    expect(headers["X-Api-Key"]).toBe("raw-key");
+  });
+
+  it("throws when a referenced secret is missing", async () => {
+    await expect(
+      resolveHeaders({ Authorization: { vaultLabel: "absent" } }, async () => null),
+    ).rejects.toThrow(/vault secret missing: absent/);
+  });
 });
 
 describe("restRequest", () => {
@@ -92,6 +114,59 @@ describe("restRequest", () => {
       "https://api.example.com/v1/items",
       expect.objectContaining({ method: "GET" }),
     );
+  });
+
+  it("builds query params and JSON body with Content-Type", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const connector: RestConnector = {
+      id: "r2",
+      kind: "rest",
+      name: "T",
+      baseUrl: "https://api.example.com/",
+      headers: {},
+    };
+    const out = await restRequest(
+      connector,
+      { method: "post", path: "items", query: { q: "x", skip: undefined }, body: { a: 1 } },
+      async () => null,
+    );
+    expect(out.ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.example.com/items?q=x");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(JSON.stringify({ a: 1 }));
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+  });
+
+  it("returns a structured error for non-2xx responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ message: "nope" }), { status: 403 })),
+    );
+    const connector: RestConnector = {
+      id: "r3",
+      kind: "rest",
+      name: "T",
+      baseUrl: "https://api.example.com",
+      headers: {},
+    };
+    const out = await restRequest(connector, { path: "/x" }, async () => null);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toBe("REST 403: nope");
+  });
+
+  it("surfaces a missing-secret failure as ok:false", async () => {
+    const connector: RestConnector = {
+      id: "r4",
+      kind: "rest",
+      name: "T",
+      baseUrl: "https://api.example.com",
+      headers: { Authorization: { vaultLabel: "absent" } },
+    };
+    const out = await restRequest(connector, { path: "/x" }, async () => null);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toMatch(/vault secret missing/);
   });
 });
 

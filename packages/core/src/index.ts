@@ -240,6 +240,7 @@ export { PageExtensionStore } from "./pageExtensions/store.js";
 export { urlMatches, patternToRegExp } from "./pageExtensions/match.js";
 export type { PageExtMatch } from "./pageExtensions/match.js";
 export { runPageExtensionInMainWorld, isOverbroadPattern } from "./pageExtensions/inject.js";
+export { BridgeAttemptThrottle } from "./pageExtensions/throttle.js";
 export { sha256Hex } from "./pageExtensions/hash.js";
 export type {
   PageExtension,
