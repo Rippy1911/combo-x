@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug extension in Chrome (dist)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "chrome://extensions",
+      "runtimeArgs": [
+        "--load-extension=${workspaceFolder}/extension/dist",
+        "--disable-extensions-except=${workspaceFolder}/extension/dist"
+      ],
+      "userDataDir": "${workspaceFolder}/.chrome-debug-profile"
+    },
+    {
+      "name": "Run e2e (Playwright)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["playwright", "test"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

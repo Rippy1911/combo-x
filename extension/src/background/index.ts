@@ -29,7 +29,12 @@ import {
 } from "./navWait.js";
 
 chrome.runtime.onInstalled.addListener(() => {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  // chrome.sidePanel is Chromium-only; Firefox exposes the UI via sidebar_action.
+  if (chrome.sidePanel?.setPanelBehavior) {
+    void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {
+      /* not supported on this browser */
+    });
+  }
 });
 
 async function activeTabId(): Promise<number | undefined> {
@@ -623,8 +628,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete" || !tab.url) return;
   if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) return;
-  void injectPageExtensionsForTab({ tabId, autoOnly: true }).catch(() => {
-    /* ignore */
+  void injectPageExtensionsForTab({ tabId, autoOnly: true }).catch((err) => {
+    console.debug("[combo-x] auto-inject page extensions failed", err);
   });
 });
 
@@ -646,8 +651,9 @@ async function fireDueReminders(): Promise<void> {
       });
       await artifacts.markReminderFired(r.id);
     }
-  } catch {
-    /* IDB / notifications may be unavailable in some contexts */
+  } catch (err) {
+    // IDB / notifications may be unavailable in some contexts.
+    console.debug("[combo-x] fireDueReminders failed", err);
   }
 }
 

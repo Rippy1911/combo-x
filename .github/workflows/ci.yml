@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build (Chrome)
+        run: pnpm build
+
+      - name: Build (Firefox)
+        run: pnpm build:firefox
+
+      - name: Lint Firefox build (web-ext)
+        run: npx --yes web-ext lint --source-dir extension/dist-firefox --output text
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: E2E (headless)
+        env:
+          COMBO_X_HEADLESS: "1"
+        run: pnpm test:e2e

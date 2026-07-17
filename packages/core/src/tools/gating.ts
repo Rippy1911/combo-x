@@ -124,6 +124,19 @@ export const SKILL_GATED_TOOL_NAMES: readonly string[] = Object.values(TOOL_PACK
 const ALWAYS_ON_SET = new Set<string>(ALWAYS_ON_TOOL_NAMES);
 const GATED_SET = new Set<string>(SKILL_GATED_TOOL_NAMES);
 
+/** Every tool name the gating layer knows about (always-on ∪ skill-gated). */
+export const KNOWN_TOOL_NAMES: readonly string[] = [
+  ...ALWAYS_ON_TOOL_NAMES,
+  ...SKILL_GATED_TOOL_NAMES,
+];
+
+const KNOWN_SET = new Set<string>(KNOWN_TOOL_NAMES);
+
+/** True when `name` is a real, routable tool (used to validate skill toolHints). */
+export function isKnownTool(name: string): boolean {
+  return KNOWN_SET.has(name);
+}
+
 export function isSkillGatedTool(name: string): boolean {
   return GATED_SET.has(name);
 }

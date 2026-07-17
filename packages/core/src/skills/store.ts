@@ -3,7 +3,7 @@
  * toolHints unlock SKILL_GATED tools for the current run after skill_read.
  */
 
-import { TOOL_PACKS } from "../tools/gating.js";
+import { TOOL_PACKS, isKnownTool } from "../tools/gating.js";
 
 export type SkillScope = "global" | "agent";
 
@@ -378,6 +378,9 @@ export class SkillStore {
     }
     const now = new Date().toISOString();
     const existing = input.id ? await this.get(input.id) : null;
+    // Drop toolHints that don't map to a real, routable tool so a skill can never
+    // "unlock" a non-existent capability (silent no-op / confusing to the model).
+    const toolHints = input.toolHints?.filter(isKnownTool);
     const row: Skill = {
       id: existing?.id ?? input.id ?? crypto.randomUUID(),
       name: input.name.trim(),
@@ -386,7 +389,7 @@ export class SkillStore {
       tags: input.tags ?? [],
       scope,
       agentId: scope === "agent" ? input.agentId!.trim() : undefined,
-      toolHints: input.toolHints,
+      toolHints,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };

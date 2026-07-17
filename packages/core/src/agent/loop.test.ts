@@ -4,6 +4,7 @@ import { ViewStore } from "../local/views.js";
 import { MemoryStore } from "../memory/store.js";
 import { SessionStore } from "../sessions/store.js";
 import { AgentProfileStore } from "../agents/profiles.js";
+import { SkillStore } from "../skills/store.js";
 import { UsageStore } from "../usage/store.js";
 import { AttachmentStore } from "../attachments/store.js";
 import { AGENT_TOOLS } from "../browser/tools.js";
@@ -1019,6 +1020,51 @@ describe("AgentLoop", () => {
     const call = stream.mock.calls[0]?.[0] as { tools?: unknown[] };
     expect(call?.tools).toBeUndefined();
     filterSpy.mockRestore();
+  });
+
+  it("skill_gated: gated tool is tool_locked until skill_read unlocks it", async () => {
+    const skills = new SkillStore({ dbName: `skills_${crypto.randomUUID()}` });
+    const seeded = await skills.search("scrape PDP table export");
+    const scrapeSkill = seeded.find((s) => s.name === "combo-scrape")!;
+    expect(scrapeSkill).toBeTruthy();
+
+    const llm = mockLlm([
+      // 1) try a gated tool before unlocking → tool_locked
+      { content: null, toolCalls: [{ id: "1", name: "export_csv", args: "{}" }] },
+      // 2) read the skill that unlocks the scrape pack
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "skill_read", args: JSON.stringify({ id: scrapeSkill.id }) }],
+      },
+      { content: "done" },
+    ]);
+
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+
+    const lockedResults: unknown[] = [];
+    let unlocked: string[] = [];
+    await agent.run({
+      model: "mock",
+      userMessage: "export the data",
+      toolMode: "skill_gated",
+      skills,
+      approvalMode: "auto_all",
+      maxSteps: 4,
+      onEvent: (e) => {
+        if (e.type === "tool_result" && e.tool === "export_csv") lockedResults.push(e.result);
+        if (e.type === "tools_unlocked") unlocked = e.unlockedTools ?? unlocked;
+      },
+    });
+
+    // First export_csv attempt was locked.
+    expect(lockedResults[0]).toMatchObject({ ok: false, error: "tool_locked" });
+    // skill_read unlocked the scrape pack.
+    expect(unlocked).toContain("export_csv");
+    expect(unlocked).toContain("scrape_pdps");
   });
 
   it("approve_page_extension is rejected for agent (user-only)", async () => {

@@ -1,4 +1,5 @@
 import {
+  BridgeAttemptThrottle,
   PageExtensionStore,
   isOverbroadPattern,
   runPageExtensionInMainWorld,
@@ -39,7 +40,18 @@ export function clearTokensForTab(tabId: number): void {
   for (const k of [...liveTokens.keys()]) {
     if (k.startsWith(prefix)) liveTokens.delete(k);
   }
+  invalidBridgeAttempts.clearPrefix(prefix);
 }
+
+/**
+ * Throttle forged/invalid bridge-token attempts per (tab:script) to blunt token
+ * enumeration / timing attacks (10 attempts / 10s window). Logic lives in core
+ * (BridgeAttemptThrottle) so it is unit-tested without chrome.* APIs.
+ */
+const invalidBridgeAttempts = new BridgeAttemptThrottle({
+  maxAttempts: 10,
+  windowMs: 10_000,
+});
 
 function payloadBytes(value: unknown): number {
   try {
@@ -143,10 +155,18 @@ export async function handlePageExtBridge(msg: {
 }> {
   const ext = await store.get(msg.scriptId);
   if (!ext) return { ok: false, error: "unknown extension", reqId: msg.reqId };
-  const expected = liveTokens.get(tokenKey(msg.tabId, msg.scriptId));
+  const throttleKey = tokenKey(msg.tabId, msg.scriptId);
+  const expected = liveTokens.get(throttleKey);
   if (!expected || !msg.bridgeToken || msg.bridgeToken !== expected) {
-    return { ok: false, error: "invalid bridge token", reqId: msg.reqId };
+    const throttled = invalidBridgeAttempts.register(throttleKey);
+    return {
+      ok: false,
+      error: throttled ? "too many invalid bridge token attempts" : "invalid bridge token",
+      reqId: msg.reqId,
+    };
   }
+  // Valid token — reset the attempt counter for this key.
+  invalidBridgeAttempts.clear(throttleKey);
   const gate = bridgeAllowed(ext, msg.pageUrl);
   if (!gate.ok) return { ok: false, error: gate.error, reqId: msg.reqId };
   const bridge = ext.bridge!;

@@ -127,4 +127,18 @@ describe("SkillStore", () => {
     expect(ux?.body).toContain("annotate_screenshot");
     expect(ux?.tags).toContain(SEED_REVISION);
   });
+
+  it("drops toolHints that are not real tools", async () => {
+    const store = new SkillStore({
+      dbName: `skills_${crypto.randomUUID()}`,
+      skipSeed: true,
+    });
+    const row = await store.save({
+      name: "custom",
+      description: "test skill",
+      body: "do the thing",
+      toolHints: ["export_csv", "not_a_real_tool", "navigate"],
+    });
+    expect(row.toolHints).toEqual(["export_csv", "navigate"]);
+  });
 });

@@ -73,7 +73,9 @@ export function runPageExtensionInMainWorld(args: PageExtInjectArgs): { ok: bool
         get(key: string) {
           if (!args.allowStorage) throw new Error("storage not allowed");
           return new Promise((resolve, reject) => {
-            const reqId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const reqId =
+              globalThis.crypto?.randomUUID?.() ??
+              `${Date.now()}_${Math.random().toString(36).slice(2)}`;
             const onMsg = (ev: MessageEvent) => {
               const d = ev.data;
               if (!d || d.source !== "combo-x-page-ext-host" || d.reqId !== reqId) return;
@@ -100,7 +102,9 @@ export function runPageExtensionInMainWorld(args: PageExtInjectArgs): { ok: bool
         list() {
           if (!args.allowStorage) throw new Error("storage not allowed");
           return new Promise((resolve, reject) => {
-            const reqId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const reqId =
+              globalThis.crypto?.randomUUID?.() ??
+              `${Date.now()}_${Math.random().toString(36).slice(2)}`;
             const onMsg = (ev: MessageEvent) => {
               const d = ev.data;
               if (!d || d.source !== "combo-x-page-ext-host" || d.reqId !== reqId) return;
