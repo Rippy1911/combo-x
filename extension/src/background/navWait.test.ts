@@ -78,7 +78,7 @@ describe("navWait", () => {
     ).toBe(true);
   });
 
-  it("history nav settles only after leave + loading", () => {
+  it("history nav settles after leave + loading complete", () => {
     expect(
       isHistoryNavSettled({
         startUrl: "https://airon.coach/",
@@ -93,6 +93,17 @@ describe("navWait", () => {
         currentUrl: "https://www.google.com/",
         status: "complete",
         sawLoading: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("history nav settles on SPA URL change without loading", () => {
+    expect(
+      isHistoryNavSettled({
+        startUrl: "https://airon.coach/a",
+        currentUrl: "https://airon.coach/b",
+        status: undefined,
+        sawLoading: false,
       }),
     ).toBe(true);
   });

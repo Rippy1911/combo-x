@@ -1332,6 +1332,21 @@ export function App() {
       activeSessionIdRef.current = activeSessionIdRef.current ?? boundId;
       const isBoundActive = () => activeSessionIdRef.current === boundId;
       const rt = ensureRuntime(boundId);
+      // Atomic claim — closes the race between concurrent send()/queue drain.
+      if (rt.running) return false;
+      const runId = crypto.randomUUID();
+      const controller = new AbortController();
+      rt.running = true;
+      rt.activeRunId = runId;
+      abortBySessionRef.current.set(boundId, controller);
+      if (isBoundActive()) {
+        abortRef.current = controller;
+        runningRef.current = true;
+        setRunning(true);
+      }
+
+      const bump = () => setRuntimeMeta(metaFromRuntimes(runtimesRef.current));
+      try {
       // Prefer persisted runtime turns — React `turns` can lag on queue drain / switch.
       let baseTurns = ((rt.turns as UiTurn[]) ?? []).length
         ? ([...(rt.turns as UiTurn[])] as UiTurn[])
@@ -1365,11 +1380,8 @@ export function App() {
           delivery: "stream" as const,
         },
       ];
-      const runId = crypto.randomUUID();
       rt.turns = nextTurns;
       rt.history = historyRef.current;
-      rt.running = true;
-      rt.activeRunId = runId;
       rt.streamingId = assistantId;
       rt.status = pendingIds.length ? `Working with ${pendingIds.length} file(s)…` : "Working…";
       rt.lastTurnUsage = null;
@@ -1377,7 +1389,6 @@ export function App() {
       rt.lastTouchedAt = Date.now();
       rt.unread = false;
 
-      const bump = () => setRuntimeMeta(metaFromRuntimes(runtimesRef.current));
       const publishTurns = (next: UiTurn[] | ((prev: UiTurn[]) => UiTurn[])) => {
         const prev = (rt.turns as UiTurn[]) ?? [];
         const resolved = typeof next === "function" ? next(prev) : next;
@@ -1409,8 +1420,6 @@ export function App() {
 
       if (isBoundActive()) {
         setTurns(nextTurns);
-        runningRef.current = true;
-        setRunning(true);
         setStreamingId(assistantId);
         setSubagentRuns([]);
         setStatus(rt.status);
@@ -1419,9 +1428,6 @@ export function App() {
       }
       bump();
 
-      const controller = new AbortController();
-      abortBySessionRef.current.set(boundId, controller);
-      if (isBoundActive()) abortRef.current = controller;
       const llm = new OpenRouterClient({ apiKey: key });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
@@ -1865,6 +1871,7 @@ export function App() {
           bump();
           void refreshSessions();
         }
+      }
       } finally {
         // Only the owning run may clear — a newer send() may already own this session.
         if (rt.activeRunId === runId) {

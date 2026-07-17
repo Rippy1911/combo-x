@@ -67,13 +67,19 @@ export function isNavigationSettled(opts: {
   return atTarget;
 }
 
-/** For go_back / reload: settle once we leave startUrl after seeing loading. */
+/** For go_back / reload: settle once we leave startUrl (loading optional for SPA/bfcache). */
 export function isHistoryNavSettled(opts: {
   startUrl: string;
   currentUrl: string | undefined;
   status: string | undefined;
   sawLoading: boolean;
 }): boolean {
-  if (opts.status !== "complete" || !opts.sawLoading) return false;
-  return normalizeNavUrl(opts.currentUrl ?? "") !== normalizeNavUrl(opts.startUrl);
+  const leftStart =
+    normalizeNavUrl(opts.currentUrl ?? "") !== normalizeNavUrl(opts.startUrl);
+  if (!leftStart) return false;
+  if (opts.status === "loading") return false;
+  // Classic full navigation: wait for complete after loading.
+  if (opts.sawLoading) return opts.status === "complete";
+  // SPA / bfcache / hash: URL changed without a loading phase.
+  return opts.status === "complete" || opts.status == null;
 }
