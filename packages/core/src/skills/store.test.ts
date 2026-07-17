@@ -31,4 +31,18 @@ describe("SkillStore", () => {
     expect(await store.delete(row.id)).toBe(true);
     expect(await store.get(row.id)).toBeNull();
   });
+
+  it("drops toolHints that are not real tools", async () => {
+    const store = new SkillStore({
+      dbName: `skills_${crypto.randomUUID()}`,
+      skipSeed: true,
+    });
+    const row = await store.save({
+      name: "custom",
+      description: "test skill",
+      body: "do the thing",
+      toolHints: ["export_csv", "not_a_real_tool", "navigate"],
+    });
+    expect(row.toolHints).toEqual(["export_csv", "navigate"]);
+  });
 });

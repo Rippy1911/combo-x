@@ -39,6 +39,29 @@ export function clearTokensForTab(tabId: number): void {
   for (const k of [...liveTokens.keys()]) {
     if (k.startsWith(prefix)) liveTokens.delete(k);
   }
+  for (const k of [...invalidAttempts.keys()]) {
+    if (k.startsWith(prefix)) invalidAttempts.delete(k);
+  }
+}
+
+/**
+ * Throttle forged/invalid bridge-token attempts per (tab:script) to blunt token
+ * enumeration / timing attacks. After MAX_INVALID within WINDOW_MS, further calls
+ * are rejected outright until the window elapses.
+ */
+const MAX_INVALID_ATTEMPTS = 10;
+const INVALID_WINDOW_MS = 10_000;
+const invalidAttempts = new Map<string, { count: number; first: number }>();
+
+function registerInvalidAttempt(key: string): boolean {
+  const now = Date.now();
+  const rec = invalidAttempts.get(key);
+  if (!rec || now - rec.first > INVALID_WINDOW_MS) {
+    invalidAttempts.set(key, { count: 1, first: now });
+    return false;
+  }
+  rec.count += 1;
+  return rec.count > MAX_INVALID_ATTEMPTS;
 }
 
 function payloadBytes(value: unknown): number {
@@ -143,9 +166,15 @@ export async function handlePageExtBridge(msg: {
 }> {
   const ext = await store.get(msg.scriptId);
   if (!ext) return { ok: false, error: "unknown extension", reqId: msg.reqId };
-  const expected = liveTokens.get(tokenKey(msg.tabId, msg.scriptId));
+  const throttleKey = tokenKey(msg.tabId, msg.scriptId);
+  const expected = liveTokens.get(throttleKey);
   if (!expected || !msg.bridgeToken || msg.bridgeToken !== expected) {
-    return { ok: false, error: "invalid bridge token", reqId: msg.reqId };
+    const throttled = registerInvalidAttempt(throttleKey);
+    return {
+      ok: false,
+      error: throttled ? "too many invalid bridge token attempts" : "invalid bridge token",
+      reqId: msg.reqId,
+    };
   }
   const gate = bridgeAllowed(ext, msg.pageUrl);
   if (!gate.ok) return { ok: false, error: gate.error, reqId: msg.reqId };

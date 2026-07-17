@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "dev: watch build",
+      "type": "shell",
+      "command": "corepack pnpm --filter @combo-x/extension dev",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "build: chrome",
+      "type": "shell",
+      "command": "corepack pnpm --filter @combo-x/extension build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build: firefox",
+      "type": "shell",
+      "command": "corepack pnpm build:firefox",
+      "problemMatcher": []
+    },
+    {
+      "label": "test: unit",
+      "type": "shell",
+      "command": "corepack pnpm test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test: e2e",
+      "type": "shell",
+      "command": "corepack pnpm test:e2e",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -30,6 +30,11 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export async function ensureOffscreenDocument(): Promise<void> {
+  // chrome.offscreen is Chromium-only. On browsers without it (e.g. Firefox),
+  // fail with a clear, catchable message instead of a raw TypeError.
+  if (!chrome.offscreen?.createDocument) {
+    throw new Error("media capture unavailable: chrome.offscreen not supported in this browser");
+  }
   const existing = await chrome.runtime.getContexts({
     contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
     documentUrls: [OFFSCREEN_URL],

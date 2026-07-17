@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Combo-X",
+  "description": "Local-first browser agent — BYOK, vault, sessions, scrape/export, approvals.",
+  "version": "1.4.3",
+  "icons": {
+    "16": "public/icon-16.png",
+    "48": "public/icon-48.png",
+    "128": "public/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "combo-x@local.first",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "action": {
+    "default_title": "Open Combo-X"
+  },
+  "background": {
+    "scripts": ["src/background/index.ts"],
+    "type": "module"
+  },
+  "sidebar_action": {
+    "default_title": "Combo-X",
+    "default_panel": "src/sidepanel/index.html",
+    "default_icon": {
+      "16": "public/icon-16.png",
+      "48": "public/icon-48.png",
+      "128": "public/icon-128.png"
+    }
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "downloads",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["setup/index.html", "assets/*", "public/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.ts"],
+      "run_at": "document_idle"
+    }
+  ]
+}
