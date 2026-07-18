@@ -2,12 +2,18 @@ import {
   AGENT_TOOLS,
   DEFAULT_SKIP_DIRS,
   grantAndIndex,
+  ensureGithubRestConnector,
   githubRestTemplate,
   uploadsRestTemplate,
   nsFoodRestTemplate,
+  LLM_BASE_URL_KEY,
+  LLM_PROVIDER_KEY,
+  LLM_PROVIDER_PRESETS,
+  MODEL_PASTE_HINT,
   normalizeModelId,
   parseMcpDefinition,
   reindexSaved,
+  resolveProvider,
   type AgentBudgetMode,
   type AgentProfile,
   type AgentProfileStore,
@@ -17,6 +23,7 @@ import {
   type ApprovalPolicyStore,
   type Connector,
   type ConnectorStore,
+  type LlmProviderId,
   type RagMeta,
   type RagStore,
   type Vault,
@@ -37,6 +44,12 @@ export type SettingsPanelProps = {
   locked: boolean;
   apiKey: string;
   setApiKey: (v: string) => void;
+  llmProvider: LlmProviderId;
+  setLlmProvider: (v: LlmProviderId) => void;
+  llmBaseUrl: string;
+  setLlmBaseUrl: (v: string) => void;
+  webSearchEnabled: boolean;
+  setWebSearchEnabled: (v: boolean) => void;
   model: string;
   setModel: (v: string) => void;
   workerModel: string;
@@ -82,6 +95,12 @@ export function SettingsPanel({
   locked,
   apiKey,
   setApiKey,
+  llmProvider,
+  setLlmProvider,
+  llmBaseUrl,
+  setLlmBaseUrl,
+  webSearchEnabled,
+  setWebSearchEnabled,
   model,
   setModel,
   workerModel,
@@ -147,13 +166,14 @@ export function SettingsPanel({
   }, [approvalPolicies]);
 
   const migrateGithub = useCallback(async () => {
-    const list = await connectorStore.list();
-    if (list.some((c) => c.id === "github-rest")) return;
-    const token = await vault.getByLabel(GH_TOKEN_LABEL);
-    if (!token) return;
-    await connectorStore.put(githubRestTemplate());
-    await refreshConnectors();
-    setMsg("Migrated github_token → GitHub REST connector");
+    const result = await ensureGithubRestConnector(
+      connectorStore,
+      (label) => vault.getByLabel(label),
+    );
+    if (result.ok && (result.created || result.updated)) {
+      await refreshConnectors();
+      setMsg(result.note);
+    }
   }, [connectorStore, refreshConnectors, vault]);
 
   useEffect(() => {
@@ -240,16 +260,23 @@ export function SettingsPanel({
   };
 
   const saveVaultKeys = async () => {
+    const preset = resolveProvider(llmProvider);
     const m = normalizeModelId(customModel.trim() || model);
     const w = normalizeModelId(customWorkerModel.trim() || workerModel);
+    const base = llmBaseUrl.trim() || preset.baseUrl;
     if (apiKey.trim()) await vault.putByLabel("openrouter_api_key", apiKey.trim());
+    await vault.putByLabel(LLM_PROVIDER_KEY, preset.id);
+    await vault.putByLabel(LLM_BASE_URL_KEY, base);
     await vault.putByLabel("openrouter_model", m);
     await vault.putByLabel("openrouter_worker_model", w);
+    setLlmBaseUrl(base);
     setModel(m);
     setWorkerModel(w);
-    setMsg(`Saved orch=${m} · worker=${w}`);
+    setMsg(`Saved ${preset.label} · orch=${m} · worker=${w}`);
     await onRefreshVaultLabels();
   };
+
+  const providerPreset = resolveProvider(llmProvider);
 
   const toggleDraftTool = (name: string) => {
     setDraftTools((prev) => {
@@ -465,9 +492,21 @@ export function SettingsPanel({
             placeholder="Extra instructions for this agent…"
           />
           <label className="hint">Orchestrator model</label>
-          <ModelPicker value={draftOrch} apiKey={apiKey} onChange={setDraftOrch} />
+          <ModelPicker
+            value={draftOrch}
+            apiKey={apiKey}
+            baseUrl={llmBaseUrl}
+            keyOptional={providerPreset.keyOptional}
+            onChange={setDraftOrch}
+          />
           <label className="hint">Worker model</label>
-          <ModelPicker value={draftWorker} apiKey={apiKey} onChange={setDraftWorker} />
+          <ModelPicker
+            value={draftWorker}
+            apiKey={apiKey}
+            baseUrl={llmBaseUrl}
+            keyOptional={providerPreset.keyOptional}
+            onChange={setDraftWorker}
+          />
           <label className="hint">Budget mode</label>
           <select
             value={draftBudget}
@@ -790,33 +829,76 @@ export function SettingsPanel({
       ) : null}
       {ragMsg ? <p className="hint wrap">{ragMsg}</p> : null}
 
-      <h3>Vault / API keys</h3>
-      <label className="hint">OpenRouter API key</label>
+      <h3>LLM provider</h3>
+      <p className="hint wrap">
+        OpenAI-compatible chat API. OpenRouter adds built-in web search when enabled below. Other
+        providers use Combo-X <code>web_search</code> / <code>web_fetch</code>.
+      </p>
+      <label className="hint">Provider</label>
+      <select
+        value={llmProvider}
+        onChange={(e) => {
+          const next = resolveProvider(e.target.value);
+          setLlmProvider(next.id);
+          setLlmBaseUrl(next.baseUrl);
+        }}
+      >
+        {LLM_PROVIDER_PRESETS.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+      {providerPreset.hint ? <p className="hint wrap">{providerPreset.hint}</p> : null}
+      <label className="hint">Base URL</label>
+      <input
+        type="url"
+        value={llmBaseUrl}
+        onChange={(e) => setLlmBaseUrl(e.target.value)}
+        placeholder={providerPreset.baseUrl}
+      />
+      <label className="hint">API key {providerPreset.keyOptional ? "(optional)" : ""}</label>
       <input
         type="password"
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
-        placeholder="sk-or-v1-…"
+        placeholder={providerPreset.keyPlaceholder}
       />
+      <label className="row hint">
+        <input
+          type="checkbox"
+          checked={webSearchEnabled}
+          onChange={(e) => setWebSearchEnabled(e.target.checked)}
+        />
+        Enable web search
+        {providerPreset.openRouterServerTools
+          ? " (OpenRouter server tools)"
+          : " (Combo DuckDuckGo + fetch)"}
+      </label>
       <label className="hint">Orchestrator model (global default)</label>
       <ModelPicker
         value={model}
         apiKey={apiKey}
+        baseUrl={llmBaseUrl}
+        keyOptional={providerPreset.keyOptional}
         onChange={(id) => {
           setModel(id);
           setCustomModel(id);
         }}
       />
+      <p className="hint wrap">{MODEL_PASTE_HINT}</p>
       <label className="hint">Worker model</label>
       <ModelPicker
         value={workerModel}
         apiKey={apiKey}
+        baseUrl={llmBaseUrl}
+        keyOptional={providerPreset.keyOptional}
         onChange={(id) => {
           setWorkerModel(id);
           setCustomWorkerModel(id);
         }}
       />
-      <label className="hint">GitHub token (vault label github_token)</label>
+      <label className="hint">GitHub token (vault: github_token or gh_combo_x)</label>
       <input
         type="password"
         placeholder="ghp_…"
@@ -825,6 +907,11 @@ export function SettingsPanel({
           if (v) void vault.putByLabel(GH_TOKEN_LABEL, v);
         }}
       />
+      <p className="hint wrap">
+        Used by the GitHub REST connector + <code>combo-repo-ops</code> skill (
+        <code>rest_request</code>). Paste a PAT once — Combo-X never automates PAT creation in the
+        GitHub UI.
+      </p>
       <div className="row">
         <button type="button" className="primary" onClick={() => void saveVaultKeys()}>
           Save keys
@@ -843,6 +930,8 @@ export function SettingsPanel({
       <ModelPicker
         value={visionSettings.visionWorkerModel}
         apiKey={apiKey}
+        baseUrl={llmBaseUrl}
+        keyOptional={providerPreset.keyOptional}
         onChange={(id) =>
           setVisionSettings({ ...visionSettings, visionWorkerModel: id })
         }
@@ -860,7 +949,26 @@ export function SettingsPanel({
         />
         Auto-attach screenshots to the next model turn
       </label>
-      <label className="hint">Critique image detail</label>
+      <label className="hint">Screenshot quality</label>
+      <select
+        value={visionSettings.screenshotQuality}
+        onChange={(e) =>
+          setVisionSettings({
+            ...visionSettings,
+            screenshotQuality: e.target.value as VisionSettings["screenshotQuality"],
+          })
+        }
+      >
+        <option value="draft">draft (small / cheap)</option>
+        <option value="standard">standard</option>
+        <option value="high">high (default)</option>
+        <option value="max">max (sharpest)</option>
+      </select>
+      <p className="hint wrap">
+        Agent can override per call: ux_critique({"{"} quality: &quot;max&quot;, detail:
+        &quot;high&quot; {"}"}).
+      </p>
+      <label className="hint">Critique image detail (vision API)</label>
       <select
         value={visionSettings.critiqueImageDetail}
         onChange={(e) =>
@@ -870,21 +978,21 @@ export function SettingsPanel({
           })
         }
       >
-        <option value="low">low (cheap, default)</option>
+        <option value="low">low (cheap, blurry UI text)</option>
         <option value="auto">auto</option>
-        <option value="high">high</option>
+        <option value="high">high (default — readable UI)</option>
       </select>
-      <label className="hint">Max vision bytes</label>
+      <label className="hint">Max vision bytes (ceiling)</label>
       <input
         type="number"
         min={50_000}
-        max={8_000_000}
-        step={50_000}
+        max={12_000_000}
+        step={100_000}
         value={visionSettings.maxVisionBytes}
         onChange={(e) =>
           setVisionSettings({
             ...visionSettings,
-            maxVisionBytes: Number(e.target.value) || 1_500_000,
+            maxVisionBytes: Number(e.target.value) || 5_000_000,
           })
         }
       />
@@ -977,9 +1085,13 @@ export function SettingsPanel({
         value={budgetMode}
         onChange={(e) => setBudgetMode(e.target.value as AgentBudgetMode)}
       >
-        <option value="budget">Budget — page_digest + worker parse, 16 steps</option>
-        <option value="normal">Normal — full tools / 32 steps</option>
+        <option value="budget">Budget — short page reads + 16 steps (tools stay listed)</option>
+        <option value="normal">Normal — longer page reads / 32 steps</option>
       </select>
+      <p className="hint wrap">
+        Same control as the Budget toggle next to STOP in Chat. Does not truncate the tool catalog —
+        saves tokens via page-read caps, step limits, and history packing.
+      </p>
     </div>
   );
 }

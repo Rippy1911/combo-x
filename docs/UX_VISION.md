@@ -9,11 +9,14 @@ Vision Lab tools are **FORCE_ATTACH**’d into any non-empty tool allowlist (sta
 | Knob | Default |
 |------|---------|
 | `autoAttachScreenshots` | `true` |
-| `critiqueImageDetail` | `low` |
-| `maxVisionBytes` | 1.5 MB |
+| `screenshotQuality` | `high` (`draft` / `standard` / `high` / `max`) |
+| `critiqueImageDetail` | `high` (vision `image_url.detail`) |
+| `maxVisionBytes` | 5 MB (quality preset may raise further up to 8–12 MB) |
 | `visionWorkerModel` | `google/gemini-3.5-flash` |
 | `interactivePreviewScripts` | `true` (`sandbox="allow-scripts"` only) |
 | `enableGenerateMock` | `false` (P1) |
+
+Agent override on `ux_critique` / `screenshot_*`: `quality` + `detail`. Example: `ux_critique({ quality: "max", detail: "high" })`.
 
 ## Flow
 

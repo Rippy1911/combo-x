@@ -10,6 +10,31 @@ export type PendingSecret = {
   include: boolean;
 };
 
+function emptyManualRow(): PendingSecret {
+  return {
+    id: crypto.randomUUID(),
+    label: "",
+    value: "",
+    useNote: "",
+    source: "manual",
+    include: true,
+  };
+}
+
+/** Keep a blank trailing manual row for “+” UX. */
+function ensureTrailingEmpty(list: PendingSecret[]): PendingSecret[] {
+  const manuals = list.filter((p) => p.source === "manual");
+  const last = manuals[manuals.length - 1];
+  if (last && !last.label.trim() && !last.value) return list;
+  return [...list, emptyManualRow()];
+}
+
+function stripEmptyManuals(list: PendingSecret[]): PendingSecret[] {
+  return list.filter(
+    (p) => p.source !== "manual" || (p.label.trim().length > 0 && p.value.length > 0),
+  );
+}
+
 export function SecretEmbedBar({
   detectEnabled,
   onDetectEnabledChange,
@@ -27,32 +52,36 @@ export function SecretEmbedBar({
   endSlot?: ReactNode;
 }) {
   const detectId = useId();
-  const [manualLabel, setManualLabel] = useState("");
-  const [manualValue, setManualValue] = useState("");
-  const [manualNote, setManualNote] = useState("");
   const [showManual, setShowManual] = useState(false);
 
-  const addManual = () => {
-    const label = manualLabel.trim().replace(/\s+/g, "_");
-    const value = manualValue;
-    if (!label || !value) return;
-    onPendingChange([
-      ...pending,
-      {
-        id: crypto.randomUUID(),
-        label,
-        value,
-        useNote: manualNote.trim() || undefined,
-        source: "manual",
-        include: true,
-      },
-    ]);
-    setManualLabel("");
-    setManualValue("");
-    setManualNote("");
+  const manualRows = pending.filter((p) => p.source === "manual");
+  const detectedRows = pending.filter((p) => p.source === "detected");
+  const readyCount = pending.filter(
+    (p) => p.include && p.label.trim() && p.value,
+  ).length;
+
+  const patchManual = (id: string, patch: Partial<PendingSecret>) => {
+    onPendingChange(pending.map((x) => (x.id === id ? { ...x, ...patch } : x)));
   };
 
-  const included = pending.filter((p) => p.include);
+  const removeRow = (id: string) => {
+    const next = pending.filter((x) => x.id !== id);
+    onPendingChange(showManual ? ensureTrailingEmpty(next) : next);
+  };
+
+  const addRow = () => {
+    onPendingChange(ensureTrailingEmpty([...pending, emptyManualRow()]));
+  };
+
+  const toggleForm = () => {
+    if (showManual) {
+      setShowManual(false);
+      onPendingChange(stripEmptyManuals(pending));
+    } else {
+      setShowManual(true);
+      onPendingChange(ensureTrailingEmpty(pending));
+    }
+  };
 
   return (
     <div className="secret-embed-bar">
@@ -69,58 +98,96 @@ export function SecretEmbedBar({
           </label>
           <span
             className="secret-detect-help"
-            title="Paste keys/passwords — suggestions appear here. On Send they go into the vault and the message uses {vault:label}."
-            aria-label="Paste keys/passwords — suggestions appear here. On Send they go into the vault and the message uses {vault:label}."
+            title="Paste keys/passwords — suggestions appear here. Filled rows embed into the vault on Send as {vault:label}."
+            aria-label="Paste keys/passwords — suggestions appear here. Filled rows embed into the vault on Send as {vault:label}."
             tabIndex={0}
           >
             ?
           </span>
         </span>
-        <button type="button" className="msg-action" onClick={() => setShowManual((v) => !v)}>
+        <button type="button" className="msg-action" onClick={toggleForm}>
           {showManual ? "Hide secret form" : "Add secret…"}
         </button>
         {!vaultUnlocked ? (
           <span className="hint">Unlock vault to embed on send</span>
-        ) : included.length > 0 ? (
-          <span className="hint">{included.length} to embed on send</span>
+        ) : readyCount > 0 ? (
+          <span className="hint">{readyCount} to embed on send</span>
+        ) : showManual ? (
+          <span className="hint">Filled rows embed on Send</span>
         ) : null}
         {endSlot ? <div className="secret-embed-end">{endSlot}</div> : null}
       </div>
 
       {showManual ? (
-        <div className="secret-manual-form">
-          <input
-            value={manualLabel}
-            onChange={(e) => setManualLabel(e.target.value)}
-            placeholder="label (e.g. foodwell_password)"
-            spellCheck={false}
-          />
-          <input
-            type="password"
-            value={manualValue}
-            onChange={(e) => setManualValue(e.target.value)}
-            placeholder="secret value"
-            autoComplete="off"
-          />
-          <input
-            value={manualNote}
-            onChange={(e) => setManualNote(e.target.value)}
-            placeholder="use note (optional)"
-          />
-          <button
-            type="button"
-            className="primary"
-            disabled={!manualLabel.trim() || !manualValue}
-            onClick={addManual}
-          >
-            Queue
-          </button>
+        <div className="secret-manual-rows" role="list">
+          {manualRows.map((row, idx) => {
+            const isLast = idx === manualRows.length - 1;
+            return (
+              <div key={row.id} className="secret-manual-row" role="listitem">
+                <div className="secret-manual-row-fields">
+                  <input
+                    value={row.label}
+                    onChange={(e) =>
+                      patchManual(row.id, {
+                        label: e.target.value.replace(/\s+/g, "_"),
+                      })
+                    }
+                    placeholder="label (e.g. foodwell_password)"
+                    spellCheck={false}
+                    aria-label="Vault label"
+                  />
+                  <input
+                    type="password"
+                    value={row.value}
+                    onChange={(e) => patchManual(row.id, { value: e.target.value })}
+                    placeholder="secret value"
+                    autoComplete="off"
+                    aria-label="Secret value"
+                  />
+                  <input
+                    value={row.useNote ?? ""}
+                    onChange={(e) =>
+                      patchManual(row.id, { useNote: e.target.value })
+                    }
+                    placeholder="use note (optional)"
+                    aria-label="Use note"
+                  />
+                </div>
+                {isLast ? (
+                  <button
+                    type="button"
+                    className="secret-row-icon"
+                    aria-label="Add secret row"
+                    title="Add row"
+                    onClick={addRow}
+                  >
+                    ＋
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="secret-row-icon dangerish"
+                    aria-label="Remove secret row"
+                    title="Remove"
+                    onClick={() => removeRow(row.id)}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
-      {pending.length > 0 ? (
+      {/* Detected (and filled manuals when form hidden) — compact chips */}
+      {(showManual ? detectedRows : pending.filter((p) => p.label.trim() && p.value))
+        .length > 0 ? (
         <ul className="list secret-pending-list">
-          {pending.map((p) => (
+          {(showManual
+            ? detectedRows
+            : pending.filter((p) => p.label.trim() && p.value)
+          ).map((p) => (
             <li key={p.id} className="secret-pending-row">
               <label className="row" style={{ gap: 6 }}>
                 <input
@@ -143,7 +210,9 @@ export function SecretEmbedBar({
                 onChange={(e) =>
                   onPendingChange(
                     pending.map((x) =>
-                      x.id === p.id ? { ...x, label: e.target.value.replace(/\s+/g, "_") } : x,
+                      x.id === p.id
+                        ? { ...x, label: e.target.value.replace(/\s+/g, "_") }
+                        : x,
                     ),
                   )
                 }

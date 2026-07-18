@@ -217,6 +217,40 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "web_search",
+      description:
+        "Search the public web (DuckDuckGo) for current facts/links. Prefer this over guessing. For logged-in sites use navigate + page tools instead. On OpenRouter with web search enabled, the model may also use the built-in openrouter:web_search server tool.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number", description: "Max results (1–10, default 5)" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "web_fetch",
+      description:
+        "Fetch a public URL and return truncated plaintext (no browser). Use after web_search. Prefer navigate for JS-heavy or logged-in pages.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          maxChars: { type: "number" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "navigate",
       description:
         "Navigate the ACTIVE tab to a URL (preferred). Use this for almost all browsing — do not open new tabs.",
@@ -666,6 +700,33 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "export_session",
+      description:
+        "Export a chat session as JSON or Markdown (download). Includes messages, tool stubs, runContext, picks; images by attachmentId only (no megabase64). Optional publish=true uploads via publish_upload and returns a public file_url. MV3 has no listening HTTP endpoint — use the published URL + get_session/export_session.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: {
+            type: "string",
+            description: "Session UUID; omit to export the current session",
+          },
+          format: {
+            type: "string",
+            enum: ["json", "md"],
+            description: "Default json",
+          },
+          publish: {
+            type: "boolean",
+            description: "If true, also publish_upload the file and return file_url",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "remember",
       description:
         "Save a durable agent memory. scope=global (all agents) or scope=agent (this profile). Memories are always prepended to the next user turn (not mid-stream).",
@@ -1016,9 +1077,71 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "list_connectors",
+      description:
+        "List saved REST/MCP connectors (id, kind, name, baseUrl/url). Does not return secret values — only vault label refs.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_rest_connector",
+      description:
+        "Create or update a REST connector (baseUrl + headers). Prefer authVaultLabel or header values like Bearer {vault:label}. Never pass plaintext PATs. Then call rest_request.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Stable connector id (e.g. github-rest, gh)" },
+          name: { type: "string" },
+          baseUrl: { type: "string", description: "e.g. https://api.github.com" },
+          authVaultLabel: {
+            type: "string",
+            description: "Vault label for Authorization Bearer (e.g. github_pat, github_token)",
+          },
+          headers: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description: "Extra headers; use {vault:label} or Bearer {vault:label} for secrets",
+          },
+        },
+        required: ["id", "baseUrl"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ensure_github_connector",
+      description:
+        "One-shot: bind GitHub REST (api.github.com) to a vault PAT already saved (github_token, github_pat, or gh_combo_x). Creates/updates connector github-rest. Prefer over manual save_rest_connector for GitHub.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectorId: {
+            type: "string",
+            description: "Default github-rest",
+          },
+          vaultLabel: {
+            type: "string",
+            description: "Force a vault label; otherwise first non-empty of github_token|github_pat|gh_combo_x",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "rest_request",
       description:
-        "Call a configured REST connector (Settings → Connectors). Headers resolve vault secret refs. No hardcoded hosts.",
+        "Call a configured REST connector. Headers resolve vault secret refs. Use ensure_github_connector or save_rest_connector first if missing. No hardcoded hosts.",
       parameters: {
         type: "object",
         properties: {
@@ -1086,7 +1209,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           detail: {
             type: "string",
             enum: ["auto", "low", "high"],
-            description: "Image detail for vision (default from settings, usually low)",
+            description:
+              "OpenRouter image_url.detail (default from settings, usually high). Use high for readable UI text.",
+          },
+          quality: {
+            type: "string",
+            enum: ["draft", "standard", "high", "max"],
+            description:
+              "Capture encode budget: draft (cheap/small) → max (sharpest, ~8MB). Default from Settings (high). Prefer high/max for UX audits.",
           },
           tabId: { type: "number" },
           windowId: { type: "number" },
@@ -1231,7 +1361,19 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         "Capture visible tab screenshot. Image is stored and vision-attached for the next model turn (not returned as base64 in the tool result). Unlock via skill_read combo-media, or prefer ux_critique.",
       parameters: {
         type: "object",
-        properties: { windowId: { type: "number" } },
+        properties: {
+          windowId: { type: "number" },
+          quality: {
+            type: "string",
+            enum: ["draft", "standard", "high", "max"],
+            description: "Encode budget (default Settings screenshot quality).",
+          },
+          detail: {
+            type: "string",
+            enum: ["auto", "low", "high"],
+            description: "Vision detail hint (default Settings).",
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -1247,6 +1389,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           selector: { type: "string" },
           index: { type: "number" },
           tabId: { type: "number" },
+          quality: {
+            type: "string",
+            enum: ["draft", "standard", "high", "max"],
+          },
+          detail: {
+            type: "string",
+            enum: ["auto", "low", "high"],
+          },
         },
         additionalProperties: false,
       },
@@ -1259,7 +1409,17 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       description: "Best-effort full-page screenshot (scroll-stitch, capped).",
       parameters: {
         type: "object",
-        properties: { tabId: { type: "number" } },
+        properties: {
+          tabId: { type: "number" },
+          quality: {
+            type: "string",
+            enum: ["draft", "standard", "high", "max"],
+          },
+          detail: {
+            type: "string",
+            enum: ["auto", "low", "high"],
+          },
+        },
         additionalProperties: false,
       },
     },

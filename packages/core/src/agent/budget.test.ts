@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUDGET_MODE_HELP,
   defaultGetPageMaxChars,
+  leanHistoryMaxChars,
   preferPageDigest,
   resolveMaxSteps,
   rewriteGetPageArgs,
@@ -16,6 +18,16 @@ describe("budget mode", () => {
 
   it("defaultGetPageMaxChars", () => {
     expect(defaultGetPageMaxChars("budget")).toBeLessThan(defaultGetPageMaxChars("normal"));
+  });
+
+  it("leanHistoryMaxChars is tighter in budget but never zero", () => {
+    expect(leanHistoryMaxChars("budget")).toBeLessThan(leanHistoryMaxChars("normal"));
+    expect(leanHistoryMaxChars("budget")).toBeGreaterThan(8_000);
+  });
+
+  it("help copy promises no tool truncation", () => {
+    expect(BUDGET_MODE_HELP.toLowerCase()).toContain("no random tool truncation");
+    expect(BUDGET_MODE_HELP.toLowerCase()).toContain("full tool");
   });
 
   it("shouldRejectGetPageFull in budget mode", () => {

@@ -1,9 +1,10 @@
 # Combo-X User Guide
 
 Combo-X is a **local-first browser agent** — a Chrome/Firefox side-panel assistant
-that can read, navigate, and act on web pages using the LLM of your choice via
-OpenRouter. Your keys, sessions, memories, and secrets stay in your browser
-(IndexedDB + an encrypted vault). Nothing is sent to a Combo-X server.
+that can read, navigate, and act on web pages using the LLM of your choice
+(OpenRouter, OpenAI, Ollama, or any OpenAI-compatible endpoint). Your keys,
+sessions, memories, and secrets stay in your browser (IndexedDB + an encrypted
+vault). Nothing is sent to a Combo-X server.
 
 > New here? Read [Getting started](#getting-started) then jump to a
 > [use case](#use-cases). Power users: see [FEATURES](./FEATURES.md) and
@@ -14,11 +15,14 @@ OpenRouter. Your keys, sessions, memories, and secrets stay in your browser
 1. Install the extension (Chrome: load `extension/dist`; Firefox: see [FIREFOX](./FIREFOX.md)).
 2. Open the side panel and complete onboarding:
    - Set a **passphrase** — this derives the AES-GCM key for your secret vault.
-   - Paste your **OpenRouter API key** (BYOK — stored encrypted, never leaves the device).
+   - Paste your **API key** (BYOK — stored encrypted). Defaults to OpenRouter; change
+     provider / base URL in Settings (see [PROVIDERS](./PROVIDERS.md)).
 
 ![Onboarding — local agent, your keys](./images/01-onboarding.png)
 
 3. Start chatting. Pick a model, an approval mode, and (optionally) budget mode.
+4. **Pick element** (composer) — click a control on the active tab; Combo-X attaches a
+   selector + interactive index so the agent can inspect/`click_index`/`type_index` it.
 
 ![Chat surface](./images/02-chat.png)
 
@@ -30,7 +34,7 @@ a lean always-on toolset and unlocks specialist tools on demand (see
 
 | Concept | What it means |
 |---------|---------------|
-| **BYOK + vault** | Your OpenRouter key and connector secrets are encrypted with your passphrase. |
+| **BYOK + vault** | Your LLM API key and connector secrets are encrypted with your passphrase. |
 | **Approval modes** | `ask` (confirm each sensitive action), `auto_llm` (cheap safety check), `auto_all` (trusted). |
 | **Budget mode** | Caps steps + page payloads to control token spend. |
 | **Skills** | On-demand playbooks that unlock tool packs (scrape, REST/MCP, RAG, page-ext, media). |

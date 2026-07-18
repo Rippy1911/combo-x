@@ -1,7 +1,24 @@
 import { ContentRequestSchema, handleContentRequest, waitMs } from "@combo-x/core";
+import { startElementPicker, stopElementPicker } from "./elementPicker";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
+
+  if ((message as { type?: string }).type === "combo_x_picker") {
+    const action = (message as { action?: string }).action;
+    if (action === "stop") {
+      stopElementPicker();
+      sendResponse({ ok: true, cancelled: true });
+      return true;
+    }
+    if (action === "start") {
+      startElementPicker((result) => sendResponse(result));
+      return true;
+    }
+    sendResponse({ ok: false, error: "unknown picker action" });
+    return true;
+  }
+
   const parsed = ContentRequestSchema.safeParse(message);
   if (!parsed.success) {
     sendResponse({ ok: false, error: "invalid content request" });

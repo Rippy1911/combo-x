@@ -32,8 +32,14 @@ export {
   assignUniqueLabels,
   embedSecretsInMessage,
   maskSecretValue,
+  resolveVaultPlaceholders,
 } from "./vault/chatSecrets.js";
-export type { ChatSecretHit, ChatSecretEmbed, ChatSecretKind } from "./vault/chatSecrets.js";
+export type {
+  ChatSecretHit,
+  ChatSecretEmbed,
+  ChatSecretKind,
+  GetVaultSecretFn,
+} from "./vault/chatSecrets.js";
 
 export {
   extractProductsFromOrderCsv,
@@ -56,8 +62,22 @@ export type {
   OpenRouterModelInfo,
   ToolCall,
   ToolDefinition,
+  ChatTool,
   OpenRouterOptions,
 } from "./llm/openrouter.js";
+
+export {
+  LLM_PROVIDER_PRESETS,
+  LLM_BASE_URL_KEY,
+  LLM_PROVIDER_KEY,
+  LLM_API_KEY_LABEL,
+  resolveProvider,
+  normalizeBaseUrl,
+} from "./llm/providers.js";
+export type { LlmProviderId, LlmProviderPreset } from "./llm/providers.js";
+
+export { webSearchDdg, webFetchText } from "./tools/webSearch.js";
+export type { WebSearchHit } from "./tools/webSearch.js";
 
 export { AttachmentStore } from "./attachments/store.js";
 export type { AttachmentRecord } from "./attachments/store.js";
@@ -83,7 +103,22 @@ export {
   toolArgsToContentRequest,
   rowsToCsv,
 } from "./browser/tools.js";
-export { handleContentRequest, waitMs } from "./browser/content-handlers.js";
+export {
+  handleContentRequest,
+  waitMs,
+  buildPickedElementRef,
+  resolvePickTarget,
+  describePickHover,
+  INTERACTIVE_SEL,
+} from "./browser/content-handlers.js";
+export {
+  buildCssPath,
+  formatActiveTabBlock,
+  formatBrowserContextBlock,
+  formatPickedElementsBlock,
+  pickedElementChipLabel,
+} from "./browser/elementRef.js";
+export type { ActiveTabContext, PickedElementRef } from "./browser/elementRef.js";
 
 export { AgentLoop } from "./agent/loop.js";
 export type {
@@ -115,6 +150,11 @@ export {
   persistVisionSettings,
 } from "./vision/settings.js";
 export type { VisionSettings, ImageDetail } from "./vision/settings.js";
+export {
+  isScreenshotQuality,
+  planScreenshotEncode,
+} from "./vision/quality.js";
+export type { ScreenshotQuality, QualityEncodePlan } from "./vision/quality.js";
 export {
   promoteScreenshotToVision,
   screenshotToolStub,
@@ -159,9 +199,13 @@ export type { IndexProgress, IndexOptions } from "./rag/folder.js";
 export {
   BUDGET_MAX_STEPS,
   BUDGET_GET_PAGE_CHARS,
+  BUDGET_LEAN_HISTORY_CHARS,
+  NORMAL_LEAN_HISTORY_CHARS,
   resolveMaxSteps,
   defaultGetPageMaxChars,
+  leanHistoryMaxChars,
   BUDGET_SYSTEM_ADDON,
+  BUDGET_MODE_HELP,
   shouldRejectGetPageFull,
   preferPageDigest,
   rewriteGetPageArgs,
@@ -194,6 +238,12 @@ export {
   uploadsRestTemplate,
   nsFoodRestTemplate,
 } from "./connectors/templates.js";
+export {
+  ensureGithubRestConnector,
+  parseConnectorHeaders,
+  GITHUB_VAULT_LABELS,
+} from "./connectors/ensureGithub.js";
+export type { EnsureGithubResult } from "./connectors/ensureGithub.js";
 export {
   publishUpload,
   dataUrlToBytes,
@@ -270,6 +320,7 @@ export {
   DEFAULT_WORKER_MODEL,
   LEGACY_BAD_MODELS,
   MODEL_PRESETS,
+  MODEL_PASTE_HINT,
   normalizeModelId,
 } from "./models.js";
 export type { ModelPreset } from "./models.js";
@@ -277,12 +328,14 @@ export type { ModelPreset } from "./models.js";
 export {
   SessionStore,
   cloneJsonSafe,
+  formatSessionExport,
   sanitizeSessionTools,
   sanitizeSessionBlocks,
   slimRunContextForStorage,
 } from "./sessions/store.js";
 export type {
   ChatSession,
+  SessionExportFormat,
   SessionMessage,
   SessionArtifactPayload,
   SessionRunContext,

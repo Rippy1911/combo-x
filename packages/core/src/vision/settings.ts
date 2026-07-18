@@ -3,6 +3,11 @@
  * UI persists via localStorage keys below; AgentLoop accepts a resolved object.
  */
 
+import {
+  isScreenshotQuality,
+  type ScreenshotQuality,
+} from "./quality.js";
+
 export type ImageDetail = "auto" | "low" | "high";
 
 export interface VisionSettings {
@@ -12,7 +17,9 @@ export interface VisionSettings {
   autoAttachScreenshots: boolean;
   /** OpenRouter image_url.detail for critique shots. */
   critiqueImageDetail: ImageDetail;
-  /** Max encoded image bytes after downscale (approx). */
+  /** Encode preset: draft | standard | high | max (affects resolve + byte budget). */
+  screenshotQuality: ScreenshotQuality;
+  /** Max encoded image bytes after downscale (approx). Soft floor; quality preset can raise. */
   maxVisionBytes: number;
   /** ChatArtifact iframe: allow-scripts (never allow-same-origin with scripts). */
   interactivePreviewScripts: boolean;
@@ -29,6 +36,7 @@ export const VISION_STORAGE_KEYS = {
   visionWorkerModel: "combo_x_vision_worker_model",
   autoAttachScreenshots: "combo_x_auto_attach_screenshots",
   critiqueImageDetail: "combo_x_critique_image_detail",
+  screenshotQuality: "combo_x_screenshot_quality",
   maxVisionBytes: "combo_x_max_vision_bytes",
   interactivePreviewScripts: "combo_x_interactive_preview_scripts",
   enableGenerateMock: "combo_x_enable_generate_mock",
@@ -38,8 +46,9 @@ export const VISION_STORAGE_KEYS = {
 export const DEFAULT_VISION_SETTINGS: VisionSettings = {
   visionWorkerModel: "google/gemini-3.5-flash",
   autoAttachScreenshots: true,
-  critiqueImageDetail: "low",
-  maxVisionBytes: 1_500_000,
+  critiqueImageDetail: "high",
+  screenshotQuality: "high",
+  maxVisionBytes: 5_000_000,
   interactivePreviewScripts: true,
   enableGenerateMock: false,
   visionModelOverride: "",
@@ -48,7 +57,24 @@ export const DEFAULT_VISION_SETTINGS: VisionSettings = {
 export function mergeVisionSettings(
   partial?: Partial<VisionSettings> | null,
 ): VisionSettings {
-  return { ...DEFAULT_VISION_SETTINGS, ...(partial ?? {}) };
+  // Never let undefined/null/"" from partial wipe defaults
+  // (`{ ...defaults, visionWorkerModel: undefined }` → empty model → OpenRouter 400).
+  const cleaned: Partial<VisionSettings> = {};
+  if (partial) {
+    (Object.keys(partial) as Array<keyof VisionSettings>).forEach((key) => {
+      const v = partial[key];
+      if (v === undefined || v === null) return;
+      if (typeof v === "string") {
+        const t = v.trim();
+        // visionModelOverride may be intentionally empty; other strings need a value.
+        if (key !== "visionModelOverride" && !t) return;
+        (cleaned as Record<string, unknown>)[key] = t;
+        return;
+      }
+      (cleaned as Record<string, unknown>)[key] = v;
+    });
+  }
+  return { ...DEFAULT_VISION_SETTINGS, ...cleaned };
 }
 
 /** Read from localStorage (browser). Safe defaults if missing/invalid. */
@@ -57,8 +83,14 @@ export function loadVisionSettingsFromStorage(
     typeof localStorage !== "undefined" ? localStorage.getItem(k) : null,
 ): VisionSettings {
   const detail = getItem(VISION_STORAGE_KEYS.critiqueImageDetail);
+  const qualityRaw = getItem(VISION_STORAGE_KEYS.screenshotQuality);
   const maxRaw = getItem(VISION_STORAGE_KEYS.maxVisionBytes);
   const maxParsed = maxRaw != null ? Number(maxRaw) : NaN;
+  // One-time bump: pre-1.6.38 installs persisted detail=low + 1.5MB with no quality key.
+  const legacyVision =
+    qualityRaw == null &&
+    (detail === "low" || detail == null) &&
+    (!Number.isFinite(maxParsed) || maxParsed <= 1_500_000);
   return mergeVisionSettings({
     visionWorkerModel:
       getItem(VISION_STORAGE_KEYS.visionWorkerModel) ?? undefined,
@@ -66,13 +98,20 @@ export function loadVisionSettingsFromStorage(
       getItem(VISION_STORAGE_KEYS.autoAttachScreenshots),
       DEFAULT_VISION_SETTINGS.autoAttachScreenshots,
     ),
-    critiqueImageDetail:
-      detail === "auto" || detail === "low" || detail === "high"
+    critiqueImageDetail: legacyVision
+      ? "high"
+      : detail === "auto" || detail === "low" || detail === "high"
         ? detail
         : undefined,
-    maxVisionBytes:
-      Number.isFinite(maxParsed) && maxParsed > 10_000
-        ? Math.min(maxParsed, 8_000_000)
+    screenshotQuality: isScreenshotQuality(qualityRaw)
+      ? qualityRaw
+      : legacyVision
+        ? "high"
+        : undefined,
+    maxVisionBytes: legacyVision
+      ? DEFAULT_VISION_SETTINGS.maxVisionBytes
+      : Number.isFinite(maxParsed) && maxParsed > 10_000
+        ? Math.min(maxParsed, 12_000_000)
         : undefined,
     interactivePreviewScripts: readBool(
       getItem(VISION_STORAGE_KEYS.interactivePreviewScripts),
@@ -99,6 +138,7 @@ export function persistVisionSettings(
     settings.autoAttachScreenshots ? "1" : "0",
   );
   setItem(VISION_STORAGE_KEYS.critiqueImageDetail, settings.critiqueImageDetail);
+  setItem(VISION_STORAGE_KEYS.screenshotQuality, settings.screenshotQuality);
   setItem(VISION_STORAGE_KEYS.maxVisionBytes, String(settings.maxVisionBytes));
   setItem(
     VISION_STORAGE_KEYS.interactivePreviewScripts,

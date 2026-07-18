@@ -73,7 +73,7 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /** Bump when a seed body must refresh existing IDB rows (see SEED_FORCE_REFRESH). */
-export const SEED_REVISION = "v1.6.16";
+export const SEED_REVISION = "v1.6.41";
 
 /** Seed skills rewritten in-place when revision tag is missing. */
 const SEED_FORCE_REFRESH = new Set([
@@ -103,9 +103,12 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       name: "combo-rest",
       description: "Call REST and remote MCP connectors (vault secret refs)",
       body: `REST/MCP PLAYBOOK
-- Use rest_request only against saved connectors
+- list_connectors to see saved ids (vault refs only, no secret values)
+- Missing GitHub: ensure_github_connector (binds github_token|github_pat|gh_combo_x → github-rest)
+- Other hosts: save_rest_connector({ id, baseUrl, authVaultLabel }) — never plaintext PATs
+- Then rest_request({ connectorId, method, path, … })
 - mcp_list_tools then mcp_call; never invent hosts
-- Secrets come from vault labels — do not echo secret values`,
+- Secrets stay as vault labels — do not echo secret values`,
       tags: [...nowTag, "rest", "mcp"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rest],
@@ -288,12 +291,39 @@ NEVER answer a visual UX audit from get_page / get_links alone.
       name: "combo-openapi-call",
       description: "Call APIs using a saved OpenAPI-aware REST connector",
       body: `OPENAPI PLAYBOOK
-1) User saves a REST connector (baseUrl + vault secret refs) in Settings → Connectors
+1) save_rest_connector({ id, baseUrl, authVaultLabel }) or Settings → Connectors
 2) Prefer rest_request with paths/methods that match the OpenAPI operations the user described
 3) Never invent hosts; never echo secret values
 4) For MCP servers use mcp_list_tools → mcp_call instead
 5) skill_read this skill unlocks rest/mcp tools (same pack as combo-rest)`,
       tags: [...nowTag, "openapi", "rest", "api"],
+      scope: "global",
+      toolHints: [...TOOL_PACKS.rest],
+    },
+    {
+      name: "combo-repo-ops",
+      description: "Open PRs on Rippy1911/combo-x via GitHub REST + vault PAT",
+      body: `COMBO REPO OPS (self-edit via GitHub API — not local filesystem)
+
+SETUP (once — agent can finish after PAT is in vault):
+1) User creates a fine-grained GitHub PAT scoped to Rippy1911/combo-x (Contents R/W, Pull requests R/W, Metadata R) — do NOT automate PAT creation in the GitHub UI
+2) Embed/save PAT to vault as github_pat, github_token, or gh_combo_x (never echo it)
+3) skill_read combo-repo-ops (unlocks rest pack) → ensure_github_connector → rest_request
+   (ensure_github_connector creates github-rest → api.github.com; no Settings handoff)
+
+BRANCH + FILE CHANGE (Contents API via rest_request connectorId=github-rest):
+1) GET /repos/Rippy1911/combo-x/git/ref/heads/main → commit sha
+2) POST /repos/Rippy1911/combo-x/git/refs { ref:"refs/heads/combo-x/<short>", sha }
+3) GET /repos/Rippy1911/combo-x/contents/<path>?ref=<branch> → sha + base64 content
+4) PUT /repos/Rippy1911/combo-x/contents/<path> with message, content (base64), sha, branch
+5) POST /repos/Rippy1911/combo-x/pulls { title, head, base:"main", body }
+
+RULES:
+- One branch per change; never force-push main
+- Never print the token; use vault refs only
+- Prefer small focused PRs; operator reviews/merges
+- After merge: operator rebuilds extension (pnpm build) and reloads`,
+      tags: [...nowTag, "github", "repo", "rest", "self-edit"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rest],
     },

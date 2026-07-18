@@ -37,6 +37,8 @@ export function ModelPicker({
   value,
   onChange,
   apiKey,
+  baseUrl,
+  keyOptional,
   className,
   title,
   compact,
@@ -44,6 +46,10 @@ export function ModelPicker({
   value: string;
   onChange: (id: string) => void;
   apiKey: string;
+  /** OpenAI-compatible base URL (OpenRouter / Ollama / custom). */
+  baseUrl?: string;
+  /** Allow listing models without an API key (local servers). */
+  keyOptional?: boolean;
   className?: string;
   title?: string;
   compact?: boolean;
@@ -57,14 +63,17 @@ export function ModelPicker({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
-    if (!apiKey.trim()) {
+    if (!apiKey.trim() && !keyOptional) {
       setError("API key required to load models");
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const client = new OpenRouterClient({ apiKey: apiKey.trim() });
+      const client = new OpenRouterClient({
+        apiKey: apiKey.trim() || "local",
+        baseUrl: baseUrl?.trim() || undefined,
+      });
       const list = await client.listModels();
       setModels(list);
       saveCache(list);
@@ -73,7 +82,7 @@ export function ModelPicker({
     } finally {
       setLoading(false);
     }
-  }, [apiKey]);
+  }, [apiKey, baseUrl, keyOptional]);
 
   useEffect(() => {
     if (!open) return;
@@ -138,7 +147,7 @@ export function ModelPicker({
               className="model-picker-search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search OpenRouter models…"
+              placeholder="Search models…"
               onKeyDown={(e) => {
                 if (e.key === "Escape") setOpen(false);
                 if (e.key === "Enter" && filtered[0]) {

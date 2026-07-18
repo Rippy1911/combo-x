@@ -6,6 +6,7 @@ import {
   ApprovalPolicyStore,
   ArtifactStore,
   AttachmentStore,
+  BUDGET_MODE_HELP,
   ChangeLogStore,
   ConnectorStore,
   CustomToolStore,
@@ -14,7 +15,8 @@ import {
   DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
   MemoryStore,
-  OpenRouterClient,
+  LLM_BASE_URL_KEY,
+  LLM_PROVIDER_KEY,
   RagStore,
   SessionStore,
   SkillStore,
@@ -26,12 +28,16 @@ import {
   historyFromUiTurns,
   leanHistory,
   loadVisionSettingsFromStorage,
+  mergeVisionSettings,
   normalizeModelId,
   parseAttachment,
   persistVisionSettings,
   assignUniqueLabels,
   detectChatSecrets,
   embedSecretsInMessage,
+  formatBrowserContextBlock,
+  pickedElementChipLabel,
+  resolveProvider,
   resultError,
   resultOk,
   summarizeResult,
@@ -39,6 +45,7 @@ import {
   TaskStore,
   UsageStore,
   PageExtensionStore,
+  type ActiveTabContext,
   type AgentBudgetMode,
   type AgentEvent,
   type AgentProfile,
@@ -47,7 +54,9 @@ import {
   type ChatMessage,
   type ChatPreviewPayload,
   type ChatSession,
+  type LlmProviderId,
   type LlmUsage,
+  type PickedElementRef,
   type ProfileStore,
   type RagMeta,
   type RunContextSnapshot,
@@ -57,6 +66,7 @@ import {
   type VisionSettings,
   slimRunContextForStorage,
 } from "@combo-x/core";
+import { buildLlmClient, shouldOmitComboWebSearch } from "./llmClient";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChromeBridge } from "../lib/chrome-bridge";
 import { ApprovalBanner } from "./ApprovalBanner";
@@ -116,6 +126,7 @@ const LAST_SESSION_KEY = "combo_x_last_session_id";
 const SHOW_ACTIONS_KEY = "combo_x_show_actions";
 const MAX_STEPS_KEY = "combo_x_max_steps";
 const SESSIONS_PINNED_KEY = "combo_x_sessions_pinned";
+const WEB_SEARCH_KEY = "combo_x_web_search";
 const STEPS_PRESETS = [8, 12, 16, 24, 32, 48] as const;
 
 type TabId =
@@ -172,6 +183,10 @@ type UiTurn = {
   createdAt?: string;
   bookmarked?: boolean;
   attachments?: Array<{ id: string; name: string; kind: string }>;
+  /** User-picked DOM elements attached to this turn. */
+  picks?: PickedElementRef[];
+  /** Tab snapshot at send time. */
+  activeTab?: ActiveTabContext;
   tools?: ToolChipData[];
   /** Interleaved reasoning / step narration / tool batches (assistant only). */
   blocks?: TurnBlock[];
@@ -353,14 +368,20 @@ export function App() {
   const [locked, setLocked] = useState(false);
   const [passphrase, setPassphrase] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [llmProvider, setLlmProvider] = useState<LlmProviderId>("openrouter");
+  const [llmBaseUrl, setLlmBaseUrl] = useState(() => resolveProvider("openrouter").baseUrl);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    () => localStorage.getItem(WEB_SEARCH_KEY) !== "0",
+  );
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [workerModel, setWorkerModel] = useState(DEFAULT_WORKER_MODEL);
   const [visionSettings, setVisionSettingsState] = useState<VisionSettings>(() =>
     loadVisionSettingsFromStorage(),
   );
   const setVisionSettings = useCallback((next: VisionSettings) => {
-    setVisionSettingsState(next);
-    persistVisionSettings(next);
+    const merged = mergeVisionSettings(next);
+    setVisionSettingsState(merged);
+    persistVisionSettings(merged);
   }, []);
   const [customModel, setCustomModel] = useState("");
   const [customWorkerModel, setCustomWorkerModel] = useState("");
@@ -399,17 +420,24 @@ export function App() {
   const [sessionUsage, setSessionUsage] = useState<UsageSplit>(() => emptySplit());
   const [lastTurnUsage, setLastTurnUsage] = useState<UsageSplit | null>(null);
   const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
+  const [budgetInfoOpen, setBudgetInfoOpen] = useState(false);
+  /** Live SSE tool name while model plans tools (pre tool_start). */
+  const [planningTool, setPlanningTool] = useState<string | null>(null);
   type QueuedSend = {
     sessionId: string;
     text: string;
     attachments: AttachmentRecord[];
     secrets: PendingSecret[];
+    picks: PickedElementRef[];
+    activeTab?: ActiveTabContext;
   };
   const [sendQueue, setSendQueue] = useState<QueuedSend[]>([]);
   const sendQueueRef = useRef<QueuedSend[]>([]);
   const queueDrainLockRef = useRef(false);
   const runningRef = useRef(false);
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentRecord[]>([]);
+  const [pendingPicks, setPendingPicks] = useState<PickedElementRef[]>([]);
+  const [picking, setPicking] = useState(false);
   const [detectSecrets, setDetectSecrets] = useState(
     () => localStorage.getItem(DETECT_SECRETS_KEY) !== "0",
   );
@@ -776,6 +804,12 @@ export function App() {
         if (t.role === "user" && t.runContext) {
           base.runContext = slimRunContextForStorage(t.runContext);
         }
+        if (t.role === "user" && t.picks?.length) {
+          base.picks = t.picks as unknown as SessionMessage["picks"];
+        }
+        if (t.role === "user" && t.activeTab) {
+          base.activeTab = t.activeTab;
+        }
         return base;
       });
       const title =
@@ -818,6 +852,11 @@ export function App() {
 
   const afterUnlock = useCallback(async () => {
     const key = await vault.getByLabel(KEY_LABEL);
+    const storedProvider = await vault.getByLabel(LLM_PROVIDER_KEY);
+    const provider = resolveProvider(storedProvider);
+    setLlmProvider(provider.id);
+    const storedBase = await vault.getByLabel(LLM_BASE_URL_KEY);
+    setLlmBaseUrl(storedBase?.trim() || provider.baseUrl);
     let storedModel = await vault.getByLabel(MODEL_LABEL);
     const normalized = normalizeModelId(storedModel);
     if (storedModel !== normalized) {
@@ -828,7 +867,7 @@ export function App() {
     const storedWorker = await vault.getByLabel(WORKER_MODEL_LABEL);
     setWorkerModel(storedWorker ? normalizeModelId(storedWorker) : DEFAULT_WORKER_MODEL);
     if (key) setApiKey(key);
-    setNeedsOnboarding(!key);
+    setNeedsOnboarding(!key && !provider.keyOptional);
     setLocked(false);
     await refreshVaultLabels();
     setRagMeta(await rag.getMeta());
@@ -888,15 +927,23 @@ export function App() {
   }, [afterUnlock, passphrase, vault]);
 
   const completeOnboarding = useCallback(async () => {
-    if (!passphrase || !apiKey.trim()) return setStatus("Passphrase + OpenRouter key required");
+    const provider = resolveProvider(llmProvider);
+    if (!passphrase) return setStatus("Passphrase required");
+    if (!apiKey.trim() && !provider.keyOptional) {
+      return setStatus("Passphrase + API key required");
+    }
     const initialized = await vault.isInitialized();
     if (!initialized) await vault.setPassphrase(passphrase);
     else if (!(await vault.unlock(passphrase))) return setStatus("Wrong passphrase");
     const m = normalizeModelId(model);
     const w = normalizeModelId(workerModel);
-    await vault.putByLabel(KEY_LABEL, apiKey.trim());
+    if (apiKey.trim()) await vault.putByLabel(KEY_LABEL, apiKey.trim());
+    await vault.putByLabel(LLM_PROVIDER_KEY, provider.id);
+    await vault.putByLabel(LLM_BASE_URL_KEY, llmBaseUrl.trim() || provider.baseUrl);
     await vault.putByLabel(MODEL_LABEL, m);
     await vault.putByLabel(WORKER_MODEL_LABEL, w);
+    setLlmProvider(provider.id);
+    setLlmBaseUrl(llmBaseUrl.trim() || provider.baseUrl);
     setModel(m);
     setWorkerModel(w);
     setNeedsOnboarding(false);
@@ -905,7 +952,17 @@ export function App() {
     setCurrentSession(s);
     await refreshVaultLabels();
     setTab("chat");
-  }, [apiKey, model, workerModel, passphrase, refreshVaultLabels, sessions, vault]);
+  }, [
+    apiKey,
+    llmBaseUrl,
+    llmProvider,
+    model,
+    workerModel,
+    passphrase,
+    refreshVaultLabels,
+    sessions,
+    vault,
+  ]);
 
   const newChat = useCallback(async () => {
     stashActiveWorkspace();
@@ -922,6 +979,7 @@ export function App() {
     setEditingTurnId(null);
     setInspectTurnId(null);
     setPendingAttachments([]);
+    setPendingPicks([]);
     setAttachMsg("");
     setSessionUsage(emptySplit());
     setLastTurnUsage(null);
@@ -935,6 +993,40 @@ export function App() {
     bumpRuntimeMeta();
     await refreshSessions();
   }, [bumpRuntimeMeta, ensureRuntime, refreshSessions, sessions, stashActiveWorkspace]);
+
+  const startElementPick = useCallback(async () => {
+    if (picking) {
+      setPicking(false);
+      void chrome.runtime.sendMessage({ type: "element_picker", action: "stop" });
+      setStatus("Picker cancelled");
+      return;
+    }
+    setPicking(true);
+    setStatus("Click an element on the page (Esc to cancel)…");
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "element_picker",
+        action: "start",
+      })) as {
+        ok?: boolean;
+        cancelled?: boolean;
+        data?: PickedElementRef;
+        error?: string;
+      };
+      if (res?.ok && res.data) {
+        setPendingPicks((prev) => [...prev, res.data!].slice(-8));
+        setStatus(`Picked ${pickedElementChipLabel(res.data)}`);
+      } else if (res?.cancelled) {
+        setStatus("Picker cancelled");
+      } else {
+        setStatus(res?.error ? `Picker: ${res.error}` : "Picker failed");
+      }
+    } catch (e) {
+      setStatus(`Picker: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPicking(false);
+    }
+  }, [picking]);
 
   const addFiles = useCallback(
     async (fileList: FileList | File[]) => {
@@ -1040,6 +1132,7 @@ export function App() {
       abortRef.current = abortBySessionRef.current.get(id) ?? null;
       setPendingApproval(pendingApprovalBySessionRef.current.get(id) ?? null);
       setPendingAttachments([]);
+      setPendingPicks([]);
       setAttachMsg("");
       setEditingTurnId(null);
       setInspectTurnId(null);
@@ -1061,6 +1154,8 @@ export function App() {
         blocks: m.blocks as TurnBlock[] | undefined,
         usage: m.usage,
         runContext: m.runContext as RunContextSnapshot | undefined,
+        picks: m.picks as PickedElementRef[] | undefined,
+        activeTab: m.activeTab,
       }));
     const history = historyFromUiTurns(
       turnsFromDb.map((m) => ({
@@ -1097,6 +1192,7 @@ export function App() {
     abortRef.current = null;
     setPendingApproval(null);
     setPendingAttachments([]);
+    setPendingPicks([]);
     setAttachMsg("");
     setEditingTurnId(null);
     setInspectTurnId(null);
@@ -1144,15 +1240,20 @@ export function App() {
   /** Pre-send: show the system/memory/skills/tool-index + user payload without calling the LLM. */
   const previewOutbound = useCallback(async () => {
     const text = input.trim();
-    if (!text && pendingAttachments.length === 0) {
-      setStatus("Type a message (or attach a file) to preview outbound context");
+    if (!text && pendingAttachments.length === 0 && pendingPicks.length === 0) {
+      setStatus("Type a message, attach a file, or pick an element to preview");
       return;
     }
     if (!vault.isUnlocked()) return setStatus("Unlock vault first");
     try {
       setStatus("Building outbound preview…");
       const key = (await vault.getByLabel(KEY_LABEL)) ?? "preview";
-      const llm = new OpenRouterClient({ apiKey: key });
+      const llm = buildLlmClient({
+        apiKey: key,
+        provider: llmProvider,
+        baseUrl: llmBaseUrl,
+        webSearchEnabled,
+      });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
       const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
@@ -1166,10 +1267,18 @@ export function App() {
             ? activeProfile.toolAllowlist
             : [...enabledTools];
       const pendingIds = pendingAttachments.map((a) => a.id);
+      const tabSnap: ActiveTabContext = {
+        ...(await getActiveTabMeta()),
+        at: new Date().toISOString(),
+      };
       const ctx = await agent.previewRunContext({
         model: runModel,
         workerModel: runWorker,
-        userMessage: text || "Please analyze the attached files.",
+        userMessage:
+          text ||
+          (pendingPicks.length
+            ? "Inspect and interact with the picked element(s)."
+            : "Please analyze the attached files."),
         history: historyRef.current,
         systemPrompt: activeProfile?.systemPrompt,
         enabledTools: runTools,
@@ -1183,6 +1292,8 @@ export function App() {
         agentId: activeAgentId ?? undefined,
         attachments,
         pendingAttachmentIds: pendingIds,
+        pickedElements: [...pendingPicks],
+        activeTab: tabSnap,
       });
       const approxTokens = (s: string) => Math.max(0, Math.ceil(s.length / 4));
       const historyChars = historyRef.current.reduce((n, m) => {
@@ -1250,14 +1361,18 @@ export function App() {
     customTools,
     enabledTools,
     input,
+    llmBaseUrl,
+    llmProvider,
     memory,
     model,
     pendingAttachments,
+    pendingPicks,
     profiles,
     sessions,
     skills,
     taskStore,
     vault,
+    webSearchEnabled,
     workerModel,
   ]);
 
@@ -1268,7 +1383,9 @@ export function App() {
       if (!activeId && runningRef.current) return false;
       let text = (overrideText ?? (queued ? queued.text : input)).trim();
       const pending = queued?.attachments ?? pendingAttachments;
-      if (!text && pending.length === 0) return false;
+      // Snapshot immediately — React state may clear before await points below.
+      const picks = [...(queued?.picks ?? pendingPicks)];
+      if (!text && pending.length === 0 && picks.length === 0) return false;
       if (!vault.isUnlocked()) {
         setStatus("Unlock vault first");
         return false;
@@ -1302,10 +1419,11 @@ export function App() {
         }
       }
 
-      const key = apiKey || (await vault.getByLabel(KEY_LABEL));
-      if (!key) {
+      const provider = resolveProvider(llmProvider);
+      const key = apiKey || (await vault.getByLabel(KEY_LABEL)) || "";
+      if (!key.trim() && !provider.keyOptional) {
         setTab("settings");
-        setStatus("Missing OpenRouter key");
+        setStatus("Missing API key — add it in Settings");
         return false;
       }
 
@@ -1313,7 +1431,9 @@ export function App() {
         text ||
         (pending.length
           ? `Analyze ${pending.length} attachment(s): ${pending.map((p) => p.name).join(", ")}`
-          : "");
+          : picks.length
+            ? `Inspect picked element(s): ${picks.map((p) => pickedElementChipLabel(p)).join(", ")}`
+            : "");
 
       let session = currentSession;
       if (!session) {
@@ -1323,9 +1443,18 @@ export function App() {
 
       if (!overrideText && !queued) setInput("");
       const pendingIds = pending.map((p) => p.id);
-      if (!queued) setPendingAttachments([]);
+      if (!queued) {
+        setPendingAttachments([]);
+        setPendingPicks([]);
+      }
       setAttachMsg("");
       const nowIso = new Date().toISOString();
+      const tabSnap =
+        queued?.activeTab ??
+        ({
+          ...(await getActiveTabMeta()),
+          at: nowIso,
+        } satisfies ActiveTabContext);
       const editId = queued ? null : editingTurnId;
       setEditingTurnId(null);
       const boundId = session.id;
@@ -1367,6 +1496,8 @@ export function App() {
         content: displayText,
         createdAt: nowIso,
         attachments: pending.map((p) => ({ id: p.id, name: p.name, kind: p.kind })),
+        picks: picks.length ? picks : undefined,
+        activeTab: tabSnap,
       };
       const assistantId = crypto.randomUUID();
       let nextTurns = [
@@ -1428,7 +1559,13 @@ export function App() {
       }
       bump();
 
-      const llm = new OpenRouterClient({ apiKey: key });
+      const llm = buildLlmClient({
+        apiKey: key,
+        provider: llmProvider,
+        baseUrl: llmBaseUrl,
+        webSearchEnabled,
+      });
+      const omitComboWebSearch = shouldOmitComboWebSearch(llmProvider, webSearchEnabled);
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
       const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
@@ -1546,7 +1683,12 @@ export function App() {
       };
 
       const onEvent = (event: AgentEvent) => {
-        if (event.type === "status" && event.message) publishStatus(event.message);
+        if (event.type === "status" && event.message) {
+          if (event.message.startsWith("Calling model")) {
+            if (isBoundActive()) setPlanningTool(null);
+          }
+          publishStatus(event.message);
+        }
         if (event.type === "usage" && event.usage) {
           const u = event.usage;
           const src = event.usageSource;
@@ -1582,7 +1724,12 @@ export function App() {
             setPendingApproval(pending);
           }
         }
+        if (event.type === "tool_planning" && event.tool) {
+          if (isBoundActive()) setPlanningTool(event.tool);
+          publishStatus(`Planning: ${event.tool}…`);
+        }
         if (event.type === "tool_start" && event.tool) {
+          if (isBoundActive()) setPlanningTool(null);
           const id = event.toolCallId ?? crypto.randomUUID();
           commitLivesToBlocks();
           toolMap.set(id, {
@@ -1743,10 +1890,14 @@ export function App() {
           flushAssistant({ artifacts: [...turnArtifacts] });
         }
         if (event.type === "error" && event.message) publishStatus(event.message);
-        if (event.type === "done") publishStreaming(null);
+        if (event.type === "done") {
+          if (isBoundActive()) setPlanningTool(null);
+          publishStreaming(null);
+        }
       };
 
       try {
+        if (isBoundActive()) setPlanningTool(null);
         const result = await agent.run({
           model: runModel,
           workerModel: runWorker,
@@ -1757,6 +1908,7 @@ export function App() {
           systemPrompt: activeProfile?.systemPrompt,
           enabledTools: runTools,
           toolMode: runToolMode,
+          omitComboWebSearch,
           skills,
           customTools,
           approvalMode: runApproval,
@@ -1768,6 +1920,7 @@ export function App() {
           pageExtensions,
           agents: agentProfiles,
           sessionId: session.id,
+          boundTabId: session.boundTabId,
           runId,
           agentId: activeAgentId ?? undefined,
           nestingDepth: 0,
@@ -1783,6 +1936,8 @@ export function App() {
           approvalPolicies,
           changeLog,
           pendingAttachmentIds: pendingIds,
+          pickedElements: picks,
+          activeTab: tabSnap,
           vision: visionSettings,
           onEvent,
         });
@@ -1910,6 +2065,8 @@ export function App() {
       enabledTools,
       ensureRuntime,
       input,
+      llmBaseUrl,
+      llmProvider,
       memory,
       skills,
       customTools,
@@ -1918,9 +2075,11 @@ export function App() {
       maxStepsOverride,
       model,
       pendingAttachments,
+      pendingPicks,
       pendingSecrets,
       workerModel,
       visionSettings,
+      webSearchEnabled,
       persistSession,
       profiles,
       rag,
@@ -1936,10 +2095,11 @@ export function App() {
     ],
   );
 
-  const enqueueOrSend = useCallback(() => {
+  const enqueueOrSend = useCallback(async () => {
     const text = input.trim();
     const pending = pendingAttachments;
-    if ((!text && pending.length === 0) || attachBusy) return;
+    const picks = [...pendingPicks];
+    if ((!text && pending.length === 0 && picks.length === 0) || attachBusy || picking) return;
     if (!vault.isUnlocked()) {
       setStatus("Unlock vault first");
       return;
@@ -1949,25 +2109,41 @@ export function App() {
       (activeId ? !!runtimesRef.current.get(activeId)?.running : false) || runningRef.current;
     if (activeRunning) {
       if (!activeId) return;
+      const meta = await getActiveTabMeta();
       const item: QueuedSend = {
         sessionId: activeId,
         text:
           text ||
-          `Analyze ${pending.length} attachment(s): ${pending.map((p) => p.name).join(", ")}`,
+          (pending.length
+            ? `Analyze ${pending.length} attachment(s): ${pending.map((p) => p.name).join(", ")}`
+            : `Inspect picked element(s): ${picks.map((p) => pickedElementChipLabel(p)).join(", ")}`),
         attachments: [...pending],
         secrets: pendingSecrets.map((s) => ({ ...s })),
+        picks,
+        activeTab: { ...meta, at: new Date().toISOString() },
       };
       sendQueueRef.current = [...sendQueueRef.current, item];
       setSendQueue([...sendQueueRef.current]);
       setInput("");
       setPendingAttachments([]);
+      setPendingPicks([]);
       setPendingSecrets([]);
       setAttachMsg("");
       setStatus(`Queued · ${sendQueueRef.current.length} waiting`);
       return;
     }
     void send();
-  }, [attachBusy, currentSession?.id, input, pendingAttachments, pendingSecrets, send, vault]);
+  }, [
+    attachBusy,
+    currentSession?.id,
+    input,
+    pendingAttachments,
+    pendingPicks,
+    pendingSecrets,
+    picking,
+    send,
+    vault,
+  ]);
 
   useEffect(() => {
     const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
@@ -2018,8 +2194,8 @@ export function App() {
           <h1>{isUnlock ? "Unlock vault" : "Local agent. Your keys."}</h1>
           {!isUnlock ? (
             <p>
-              Encrypted vault (AES-GCM). OpenRouter BYOK. Sessions persist locally. Sync is planned —
-              not in this build.
+              Encrypted vault (AES-GCM). BYOK via OpenRouter, OpenAI, Ollama, or any OpenAI-compatible
+              endpoint. Sessions persist locally. Sync is planned — not in this build.
             </p>
           ) : null}
           <input
@@ -2037,9 +2213,15 @@ export function App() {
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-or-v1-…"
+                placeholder={resolveProvider(llmProvider).keyPlaceholder}
               />
-              <ModelPicker value={model} apiKey={apiKey} onChange={setModel} />
+              <ModelPicker
+                value={model}
+                apiKey={apiKey}
+                baseUrl={llmBaseUrl}
+                keyOptional={resolveProvider(llmProvider).keyOptional}
+                onChange={setModel}
+              />
             </>
           ) : null}
           <div className="row">
@@ -2112,6 +2294,7 @@ export function App() {
               onOpenSession={loadSession}
               onNewChat={newChat}
               runtimeMeta={runtimeMeta}
+              onExport={(filename, text, mime) => void bridge.downloadText(filename, text, mime)}
             />
             <ConversationTasksDrawer
               open={tasksDrawerOpen}
@@ -2193,6 +2376,44 @@ export function App() {
                 </div>
                 {currentSession ? (
                   <div className="conv-bar-actions">
+                    <button
+                      type="button"
+                      className={
+                        currentSession.boundTabId != null
+                          ? "msg-action icon-btn active"
+                          : "msg-action icon-btn"
+                      }
+                      title={
+                        currentSession.boundTabId != null
+                          ? `Pinned tab ${currentSession.boundTabId} — click to unpin (tools hit this tab without stealing sidepanel focus)`
+                          : "Pin active browser tab for tools/navigate (keeps sidepanel focus)"
+                      }
+                      aria-label="Pin active tab"
+                      aria-pressed={currentSession.boundTabId != null}
+                      onClick={() => {
+                        void (async () => {
+                          if (currentSession.boundTabId != null) {
+                            const updated = { ...currentSession, boundTabId: undefined };
+                            setCurrentSession(updated);
+                            await sessions.save(updated);
+                            setStatus("Tab unpinned");
+                            return;
+                          }
+                          const meta = await getActiveTabMeta();
+                          if (meta.tabId == null) {
+                            setStatus("No active tab to pin");
+                            return;
+                          }
+                          const updated = { ...currentSession, boundTabId: meta.tabId };
+                          setCurrentSession(updated);
+                          await sessions.save(updated);
+                          const label = meta.title?.trim() || meta.url || String(meta.tabId);
+                          setStatus(`Pinned tab ${meta.tabId}: ${label.slice(0, 48)}`);
+                        })();
+                      }}
+                    >
+                      {currentSession.boundTabId != null ? "●" : "○"}
+                    </button>
                     <button
                       type="button"
                       className={browserOpen ? "msg-action icon-btn active" : "msg-action icon-btn"}
@@ -2457,6 +2678,27 @@ export function App() {
                             ))}
                           </div>
                         ) : null}
+                        {t.role === "user" && (t.picks?.length || t.activeTab?.url) ? (
+                          <div className="attach-chips turn-context-chips">
+                            {t.activeTab?.url ? (
+                              <span
+                                className="attach-chip done"
+                                title={`${t.activeTab.title ?? ""}\n${t.activeTab.url}\n${t.activeTab.at}`}
+                              >
+                                tab: {(t.activeTab.title || t.activeTab.url).slice(0, 36)}
+                              </span>
+                            ) : null}
+                            {t.picks?.map((p) => (
+                              <span
+                                key={p.id}
+                                className="attach-chip done"
+                                title={formatBrowserContextBlock({ picks: [p] })}
+                              >
+                                el: {pickedElementChipLabel(p)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="bubble-actions">
                         <MessageToolbar
@@ -2475,11 +2717,11 @@ export function App() {
                               }
                               title={
                                 t.delivery === "stream"
-                                  ? "Orchestrator used streaming (chatStreaming)"
+                                  ? "SSE — response streaming (full context still sent each turn)"
                                   : "Orchestrator used a full non-stream call"
                               }
                             >
-                              {t.delivery === "stream" ? "stream" : "full"}
+                              {t.delivery === "stream" ? "sse" : "full"}
                             </span>
                           ) : null}
                           {t.role === "user" ? (
@@ -2528,7 +2770,7 @@ export function App() {
                       {inspectTurnId === t.id ? (
                         <pre className="context-inspect">
                           {t.runContext
-                            ? `model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}\n\n--- OPEN TASKS (session + global; always prepended once per turn) ---\n${t.runContext.taskBlock || "(none)"}\n\n--- SKILLS INDEX (descriptions; bodies via skill_read) ---\n${t.runContext.skillBlock || "(none)"}\n\n--- TOOL CATALOG ---\n${t.runContext.toolCatalogBlock || "(none)"}`
+                            ? `model: ${t.runContext.model}\ntransport: ${t.runContext.transport}\ntools (${t.runContext.toolNames.length}): ${t.runContext.toolNames.join(", ")}\n\n--- USER (sent to LLM: tab + picks + message) ---\n${t.runContext.userPreview || "(missing — reload 1.6.40+)"}\n\n--- SYSTEM ---\n${t.runContext.systemPrompt}\n\n--- MEMORIES (always prepended once per turn; global + active agent; not mid-stream) ---\n${t.runContext.memoryBlock || "(none)"}\n\n--- OPEN TASKS (session + global; always prepended once per turn) ---\n${t.runContext.taskBlock || "(none)"}\n\n--- SKILLS INDEX (descriptions; bodies via skill_read) ---\n${t.runContext.skillBlock || "(none)"}\n\n--- TOOL CATALOG ---\n${t.runContext.toolCatalogBlock || "(none)"}`
                             : "No context snapshot for this turn.\n\nOlder turns (before the fix) or a finished run that wiped runContext from UI state. Send a new message after reloading 1.6.17+ — Context will stay available and persist with the session."}
                         </pre>
                       ) : null}
@@ -2599,6 +2841,13 @@ export function App() {
                   }}
                 />
               ) : null}
+              {planningTool && running ? (
+                <div className="attach-chips" aria-live="polite">
+                  <span className="attach-chip" title="Model is emitting a tool call via SSE">
+                    Planning: {planningTool}…
+                  </span>
+                </div>
+              ) : null}
               {status && running ? <div className="bubble system">{status}</div> : null}
             </div>
             <PreviewDrawer
@@ -2647,7 +2896,9 @@ export function App() {
                 className="grow"
                 value={model}
                 apiKey={apiKey}
-                title="Search and select any OpenRouter model"
+                baseUrl={llmBaseUrl}
+                keyOptional={resolveProvider(llmProvider).keyOptional}
+                title="Search and select a model"
                 onChange={(id) => {
                   setModel(id);
                   void vault.putByLabel(MODEL_LABEL, id);
@@ -2729,6 +2980,27 @@ export function App() {
                 ))}
               </div>
             ) : null}
+            {pendingPicks.length > 0 ? (
+              <div className="attach-chips" aria-label="Picked elements">
+                {pendingPicks.map((p) => (
+                  <span
+                    key={p.id}
+                    className="attach-chip"
+                    title={`${p.selector}${p.interactiveIndex != null ? ` · index ${p.interactiveIndex}` : ""}`}
+                  >
+                    el: {pickedElementChipLabel(p)}
+                    <button
+                      type="button"
+                      className="attach-x"
+                      aria-label="Remove picked element"
+                      onClick={() => setPendingPicks((prev) => prev.filter((x) => x.id !== p.id))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             {attachMsg ? <p className="hint wrap">{attachMsg}</p> : null}
             <SecretEmbedBar
               detectEnabled={detectSecrets}
@@ -2744,7 +3016,10 @@ export function App() {
                   unlockedThisRun={unlockedThisRun}
                   onInspectContext={() => void previewOutbound()}
                   inspectDisabled={
-                    running || (!input.trim() && pendingAttachments.length === 0)
+                    running ||
+                    (!input.trim() &&
+                      pendingAttachments.length === 0 &&
+                      pendingPicks.length === 0)
                   }
                 />
               }
@@ -2752,11 +3027,11 @@ export function App() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask… attach PDF/CSV/images, or “continue” after a step limit"
+              placeholder="Ask… attach files, pick an element, or “continue” after a step limit"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
-                  enqueueOrSend();
+                  void enqueueOrSend();
                 }
               }}
               onPaste={(e) => {
@@ -2793,22 +3068,63 @@ export function App() {
                 </button>
               </p>
             ) : null}
-            <div className="row">
+            <div className="row composer-actions">
               <button
                 type="button"
+                className="icon-btn"
                 disabled={attachBusy}
                 onClick={() => fileInputRef.current?.click()}
-                title="Attach PDF, CSV, XLSX, txt, images"
+                title="Attach files (PDF, CSV, images…)"
+                aria-label="Attach files"
               >
-                {attachBusy ? "…" : "Attach"}
+                {attachBusy ? "…" : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                  </svg>
+                )}
+              </button>
+              <button
+                type="button"
+                className={picking ? "icon-btn primary" : "icon-btn"}
+                disabled={attachBusy}
+                onClick={() => void startElementPick()}
+                title={
+                  picking
+                    ? "Cancel element picker"
+                    : "Pick an element on the active tab for the agent"
+                }
+                aria-label={picking ? "Cancel pick" : "Pick element"}
+              >
+                {picking ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+                  </svg>
+                )}
               </button>
               <button
                 type="button"
                 className="primary"
-                disabled={(!input.trim() && pendingAttachments.length === 0) || attachBusy}
-                onClick={enqueueOrSend}
+                disabled={
+                  (!input.trim() &&
+                    pendingAttachments.length === 0 &&
+                    pendingPicks.length === 0) ||
+                  attachBusy ||
+                  picking
+                }
+                onClick={() => void enqueueOrSend()}
               >
-                {running ? "Queue" : "Send"}
+                {running ||
+                !!(
+                  currentSession?.id &&
+                  runtimesRef.current.get(currentSession.id)?.running
+                )
+                  ? "Queue"
+                  : "Send"}
               </button>
               <button
                 type="button"
@@ -2825,6 +3141,56 @@ export function App() {
               >
                 STOP
               </button>
+              <div className="budget-toggle-wrap">
+                <label
+                  className={
+                    budgetMode === "budget" ? "budget-toggle active" : "budget-toggle"
+                  }
+                  title={
+                    budgetMode === "budget"
+                      ? "Budget on — cheaper page reads + fewer steps (tools stay listed)"
+                      : "Budget off — normal page reads + more steps"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={budgetMode === "budget"}
+                    onChange={(e) =>
+                      setBudgetMode(e.target.checked ? "budget" : "normal")
+                    }
+                  />
+                  <span>Budget</span>
+                </label>
+                <button
+                  type="button"
+                  className={
+                    budgetInfoOpen ? "msg-action icon-btn active" : "msg-action icon-btn"
+                  }
+                  title="What does Budget mode do?"
+                  aria-label="Budget mode help"
+                  aria-expanded={budgetInfoOpen}
+                  onClick={() => {
+                    setBudgetInfoOpen((v) => !v);
+                    setUsageDetailsOpen(false);
+                  }}
+                >
+                  ?
+                </button>
+                {budgetInfoOpen ? (
+                  <div className="budget-info-pop" role="dialog" aria-label="Budget mode help">
+                    {BUDGET_MODE_HELP.split("\n\n").map((block, i) => (
+                      <p key={i} className={i === 0 ? undefined : "hint"}>
+                        {block.split("\n").map((line, j) => (
+                          <span key={j}>
+                            {j > 0 ? <br /> : null}
+                            {line}
+                          </span>
+                        ))}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
             <div className="usage-footer">
               <span
@@ -2844,7 +3210,10 @@ export function App() {
                   title="Usage details (orchestrator / worker / last turn)"
                   aria-label="Usage details"
                   aria-expanded={usageDetailsOpen}
-                  onClick={() => setUsageDetailsOpen((v) => !v)}
+                  onClick={() => {
+                    setUsageDetailsOpen((v) => !v);
+                    setBudgetInfoOpen(false);
+                  }}
                 >
                   ⋯
                 </button>
@@ -2969,6 +3338,15 @@ export function App() {
           locked={locked}
           apiKey={apiKey}
           setApiKey={setApiKey}
+          llmProvider={llmProvider}
+          setLlmProvider={setLlmProvider}
+          llmBaseUrl={llmBaseUrl}
+          setLlmBaseUrl={setLlmBaseUrl}
+          webSearchEnabled={webSearchEnabled}
+          setWebSearchEnabled={(v) => {
+            setWebSearchEnabled(v);
+            localStorage.setItem(WEB_SEARCH_KEY, v ? "1" : "0");
+          }}
           model={model}
           setModel={setModel}
           workerModel={workerModel}

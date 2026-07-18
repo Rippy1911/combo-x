@@ -36,6 +36,7 @@ Local-first **browser agent** Chrome extension (MV3).
 | [`docs/PAGE_EXTENSIONS.md`](./docs/PAGE_EXTENSIONS.md) | Page scripts / isolation / bridge |
 | [`docs/BUDGET.md`](./docs/BUDGET.md) | Budget mode |
 | [`docs/CONNECTORS.md`](./docs/CONNECTORS.md) | REST/MCP |
+| [`docs/PROVIDERS.md`](./docs/PROVIDERS.md) | OpenRouter / OpenAI / Ollama / custom + web search |
 | [`docs/MAPS_AND_UPLOADS.md`](./docs/MAPS_AND_UPLOADS.md) | MapLibre reports + uploads CDN |
 | [`docs/VIEWS.md`](./docs/VIEWS.md) | Progressive tables |
 | [`docs/LOCAL_RAG.md`](./docs/LOCAL_RAG.md) | Device RAG |
@@ -53,8 +54,8 @@ Load in Chrome:
 
 1. `chrome://extensions` → Developer mode
 2. **Load unpacked** → `extension/dist` (reload after rebuild)
-3. Side panel → passphrase + OpenRouter key
-4. **Settings** → Budget (default), Agents, Connectors (REST/MCP), Device RAG
+3. Side panel → passphrase + API key (OpenRouter by default)
+4. **Settings** → LLM provider, Budget (default), Agents, Connectors (REST/MCP), Device RAG
 5. Chat: attach PDF → scrape with `scrape_pdps` / progressive table
 
 ## Next (known gaps — see verification)

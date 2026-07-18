@@ -1,20 +1,41 @@
-/** Budget mode — minimize orchestrator tokens/steps. */
+/** Budget mode — minimize orchestrator tokens/steps without hiding tools. */
 
 export type AgentBudgetMode = "normal" | "budget";
 
 export const BUDGET_MAX_STEPS = 16;
-export const BUDGET_GET_PAGE_CHARS = 2_200;
+/** Short page reads in budget — prefer page_digest; not a tool-catalog cut. */
+export const BUDGET_GET_PAGE_CHARS = 3_200;
 export const NORMAL_GET_PAGE_CHARS = 12_000;
+/** Lean chat history cap (prior turns only — never tool schemas / TOOL INDEX). */
+export const BUDGET_LEAN_HISTORY_CHARS = 16_000;
+export const NORMAL_LEAN_HISTORY_CHARS = 24_000;
 
-export const BUDGET_SYSTEM_ADDON = `BUDGET MODE (strict — minimize tokens & steps):
-- Prefer page_digest over get_page. get_page mode=full is REJECTED.
-- Prefer scrape_pdps for many SAPs/URLs (one tool turn). Prefer ensure_scrape_table BEFORE first navigate, upsert every row.
+/**
+ * System addon for budget runs.
+ * Hard rule: full TOOL INDEX + ACTIVE schemas stay available — save tokens via
+ * page-read discipline and step count, not by inventing missing tools.
+ */
+export const BUDGET_SYSTEM_ADDON = `BUDGET MODE (minimize tokens & steps — tools stay fully listed):
+- Full TOOL INDEX and ACTIVE tool schemas remain available. Do not claim tools are missing or truncated.
+- Prefer page_digest over get_page. get_page mode=full is REJECTED (use page_digest or mode=snippet|structure).
 - Prefer extract / query_all / find_text with tight selectors over dumping page text.
-- Prefer parse_data (cheap worker) to structure text/rows — do NOT paste huge text into your own replies.
+- Prefer scrape_pdps for many SAPs/URLs (one tool turn). Prefer ensure_scrape_table BEFORE first navigate.
+- Prefer parse_data (cheap worker) to structure text/rows — do NOT paste huge text into your replies.
 - For product PDPs: page_digest once per template; navigate via /s/{SAP}; avoid re-reading chrome/nav.
-- If attachment already has EANs (invoice PDF), parse_data that text first — only scrape missing carton→retail pairs.
+- If attachment already has EANs (invoice PDF), parse_data that text first — only scrape missing pairs.
 - Prefer login {profile} over manual type_index password flows.
-- Report briefly when worker parse_data fails and you fall back.`;
+- Keep answers brief; finish in fewer steps.`;
+
+/** Short UI copy for the composer ? popover / Settings. */
+export const BUDGET_MODE_HELP = `Budget mode cuts cost/latency without hiding tools:
+
+• Full tool list + schemas still sent (no random tool truncation)
+• Caps orchestrator steps (16 vs 32) unless you override Max turns
+• Prefers page_digest; rejects get_page mode=full; shortens page text reads
+• Slightly tighter chat-history packing (prior turns only)
+• System hint: extract/parse_data over dumping whole pages
+
+Normal mode: longer page reads, 32 steps, fuller history. Active agent profiles can override.`;
 
 export function resolveMaxSteps(
   budgetMode: AgentBudgetMode | undefined,
@@ -26,6 +47,10 @@ export function resolveMaxSteps(
 
 export function defaultGetPageMaxChars(budgetMode: AgentBudgetMode | undefined): number {
   return budgetMode === "budget" ? BUDGET_GET_PAGE_CHARS : NORMAL_GET_PAGE_CHARS;
+}
+
+export function leanHistoryMaxChars(budgetMode: AgentBudgetMode | undefined): number {
+  return budgetMode === "budget" ? BUDGET_LEAN_HISTORY_CHARS : NORMAL_LEAN_HISTORY_CHARS;
 }
 
 export function shouldRejectGetPageFull(

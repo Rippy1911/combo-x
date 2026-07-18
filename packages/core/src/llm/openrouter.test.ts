@@ -84,6 +84,52 @@ describe("OpenRouterClient.chatStreaming", () => {
     expect(result.toolCalls[0]?.function.name).toBe("get_page");
     expect(result.toolCalls[0]?.function.arguments).toBe("{}");
   });
+
+  it("fires onToolCallDelta once when tool name first appears", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"navigate","arguments":""}}]}}]}\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"url\\":\\"x\\"}"}}]},"finish_reason":"tool_calls"}]}\n',
+      "data: [DONE]\n",
+    ].join("");
+    const fetchImpl: typeof fetch = async () =>
+      new Response(sse, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const planned: string[] = [];
+    await client.chatStreaming({
+      model: "m",
+      messages: [{ role: "user", content: "x" }],
+      onToolCallDelta: (name) => planned.push(name),
+    });
+    expect(planned).toEqual(["navigate"]);
+  });
+
+  it("omits OpenRouter-only headers and stream_options for Moonshot baseUrl", async () => {
+    let body: Record<string, unknown> = {};
+    let headers: Headers | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      headers = new Headers(init?.headers);
+      return new Response("data: [DONE]\n", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+    const client = new OpenRouterClient({
+      apiKey: "sk-moon",
+      baseUrl: "https://api.moonshot.ai/v1",
+      fetchImpl,
+    });
+    await client.chatStreaming({
+      model: "kimi-k2.6",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.stream_options).toBeUndefined();
+    expect(headers?.get("HTTP-Referer")).toBeNull();
+    expect(headers?.get("X-Title")).toBeNull();
+  });
 });
 
 describe("OpenRouterClient.chat", () => {
@@ -173,5 +219,18 @@ describe("OpenRouterClient.chat", () => {
     await expect(
       client.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }),
     ).rejects.toMatchObject({ name: "LlmError", status: 401 });
+  });
+
+  it("rejects empty model before fetch (avoids OpenRouter No models provided)", async () => {
+    let called = false;
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    };
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    await expect(
+      client.chat({ model: "  ", messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toMatchObject({ name: "LlmError", status: 400 });
+    expect(called).toBe(false);
   });
 });

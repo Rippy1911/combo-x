@@ -4,6 +4,11 @@ import {
   ATTACH_INLINE_PREVIEW,
   formatAttachmentInventory,
 } from "../attachments/parse.js";
+import {
+  formatBrowserContextBlock,
+  type ActiveTabContext,
+  type PickedElementRef,
+} from "../browser/elementRef.js";
 import type { ViewChartSpec, ViewStore } from "../local/views.js";
 import { ensureView, upsertRows } from "../local/views.js";
 import type { ApprovalPolicyStore } from "../local/approvalPolicy.js";
@@ -11,6 +16,11 @@ import type { ChangeLogStore } from "../local/changeLog.js";
 import type { ConnectorStore } from "../connectors/store.js";
 import { restRequest } from "../connectors/rest.js";
 import { mcpCall, mcpListTools } from "../connectors/mcp.js";
+import {
+  ensureGithubRestConnector,
+  parseConnectorHeaders,
+} from "../connectors/ensureGithub.js";
+import { githubRestTemplate } from "../connectors/templates.js";
 import { buildMapHtml, fetchMapStyleJson } from "../maps/buildMapHtml.js";
 import { dataUrlToBytes, publishUpload } from "../uploads/publish.js";
 import {
@@ -44,6 +54,7 @@ import {
 import type { Skill, SkillStore } from "../skills/store.js";
 import {
   BUDGET_SYSTEM_ADDON,
+  leanHistoryMaxChars,
   preferPageDigest,
   resolveMaxSteps,
   rewriteGetPageArgs,
@@ -65,8 +76,13 @@ import { approvalDecisionFor } from "../local/actionLog.js";
 import { SENSITIVE_TOOLS } from "../protocol/messages.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
-import type { SessionStore } from "../sessions/store.js";
+import {
+  formatSessionExport,
+  type SessionExportFormat,
+  type SessionStore,
+} from "../sessions/store.js";
 import { AGENT_TOOLS, parseToolArguments, rowsToCsv, toolArgsToContentRequest } from "../browser/tools.js";
+import { webFetchText, webSearchDdg } from "../tools/webSearch.js";
 import {
   resolveVisionCapability,
   UX_VISION_WORKER_SYSTEM,
@@ -85,10 +101,17 @@ import {
 } from "../vision/annotateHtml.js";
 import { embedAttachmentsInHtml } from "../vision/embedAttachments.js";
 import {
+  isScreenshotQuality,
+  planScreenshotEncode,
+  type ScreenshotQuality,
+} from "../vision/quality.js";
+import {
+  DEFAULT_VISION_SETTINGS,
   mergeVisionSettings,
   type ImageDetail,
   type VisionSettings,
 } from "../vision/settings.js";
+import { resolveVaultPlaceholders } from "../vault/chatSecrets.js";
 
 export type ApprovalMode = "ask" | "auto_llm" | "auto_all";
 
@@ -167,6 +190,8 @@ export type RunContextSnapshot = {
   skillBlock: string;
   /** Schema-less tool index (pack→skill); JSON schemas live on API tools[] only. */
   toolCatalogBlock: string;
+  /** Exact user payload sent to the LLM (tab + picks + message). */
+  userPreview?: string;
   toolNames: string[];
   model: string;
   /** How the first orchestrator call was delivered */
@@ -195,6 +220,7 @@ export type ChatPreviewPayload = {
 export interface AgentEvent {
   type:
     | "status"
+    | "tool_planning"
     | "tool_start"
     | "tool_result"
     | "tool_approval"
@@ -260,6 +286,10 @@ export interface AgentRunOptions {
   systemPrompt?: string;
   enabledTools?: string[];
   /**
+   * When true, omit Combo web_search/web_fetch (OpenRouter server tools handle search).
+   */
+  omitComboWebSearch?: boolean;
+  /**
    * skill_gated (default when skills provided): lean ALWAYS_ON + unlock via skill_read.
    * static: attach full ceiling every turn (good for expensive orch / auto-picked profiles).
    */
@@ -284,6 +314,10 @@ export interface AgentRunOptions {
   attachments?: AttachmentStore;
   /** Attachment ids included with this user turn */
   pendingAttachmentIds?: string[];
+  /** User-picked DOM elements (element picker) for this turn. */
+  pickedElements?: PickedElementRef[];
+  /** Active tab snapshot at send time (url/title/tabId/time). */
+  activeTab?: ActiveTabContext;
   /** UX Vision Lab settings (OOTB defaults if omitted). */
   vision?: Partial<VisionSettings>;
   /**
@@ -312,6 +346,8 @@ export interface AgentRunOptions {
   sessionId?: string;
   runId?: string;
   agentId?: string;
+  /** Pin DOM/navigate tools to this tab id (no activate_tab required). */
+  boundTabId?: number;
   onSubagent?: (e: SubagentEvent) => void;
 }
 
@@ -326,7 +362,9 @@ export interface AgentRunResult {
 
 const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
-For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time.
+For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets).
+Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
+For current facts / news use web_search (or OpenRouter built-in web search when enabled); use web_fetch or navigate for full pages. Prefer web_search over inventing URLs.
 SKILLS vs MEMORY:
 - Memories are already prepended in the system message each turn (global + active agent). Do not re-fetch them mid-stream.
 - Skill descriptions are listed in AVAILABLE SKILLS below. Use skill_search / skill_read for the full body AND to unlock specialized tools (scrape, rest, rag, page-ext, media).
@@ -458,6 +496,8 @@ interface RunContext {
   openRouterVision?: ReadonlyMap<string, boolean> | Record<string, boolean>;
   /** Tabs opened via open_tab(newTab:true) this run — closed on finish unless keepOpen. */
   ephemeralTabIds: number[];
+  /** Session-pinned browser tab — DOM/navigate target without activate_tab. */
+  boundTabId?: number;
 }
 
 export class AgentLoop {
@@ -470,6 +510,37 @@ export class AgentLoop {
     private readonly sessions?: SessionStore,
     private readonly profiles?: ProfileStore,
   ) {}
+
+  /**
+   * Resolve tab for DOM/navigate: explicit args.tabId → session pin → active (undefined).
+   * Clears stale pins and emits a warning.
+   */
+  private async resolveTargetTabId(
+    runCtx: RunContext | undefined,
+    args: Record<string, unknown>,
+    emit: (e: AgentEvent) => void,
+  ): Promise<number | undefined> {
+    if (typeof args.tabId === "number" && Number.isFinite(args.tabId)) {
+      return Math.floor(args.tabId);
+    }
+    const pinned = runCtx?.boundTabId;
+    if (pinned == null) return undefined;
+    const tabs = await this.browser.listTabs();
+    if (tabs.some((t) => t.id === pinned)) return pinned;
+    if (runCtx) runCtx.boundTabId = undefined;
+    if (runCtx?.sessionId && this.sessions) {
+      void this.sessions.get(runCtx.sessionId).then((s) => {
+        if (s?.boundTabId === pinned) {
+          void this.sessions!.save({ ...s, boundTabId: undefined });
+        }
+      });
+    }
+    emit({
+      type: "status",
+      message: `Pinned tab ${pinned} is gone — cleared bind; using active tab`,
+    });
+    return undefined;
+  }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
     const nestingDepth = options.nestingDepth ?? 0;
@@ -507,7 +578,7 @@ export class AgentLoop {
       });
     };
 
-    await logUsage({ kind: "message", role: "user" });
+    void logUsage({ kind: "message", role: "user" });
 
     const userContent = await this.buildUserContent(options);
     let systemBase = options.systemPrompt ?? resolvedProfile?.systemPrompt ?? DEFAULT_SYSTEM;
@@ -555,14 +626,19 @@ export class AgentLoop {
         : enabledToolNames.filter((n) => ceiling.has(n));
     activeToolNames = [...new Set(activeToolNames)];
 
+    const omitWeb = options.omitComboWebSearch === true;
+    const toolAllowed = (name: string) =>
+      activeToolNames.includes(name) &&
+      !(omitWeb && (name === "web_search" || name === "web_fetch"));
+
     const rebuildTools = () => {
-      const builtin = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+      const builtin = AGENT_TOOLS.filter((t) => toolAllowed(t.function.name));
       const customDefs = customRows
-        .filter((c) => activeToolNames.includes(c.name))
+        .filter((c) => toolAllowed(c.name))
         .map(customToolToDefinition);
       tools = [...builtin, ...customDefs];
     };
-    let tools = AGENT_TOOLS.filter((t) => activeToolNames.includes(t.function.name));
+    let tools = AGENT_TOOLS.filter((t) => toolAllowed(t.function.name));
     rebuildTools();
 
     // Memories / tasks / skill index / tool schemas — once per user turn (not mid-stream).
@@ -571,7 +647,6 @@ export class AgentLoop {
     const skillBlock = await this.formatSkillInject(options.agentId, options.skills);
     const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
       custom: customRows,
-      maxChars: budgetMode === "budget" ? 4_000 : 6_000,
     });
     const systemParts = [
       systemBase,
@@ -582,11 +657,21 @@ export class AgentLoop {
     ].filter(Boolean);
     const messages: ChatMessage[] = [
       { role: "system", content: systemParts.join("\n\n") },
-      ...leanHistory(options.history ?? []),
+      ...leanHistory(options.history ?? [], leanHistoryMaxChars(budgetMode)),
       { role: "user", content: userContent },
     ];
 
     const preferStream = typeof this.llm.chatStreaming === "function";
+    const userPreview =
+      typeof userContent === "string"
+        ? userContent
+        : userContent
+            .map((p) => {
+              if (p.type === "text") return p.text;
+              if (p.type === "image_url") return "[image attachment]";
+              return "[content part]";
+            })
+            .join("\n");
     emit({
       type: "run_context",
       runContext: {
@@ -595,6 +680,7 @@ export class AgentLoop {
         taskBlock,
         skillBlock,
         toolCatalogBlock,
+        userPreview,
         toolNames: tools.map((t) => t.function.name),
         model: orchestratorModel,
         transport: preferStream ? "stream" : "full",
@@ -643,6 +729,7 @@ export class AgentLoop {
       visionSettings,
       openRouterVision: options.openRouterVision,
       ephemeralTabIds: [],
+      boundTabId: options.boundTabId,
     };
     // Point rebuild at runCtx so unlocks sync both arrays.
     runCtx.rebuildTools = () => {
@@ -692,7 +779,7 @@ export class AgentLoop {
 
       emit({
         type: "status",
-        message: `Working… turn ${step + 1} (limit ${maxSteps})`,
+        message: `Calling model… (turn ${step + 1})`,
       });
 
       // Flush pending screenshot vision once (M1) before the next orchestrator call.
@@ -716,6 +803,9 @@ export class AgentLoop {
             onReasoning: (accumulated) => {
               emit({ type: "reasoning_delta", message: accumulated });
             },
+            onToolCallDelta: (toolName) => {
+              emit({ type: "tool_planning", tool: toolName });
+            },
           });
         } else {
           result = await this.llm.chat({
@@ -736,7 +826,7 @@ export class AgentLoop {
 
       usage = sumUsage(usage, result.usage);
       emit({ type: "usage", usage: result.usage, usageSource: "orchestrator" });
-      await logUsage({
+      void logUsage({
         kind: "llm",
         model: orchestratorModel,
         provider: providerFromModel(orchestratorModel),
@@ -751,7 +841,7 @@ export class AgentLoop {
         finalText = result.content ?? "";
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });
-        await logUsage({ kind: "message", role: "assistant" });
+        void logUsage({ kind: "message", role: "assistant" });
         return finishRun({ finalText, aborted: false, hitStepLimit: false });
       }
 
@@ -846,7 +936,7 @@ export class AgentLoop {
     finalText =
       `Hit the step limit (${maxSteps} model turns). I can continue if you say “continue” — or narrow the task (e.g. one category page + parse_data + export_csv).`;
     messages.push({ role: "assistant", content: finalText });
-    await logUsage({ kind: "message", role: "assistant" });
+    void logUsage({ kind: "message", role: "assistant" });
     return finishRun({ finalText, aborted: false, hitStepLimit: true, doneMessage: finalText });
   }
 
@@ -982,7 +1072,6 @@ export class AgentLoop {
     const skillBlock = await this.formatSkillInject(options.agentId, options.skills);
     const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
       custom: customRows,
-      maxChars: budgetMode === "budget" ? 4_000 : 6_000,
     });
     const userContent = await this.buildUserContent(options);
     const userPreview =
@@ -1109,7 +1198,15 @@ export class AgentLoop {
     onUsage: (u: LlmUsage) => void,
     logUsage: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
   ): Promise<string> {
-    const model = runCtx.visionSettings.visionWorkerModel;
+    const model = (
+      runCtx.visionSettings.visionWorkerModel?.trim() ||
+      DEFAULT_VISION_SETTINGS.visionWorkerModel
+    ).trim();
+    if (!model) {
+      throw new Error(
+        "Vision worker model is empty — set Settings → Vision worker model (e.g. google/gemini-3.5-flash)",
+      );
+    }
     const parts = visionPartsFromPending(pending);
     const result = await this.llm.chat({
       model,
@@ -1122,7 +1219,7 @@ export class AgentLoop {
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "vision_worker" });
-    await logUsage({
+    void logUsage({
       kind: "llm",
       model,
       provider: providerFromModel(model),
@@ -1139,7 +1236,7 @@ export class AgentLoop {
     label: string,
     runCtx: RunContext | undefined,
     emit: (e: AgentEvent) => void,
-    detailOverride?: ImageDetail,
+    opts?: { detail?: ImageDetail; quality?: ScreenshotQuality },
   ): Promise<Record<string, unknown>> {
     if (!shot.ok || !shot.dataUrl) {
       return screenshotToolStub({
@@ -1151,10 +1248,19 @@ export class AgentLoop {
     }
 
     const settings = runCtx?.visionSettings ?? mergeVisionSettings();
-    const detail = detailOverride ?? settings.critiqueImageDetail;
+    const quality: ScreenshotQuality =
+      opts?.quality ?? settings.screenshotQuality ?? "high";
+    const plan = planScreenshotEncode({
+      quality,
+      settingsMaxBytes: settings.maxVisionBytes,
+    });
+    const detail =
+      opts?.detail ?? settings.critiqueImageDetail ?? plan.suggestedDetail;
     const promoted = await promoteScreenshotToVision(shot.dataUrl, {
-      maxBytes: settings.maxVisionBytes,
+      maxBytes: plan.maxBytes,
       detail,
+      maxSide: plan.maxSide,
+      jpegQuality: plan.jpegQuality,
     });
 
     let attachmentId: string | undefined;
@@ -1163,7 +1269,9 @@ export class AgentLoop {
       await runCtx.attachments.put({
         id: attachmentId,
         sessionId: runCtx.sessionId,
-        name: `screenshot-${label}-${Date.now()}.jpg`,
+        name: `screenshot-${label}-${Date.now()}.${
+          promoted.dataUrl.startsWith("data:image/jpeg") ? "jpg" : "png"
+        }`,
         mime: promoted.dataUrl.startsWith("data:image/jpeg")
           ? "image/jpeg"
           : "image/png",
@@ -1171,7 +1279,14 @@ export class AgentLoop {
         size: promoted.bytes,
         text: "",
         dataUrl: promoted.dataUrl,
-        meta: { vision: true, source: label, downscaled: promoted.downscaled },
+        meta: {
+          vision: true,
+          source: label,
+          downscaled: promoted.downscaled,
+          quality,
+          detail,
+          maxBytes: plan.maxBytes,
+        },
         truncated: false,
         createdAt: Date.now(),
       });
@@ -1202,10 +1317,13 @@ export class AgentLoop {
       attachmentId,
       bytes: promoted.bytes,
       visionAttached,
+      quality,
+      detail,
+      downscaled: promoted.downscaled,
       note:
         shot.note ??
         (visionAttached
-          ? "Vision queued for next model turn (image not in tool JSON)."
+          ? `Vision queued (${quality}, detail=${detail}${promoted.downscaled ? ", recompressed" : ""}).`
           : "Stored; autoAttachScreenshots is off."),
     });
   }
@@ -1221,6 +1339,7 @@ export class AgentLoop {
       args.detail === "auto" || args.detail === "low" || args.detail === "high"
         ? args.detail
         : undefined;
+    const quality = isScreenshotQuality(args.quality) ? args.quality : undefined;
     const focus =
       typeof args.focus === "string" && args.focus.trim() ? args.focus.trim() : undefined;
 
@@ -1251,13 +1370,10 @@ export class AgentLoop {
       });
     }
 
-    const stub = await this.finalizeScreenshotCapture(
-      shot,
-      `ux-${scope}`,
-      runCtx,
-      emit,
+    const stub = await this.finalizeScreenshotCapture(shot, `ux-${scope}`, runCtx, emit, {
       detail,
-    );
+      quality,
+    });
     return {
       ...stub,
       focus: focus ?? null,
@@ -1460,16 +1576,35 @@ export class AgentLoop {
   private async buildUserContent(
     options: AgentRunOptions,
   ): Promise<string | ContentPart[]> {
+    const contextBlock = formatBrowserContextBlock({
+      tab: options.activeTab,
+      picks: options.pickedElements ?? [],
+    });
     const ids = options.pendingAttachmentIds ?? [];
     const store = options.attachments;
-    if (!store || ids.length === 0) return options.userMessage;
+
+    const baseText = (() => {
+      const msg = options.userMessage.trim();
+      if (msg) return msg;
+      if (ids.length) return "Please analyze the attached files.";
+      if (options.pickedElements?.length) {
+        return "Inspect and interact with the picked element(s).";
+      }
+      return "";
+    })();
+
+    const withContext = contextBlock
+      ? `${contextBlock}\n\n## User message\n${baseText}`
+      : baseText;
+
+    if (!store || ids.length === 0) return withContext;
 
     const rows = [];
     for (const id of ids) {
       const row = await store.get(id);
       if (row) rows.push(row);
     }
-    if (!rows.length) return options.userMessage;
+    if (!rows.length) return withContext;
 
     const inventory = formatAttachmentInventory(
       rows.map((r) => ({
@@ -1496,7 +1631,7 @@ export class AgentLoop {
     }
 
     const textBlock = [
-      options.userMessage.trim() || "Please analyze the attached files.",
+      withContext || "Please analyze the attached files.",
       "",
       inventory,
       previews.length ? `\n${previews.join("\n\n")}` : "",
@@ -1536,6 +1671,7 @@ export class AgentLoop {
     logUsage?: (input: Omit<UsageEvent, "id" | "at">) => Promise<void>,
   ): Promise<unknown> {
     const name = call.function.name;
+    // Emit with unresolved args so chat never shows plaintext vault values.
     emit({ type: "tool_start", tool: name, args, toolCallId: call.id });
 
     const workerOnUsage = (u: LlmUsage) => {
@@ -1577,6 +1713,33 @@ export class AgentLoop {
         return result;
       }
 
+      // Expand `{vault:label}` in tool args (type_index / login / REST body, etc.).
+      let resolvedArgs = args;
+      if (connectors?.getSecret) {
+        try {
+          resolvedArgs = (await resolveVaultPlaceholders(
+            args,
+            connectors.getSecret,
+          )) as Record<string, unknown>;
+        } catch (err) {
+          result = {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            hint: "Unlock vault and ensure the label exists (Settings → Vault).",
+          };
+          emit({
+            type: "tool_result",
+            tool: name,
+            result,
+            toolCallId: call.id,
+            approvalMode: approvalMeta?.approvalMode,
+            approvalDecision: approvalMeta?.approvalDecision ?? "n/a",
+          });
+          return result;
+        }
+      }
+      args = resolvedArgs;
+
       if (name === "list_tabs") {
         result = { tabs: await this.browser.listTabs() };
       } else if (name === "open_tab") {
@@ -1584,12 +1747,19 @@ export class AgentLoop {
         const forceNew = args.newTab === true || args.forceNew === true;
         if (!forceNew) {
           // Default: same-tab navigate — models over-use open_tab and litter windows.
-          const nav = await this.browser.navigate(url);
+          const tabId = await this.resolveTargetTabId(runCtx, args, emit);
+          const nav =
+            tabId != null
+              ? await this.browser.navigate(url, tabId)
+              : await this.browser.navigate(url);
           result = {
             ok: nav.ok,
             url: nav.url,
             mode: "navigated",
-            note: "Used navigate on the active tab. Pass newTab:true only when a parallel tab is required.",
+            tabId: tabId ?? null,
+            note: tabId
+              ? `Navigated pinned/target tab ${tabId}. Pass newTab:true only when a parallel tab is required.`
+              : "Used navigate on the active tab. Pass newTab:true only when a parallel tab is required.",
           };
         } else {
           const opened = await this.browser.openTab(url, true);
@@ -1608,10 +1778,29 @@ export class AgentLoop {
         }
       } else if (name === "activate_tab") {
         result = await this.browser.activateTab(Number(args.tabId));
+      } else if (name === "web_search") {
+        result = await webSearchDdg(String(args.query ?? ""), {
+          limit: typeof args.limit === "number" ? args.limit : 5,
+        });
+      } else if (name === "web_fetch") {
+        result = await webFetchText(String(args.url ?? ""), {
+          maxChars: typeof args.maxChars === "number" ? args.maxChars : 8_000,
+        });
       } else if (name === "navigate") {
-        result = await this.browser.navigate(String(args.url ?? ""));
+        {
+          const tabId = await this.resolveTargetTabId(runCtx, args, emit);
+          const url = String(args.url ?? "");
+          result =
+            tabId != null
+              ? await this.browser.navigate(url, tabId)
+              : await this.browser.navigate(url);
+        }
       } else if (name === "go_back") {
-        result = await this.browser.goBack();
+        {
+          const tabId = await this.resolveTargetTabId(runCtx, args, emit);
+          result =
+            tabId != null ? await this.browser.goBack(tabId) : await this.browser.goBack();
+        }
       } else if (name === "close_tab") {
         result = await this.browser.closeTab(Number(args.tabId));
       } else if (name === "parse_data") {
@@ -2005,10 +2194,68 @@ export class AgentLoop {
               title: s.title,
               updatedAt: s.updatedAt,
               bookmarked: !!s.bookmarked,
+              boundTabId: s.boundTabId ?? null,
               totalMessages: s.messages.length,
               returned: msgs.length,
               messages: msgs,
             };
+          }
+        }
+      } else if (name === "export_session") {
+        if (!this.sessions) {
+          result = { error: "session store not available" };
+        } else {
+          const id =
+            (typeof args.sessionId === "string" && args.sessionId.trim()
+              ? args.sessionId.trim()
+              : null) ??
+            runCtx?.sessionId ??
+            "";
+          if (!id) {
+            result = { ok: false, error: "sessionId required (or run inside a session)" };
+          } else {
+            const s = await this.sessions.get(id);
+            if (!s) {
+              result = { ok: false, error: "session not found", sessionId: id };
+            } else {
+              const format: SessionExportFormat =
+                args.format === "md" ? "md" : "json";
+              const file = formatSessionExport(s, format);
+              const downloaded = await this.browser.downloadText(
+                file.filename,
+                file.body,
+                file.mime,
+              );
+              let fileUrl: string | undefined;
+              let publishError: string | undefined;
+              if (args.publish === true) {
+                const uploaded = await publishUpload({
+                  filename: file.filename,
+                  body: file.body,
+                  contentType: file.mime,
+                  workspaceId: "combo-x",
+                  appName: "combo-x",
+                });
+                if (uploaded.ok) fileUrl = uploaded.file_url;
+                else publishError = uploaded.error;
+              }
+              result = {
+                ok: downloaded.ok,
+                sessionId: id,
+                filename: file.filename,
+                format,
+                bytes: file.body.length,
+                downloaded: downloaded.ok,
+                published: Boolean(fileUrl),
+                file_url: fileUrl ?? null,
+                publishError: publishError ?? null,
+                note: fileUrl
+                  ? "Public URL is the shareable endpoint; agents can also re-export via export_session / get_session."
+                  : publishError
+                    ? `Downloaded locally; publish failed (${publishError}). MV3 has no listen socket.`
+                    : "Saved locally. Pass publish:true for a public file_url (uploads.nextsolutions.studio).",
+              };
+            }
           }
         }
       } else if (name === "save_view") {
@@ -2088,7 +2335,7 @@ export class AgentLoop {
       } else if (name === "get_site_profile") {
         result = await this.getSiteProfile(args);
       } else if (name === "login") {
-        result = await this.loginWithProfile(args, emit);
+        result = await this.loginWithProfile(args, emit, runCtx);
       } else if (name === "scrape_catalog") {
         result = await this.scrapeCatalog(args, workerModel, emit, workerOnUsage);
       } else if (name === "ensure_scrape_table") {
@@ -2177,6 +2424,12 @@ export class AgentLoop {
         }
       } else if (name === "scrape_pdps") {
         result = await this.scrapePdps(args, views, pageTemplates, emit, runCtx);
+      } else if (name === "list_connectors") {
+        result = await this.runListConnectors(connectors);
+      } else if (name === "save_rest_connector") {
+        result = await this.runSaveRestConnector(args, connectors);
+      } else if (name === "ensure_github_connector") {
+        result = await this.runEnsureGithubConnector(args, connectors);
       } else if (name === "rest_request") {
         result = await this.runRestRequest(args, connectors);
       } else if (name === "mcp_list_tools") {
@@ -2195,7 +2448,13 @@ export class AgentLoop {
           const shot = await this.browser.captureViewport(
             typeof args.windowId === "number" ? args.windowId : undefined,
           );
-          result = await this.finalizeScreenshotCapture(shot, "viewport", runCtx, emit);
+          result = await this.finalizeScreenshotCapture(shot, "viewport", runCtx, emit, {
+            detail:
+              args.detail === "auto" || args.detail === "low" || args.detail === "high"
+                ? args.detail
+                : undefined,
+            quality: isScreenshotQuality(args.quality) ? args.quality : undefined,
+          });
         }
       } else if (name === "screenshot_element") {
         if (!this.browser.captureElement) result = { ok: false, error: "capture unavailable" };
@@ -2207,7 +2466,13 @@ export class AgentLoop {
             selector: typeof args.selector === "string" ? args.selector : undefined,
             index: typeof args.index === "number" ? args.index : undefined,
           });
-          result = await this.finalizeScreenshotCapture(shot, "element", runCtx, emit);
+          result = await this.finalizeScreenshotCapture(shot, "element", runCtx, emit, {
+            detail:
+              args.detail === "auto" || args.detail === "low" || args.detail === "high"
+                ? args.detail
+                : undefined,
+            quality: isScreenshotQuality(args.quality) ? args.quality : undefined,
+          });
         }
       } else if (name === "screenshot_full") {
         if (!this.browser.captureFullPage) result = { ok: false, error: "capture unavailable" };
@@ -2216,7 +2481,13 @@ export class AgentLoop {
           const tabId =
             typeof args.tabId === "number" ? args.tabId : (tabs[0]?.id ?? 0);
           const shot = await this.browser.captureFullPage(tabId);
-          result = await this.finalizeScreenshotCapture(shot, "full", runCtx, emit);
+          result = await this.finalizeScreenshotCapture(shot, "full", runCtx, emit, {
+            detail:
+              args.detail === "auto" || args.detail === "low" || args.detail === "high"
+                ? args.detail
+                : undefined,
+            quality: isScreenshotQuality(args.quality) ? args.quality : undefined,
+          });
         }
       } else if (name === "start_recording") {
         if (!this.browser.startRecording) result = { ok: false, error: "recording unavailable" };
@@ -2303,7 +2574,11 @@ export class AgentLoop {
         if (!req) {
           result = { ok: false, error: `invalid args for ${toolName}` };
         } else {
-          result = await this.browser.runContent(req);
+          const tabId = await this.resolveTargetTabId(runCtx, toolArgs, emit);
+          result =
+            tabId != null
+              ? await this.browser.runContent(req, tabId)
+              : await this.browser.runContent(req);
           if (
             pageTemplates &&
             result &&
@@ -2331,7 +2606,7 @@ export class AgentLoop {
         approvalMode: approvalMeta?.approvalMode,
         approvalDecision: approvalMeta?.approvalDecision,
       });
-      await logUsage?.({ kind: "tool", tool: name });
+      void logUsage?.({ kind: "tool", tool: name });
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -2345,7 +2620,7 @@ export class AgentLoop {
         approvalMode: approvalMeta?.approvalMode,
         approvalDecision: approvalMeta?.approvalDecision,
       });
-      await logUsage?.({ kind: "tool", tool: name });
+      void logUsage?.({ kind: "tool", tool: name });
       return result;
     }
   }
@@ -3073,6 +3348,7 @@ export class AgentLoop {
   private async loginWithProfile(
     args: Record<string, unknown>,
     emit: (e: AgentEvent) => void,
+    runCtx?: RunContext,
   ): Promise<unknown> {
     if (!this.profiles) return { ok: false, error: "profile store not available" };
     const profileName = strOpt(args.profile);
@@ -3088,20 +3364,42 @@ export class AgentLoop {
     if (!username || !password || !uSel || !pSel) {
       return { ok: false, error: "login needs username+password+usernameSelector+passwordSelector (or a profile that has them)" };
     }
+    const tabId = await this.resolveTargetTabId(runCtx, args, emit);
     if (loginUrl) {
       emit({ type: "status", message: `Login: navigate ${loginUrl}` });
-      await this.browser.navigate(loginUrl);
+      if (tabId != null) await this.browser.navigate(loginUrl, tabId);
+      else await this.browser.navigate(loginUrl);
       await wait(800);
     }
     emit({ type: "status", message: "Login: filling credentials" });
-    await this.browser.runContent({ op: "type_text", selector: uSel, text: username, submit: false });
-    await this.browser.runContent({ op: "type_text", selector: pSel, text: password, submit: false });
+    const typeUser = {
+      op: "type_text" as const,
+      selector: uSel,
+      text: username,
+      submit: false,
+    };
+    const typePass = {
+      op: "type_text" as const,
+      selector: pSel,
+      text: password,
+      submit: false,
+    };
+    if (tabId != null) {
+      await this.browser.runContent(typeUser, tabId);
+      await this.browser.runContent(typePass, tabId);
+    } else {
+      await this.browser.runContent(typeUser);
+      await this.browser.runContent(typePass);
+    }
     if (submit) {
-      const clicked = await this.browser.runContent({ op: "click", selector: submit });
+      const clicked =
+        tabId != null
+          ? await this.browser.runContent({ op: "click", selector: submit }, tabId)
+          : await this.browser.runContent({ op: "click", selector: submit });
       if (!clicked.ok) return { ok: false, error: `submit selector not found: ${submit}` };
     }
     await wait(1200);
-    return { ok: true, logged_in: true, profile: profileName ?? "(inline)" };
+    return { ok: true, logged_in: true, profile: profileName ?? "(inline)", tabId: tabId ?? null };
   }
 
   private async scrapeCatalog(
@@ -3484,6 +3782,121 @@ export class AgentLoop {
     };
   }
 
+  private async runListConnectors(connectors?: ConnectorRuntime): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const all = await connectors.store.list();
+    const filtered = connectors.allowedIds
+      ? all.filter((c) => connectors.allowedIds!.includes(c.id))
+      : all;
+    return {
+      ok: true,
+      connectors: filtered.map((c) => {
+        const headerLabels: Record<string, string> = {};
+        for (const [k, v] of Object.entries(c.headers ?? {})) {
+          if (v && typeof v === "object" && "vaultLabel" in v) {
+            headerLabels[k] = `{vault:${v.vaultLabel}}`;
+          } else if (typeof v === "string") {
+            headerLabels[k] = v;
+          }
+        }
+        return {
+          id: c.id,
+          kind: c.kind,
+          name: c.name,
+          baseUrl: c.kind === "rest" ? c.baseUrl : undefined,
+          url: c.kind === "mcp" ? c.url : undefined,
+          headers: headerLabels,
+        };
+      }),
+    };
+  }
+
+  private async runSaveRestConnector(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store) return { ok: false, error: "no connectors configured" };
+    const id = String(args.id ?? "").trim();
+    const baseUrl = String(args.baseUrl ?? "").trim().replace(/\/$/, "");
+    if (!id || !baseUrl) return { ok: false, error: "id and baseUrl required" };
+    if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
+      return { ok: false, error: `connector not allowed for this agent: ${id}` };
+    }
+    let headers: Record<string, string | { vaultLabel: string }>;
+    try {
+      headers = parseConnectorHeaders(
+        args.headers && typeof args.headers === "object"
+          ? (args.headers as Record<string, unknown>)
+          : undefined,
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    const authVault =
+      typeof args.authVaultLabel === "string" ? args.authVaultLabel.trim() : "";
+    if (authVault) {
+      headers.Authorization = { vaultLabel: authVault };
+    }
+    if (!headers.Accept && /api\.github\.com/i.test(baseUrl)) {
+      headers.Accept = "application/vnd.github+json";
+      headers["X-GitHub-Api-Version"] = "2022-11-28";
+    }
+    const name =
+      typeof args.name === "string" && args.name.trim()
+        ? args.name.trim()
+        : id === "github-rest"
+          ? "GitHub REST"
+          : id;
+    const existing = await connectors.store.get(id);
+    const connector =
+      existing?.kind === "rest"
+        ? {
+            ...existing,
+            name,
+            baseUrl,
+            headers: { ...existing.headers, ...headers },
+          }
+        : {
+            id,
+            kind: "rest" as const,
+            name,
+            baseUrl,
+            headers,
+            tools:
+              /api\.github\.com/i.test(baseUrl)
+                ? githubRestTemplate().tools
+                : undefined,
+          };
+    await connectors.store.put(connector);
+    return {
+      ok: true,
+      id,
+      created: !existing,
+      note: `Saved REST connector ${id}. Call rest_request next. Secrets stay as vault refs only.`,
+    };
+  }
+
+  private async runEnsureGithubConnector(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.store || !connectors.getSecret) {
+      return { ok: false, error: "no connectors configured" };
+    }
+    const connectorId =
+      typeof args.connectorId === "string" && args.connectorId.trim()
+        ? args.connectorId.trim()
+        : "github-rest";
+    if (connectors.allowedIds && !connectors.allowedIds.includes(connectorId)) {
+      return { ok: false, error: `connector not allowed for this agent: ${connectorId}` };
+    }
+    return ensureGithubRestConnector(connectors.store, connectors.getSecret, {
+      connectorId,
+      preferredVaultLabel:
+        typeof args.vaultLabel === "string" ? args.vaultLabel : undefined,
+    });
+  }
+
   private async runRestRequest(
     args: Record<string, unknown>,
     connectors?: ConnectorRuntime,
@@ -3494,7 +3907,12 @@ export class AgentLoop {
       return { ok: false, error: `connector not allowed for this agent: ${id}` };
     }
     const conn = await connectors.store.get(id);
-    if (!conn || conn.kind !== "rest") return { ok: false, error: `REST connector not found: ${id}` };
+    if (!conn || conn.kind !== "rest") {
+      return {
+        ok: false,
+        error: `REST connector not found: ${id}. Call ensure_github_connector or save_rest_connector first.`,
+      };
+    }
     return restRequest(
       conn,
       {

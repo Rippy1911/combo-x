@@ -48,6 +48,7 @@ export const BrowserToolNameSchema = z.enum([
   "publish_upload",
   "search_sessions",
   "get_session",
+  "export_session",
   "login",
   "scrape_catalog",
   "save_site_profile",
@@ -56,6 +57,9 @@ export const BrowserToolNameSchema = z.enum([
   "upsert_scrape_rows",
   "get_scrape_table",
   "scrape_pdps",
+  "list_connectors",
+  "save_rest_connector",
+  "ensure_github_connector",
   "rest_request",
   "mcp_list_tools",
   "mcp_call",
@@ -253,6 +257,11 @@ export const RuntimeMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("preview_frame"),
     tabId: z.number().int().optional(),
   }),
+  z.object({
+    type: z.literal("element_picker"),
+    action: z.enum(["start", "stop"]),
+    tabId: z.number().int().optional(),
+  }),
 ]);
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
 
@@ -276,6 +285,8 @@ export const SENSITIVE_TOOLS = new Set([
   "scrape_pdps",
   "rest_request",
   "mcp_call",
+  "save_rest_connector",
+  "ensure_github_connector",
   "publish_upload",
   "start_recording",
   "stop_recording",
