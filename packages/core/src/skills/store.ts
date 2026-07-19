@@ -72,10 +72,15 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** Bump when a seed body must refresh existing IDB rows (see SEED_FORCE_REFRESH). */
-export const SEED_REVISION = "v1.6.41";
+/** Bump when a seed body/toolHints must refresh existing IDB rows. */
+export const SEED_REVISION = "v1.6.42";
 
-/** Seed skills rewritten in-place when revision tag is missing. */
+/**
+ * Playbook-only seeds (empty toolHints) rewritten when revision advances.
+ * Pack seeds with toolHints always refresh when SEED_REVISION is missing —
+ * otherwise skill_read keeps stale unlocks (e.g. combo-rest stuck at 3 tools
+ * while TOOL INDEX lists ensure_github_connector).
+ */
 const SEED_FORCE_REFRESH = new Set([
   "combo-ux-critique",
   "combo-tasks",
@@ -372,10 +377,13 @@ export class SkillStore {
           await idbReq(this.store("readwrite").put(row));
           continue;
         }
+        const isSeed = (existing.tags ?? []).includes("seed");
+        const staleRevision = !(existing.tags ?? []).includes(SEED_REVISION);
+        const hasPackHints = (def.toolHints?.length ?? 0) > 0;
         const needsRefresh =
-          SEED_FORCE_REFRESH.has(def.name) &&
-          (existing.tags ?? []).includes("seed") &&
-          !(existing.tags ?? []).includes(SEED_REVISION);
+          isSeed &&
+          staleRevision &&
+          (SEED_FORCE_REFRESH.has(def.name) || hasPackHints);
         if (!needsRefresh) continue;
         const row: Skill = {
           ...existing,

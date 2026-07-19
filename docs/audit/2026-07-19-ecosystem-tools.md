@@ -11,10 +11,9 @@ Combo `rest_request` on a GitHub REST connector).
   2. `ensure_github_connector({ connectorId: "gh", vaultLabel: "github_pat" })`
   3. `rest_request({ connectorId: "gh", method: "GET", path: "/user" })`
 
-> `ensure_github_connector` / `list_connectors` / `save_rest_connector` ship in
-> **PR #4** (`feat/v1.6.41-agent-connectors-ux`), not yet on `main` as of this note.
-> Until #4 merges, create the `gh` connector in Settings → Connectors with
-> `Authorization: Bearer {vault:github_pat}` and base `https://api.github.com`.
+> Shipped on `main` via PR #4 (1.6.41). If `skill_read combo-rest` still unlocks
+> only 3 tools, the IDB seed was stale — fixed in **1.6.42** (pack seeds with
+> `toolHints` refresh when `SEED_REVISION` advances). Reload 1.6.42 once.
 
 ## Source of truth
 
