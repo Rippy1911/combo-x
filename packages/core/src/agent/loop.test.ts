@@ -8,7 +8,6 @@ import { SkillStore } from "../skills/store.js";
 import { UsageStore } from "../usage/store.js";
 import { AttachmentStore } from "../attachments/store.js";
 import { AGENT_TOOLS } from "../browser/tools.js";
-import { SkillStore } from "../skills/store.js";
 import * as pickToolsMod from "../tools/pickTools.js";
 import { ALWAYS_ON_TOOL_NAMES } from "../tools/gating.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
