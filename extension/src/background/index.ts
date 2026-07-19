@@ -28,14 +28,57 @@ import {
   urlsMatchTarget,
 } from "./navWait.js";
 
-chrome.runtime.onInstalled.addListener(() => {
-  // chrome.sidePanel is Chromium-only; Firefox exposes the UI via sidebar_action.
+type SidebarActionApi = {
+  open: () => Promise<void>;
+  close: () => Promise<void>;
+  toggle?: () => Promise<void>;
+  isOpen?: (details?: { windowId?: number }) => Promise<boolean>;
+};
+
+function getSidebarAction(): SidebarActionApi | undefined {
+  const g = globalThis as typeof globalThis & {
+    browser?: { sidebarAction?: SidebarActionApi };
+    chrome?: { sidebarAction?: SidebarActionApi };
+  };
+  return g.browser?.sidebarAction ?? g.chrome?.sidebarAction;
+}
+
+let toolbarPanelWired = false;
+
+/**
+ * Chrome: open side panel on toolbar click.
+ * Firefox/Zen: prefer sidebarAction — Zen may stub chrome.sidePanel, so detect
+ * sidebarAction first. Use open() (not toggle) so a second click after close
+ * always reopens. Register the listener once (onInstalled + boot both run).
+ */
+function wireToolbarPanelOpen() {
+  if (toolbarPanelWired) return;
+  toolbarPanelWired = true;
+
+  const sa = getSidebarAction();
+  if (sa && chrome.action?.onClicked) {
+    chrome.action.onClicked.addListener(() => {
+      // Must stay in the user-gesture stack — no await before open().
+      void sa.open().catch((err) => {
+        console.debug("[combo-x] sidebarAction.open failed", err);
+      });
+    });
+    void chrome.action.setTitle?.({ title: "Open Combo-X sidebar" });
+    return;
+  }
+
   if (chrome.sidePanel?.setPanelBehavior) {
     void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {
       /* not supported on this browser */
     });
   }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  wireToolbarPanelOpen();
 });
+// Temporary add-ons (about:debugging) often skip onInstalled on reload — wire on boot too.
+wireToolbarPanelOpen();
 
 async function activeTabId(): Promise<number | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -599,7 +642,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const tab = await chrome.tabs.get(tabId);
           const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId!, {
             format: "jpeg",
-            quality: 72,
+            quality: 92,
           });
           sendResponse({
             ok: true,
@@ -608,6 +651,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             url: tab.url ?? "",
             title: tab.title ?? "",
           });
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        break;
+      }
+      case "element_picker": {
+        const picker = parsed.data;
+        const tabId = picker.tabId ?? (await activeTabId());
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no active tab" });
+          break;
+        }
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.url?.startsWith("chrome://") || tab.url?.startsWith("chrome-extension://") ||
+              tab.url?.startsWith("about:") || tab.url?.startsWith("moz-extension://")) {
+            sendResponse({ ok: false, error: "cannot pick on browser-internal pages" });
+            break;
+          }
+          // Bring tab forward so the user can click.
+          if (tab.windowId != null) {
+            await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+          }
+          await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+
+          const action = picker.action;
+          const sendPick = () =>
+            chrome.tabs.sendMessage(tabId, {
+              type: "combo_x_picker",
+              action,
+            });
+
+          let res: unknown;
+          try {
+            res = await sendPick();
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (action === "start" && shouldAttemptContentRecovery(msg)) {
+              await reinjectContent(tabId);
+              await new Promise((r) => setTimeout(r, 250));
+              res = await sendPick();
+            } else {
+              throw e;
+            }
+          }
+          sendResponse(res ?? { ok: false, error: "no picker response" });
         } catch (e) {
           sendResponse({
             ok: false,

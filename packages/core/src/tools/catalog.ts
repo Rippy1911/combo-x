@@ -64,14 +64,50 @@ const CURATED: Record<string, CatalogMeta> = {
     whenToUse: "Have unstructured text and need typed rows without bloating orchestrator context.",
     whenNotToUse: "DOM fields are stable — prefer extract/query_all first; avoid re-parsing huge dumps.",
   },
+  list_connectors: {
+    group: "connectors",
+    useCases: ["See which REST/MCP connectors are saved", "Check vault label refs before rest_request"],
+    whenToUse: "Before rest_request when unsure a connector exists.",
+    whenNotToUse: "You already know connectorId from ensure_github_connector.",
+  },
+  save_rest_connector: {
+    group: "connectors",
+    useCases: [
+      "Register a REST host with vault Authorization ref",
+      "Create github-rest / custom OpenAPI base without Settings UI",
+    ],
+    whenToUse: "Need a new connector and vault secret already exists as a label.",
+    whenNotToUse: "GitHub PAT already in vault — prefer ensure_github_connector.",
+  },
+  ensure_github_connector: {
+    group: "connectors",
+    useCases: [
+      "Bind api.github.com to github_token / github_pat / gh_combo_x",
+      "Finish PAT embed → rest_request without Settings handoff",
+    ],
+    whenToUse: "User embedded a GitHub PAT; need github-rest before Contents/PR calls.",
+    whenNotToUse: "Non-GitHub APIs — use save_rest_connector.",
+  },
   rest_request: {
     group: "connectors",
     useCases: [
       "Call configured REST connector (GitHub, internal API)",
-      "Fetch JSON from Settings → Connectors without hardcoded hosts",
+      "Fetch JSON via saved connector + vault secret refs",
     ],
     whenToUse: "Need server-side API data via a saved connector + vault secret refs.",
     whenNotToUse: "Data is only on the visible page — use browser tools first.",
+  },
+  web_search: {
+    group: "browser",
+    useCases: ["Current facts", "News", "Find public URLs"],
+    whenToUse: "Need live web results without opening a tab first.",
+    whenNotToUse: "Logged-in or JS-heavy pages — use navigate.",
+  },
+  web_fetch: {
+    group: "browser",
+    useCases: ["Read a public URL as text"],
+    whenToUse: "After web_search, to skim a page without the browser.",
+    whenNotToUse: "Need interactive DOM — use navigate + get_page.",
   },
   navigate: {
     group: "browser",
@@ -199,6 +235,12 @@ const CURATED: Record<string, CatalogMeta> = {
     whenToUse: "After search_sessions, when titles/previews are not enough.",
     whenNotToUse: "Current open chat — use the live thread.",
   },
+  export_session: {
+    group: "meta",
+    useCases: ["Download full transcript JSON/MD", "Publish conversation URL"],
+    whenToUse: "User wants a file or shareable URL of the chat.",
+    whenNotToUse: "Quick glance at one prior turn — use get_session.",
+  },
 
   wait: {
     group: "browser",
@@ -272,6 +314,8 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   scroll: "browser",
   wait: "browser",
   find_text: "browser",
+  web_search: "browser",
+  web_fetch: "browser",
   navigate: "browser",
   go_back: "browser",
   list_tabs: "browser",
@@ -304,6 +348,9 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   save_site_profile: "connectors",
   get_site_profile: "connectors",
   login: "connectors",
+  list_connectors: "connectors",
+  save_rest_connector: "connectors",
+  ensure_github_connector: "connectors",
   rest_request: "connectors",
   mcp_list_tools: "connectors",
   mcp_call: "connectors",
@@ -325,6 +372,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   publish_upload: "connectors",
   search_sessions: "meta",
   get_session: "meta",
+  export_session: "meta",
   list_custom_tools: "meta",
   custom_tool_save: "meta",
   create_agent: "agentic",

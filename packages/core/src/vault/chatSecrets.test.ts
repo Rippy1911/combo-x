@@ -4,6 +4,7 @@ import {
   detectChatSecrets,
   embedSecretsInMessage,
   maskSecretValue,
+  resolveVaultPlaceholders,
 } from "./chatSecrets.js";
 
 describe("detectChatSecrets", () => {
@@ -53,5 +54,27 @@ describe("embedSecretsInMessage", () => {
 describe("maskSecretValue", () => {
   it("masks middle", () => {
     expect(maskSecretValue("abcdefghij")).toBe("abc…hij");
+  });
+});
+
+describe("resolveVaultPlaceholders", () => {
+  it("resolves exact and nested refs", async () => {
+    const getSecret = async (label: string) =>
+      label === "aironcoach_password" ? "TestSecret99!" : null;
+    await expect(
+      resolveVaultPlaceholders("{vault:aironcoach_password}", getSecret),
+    ).resolves.toBe("TestSecret99!");
+    await expect(
+      resolveVaultPlaceholders(
+        { text: "{vault:aironcoach_password}", index: 3 },
+        getSecret,
+      ),
+    ).resolves.toEqual({ text: "TestSecret99!", index: 3 });
+  });
+
+  it("throws when label missing", async () => {
+    await expect(
+      resolveVaultPlaceholders("{vault:missing}", async () => null),
+    ).rejects.toThrow(/vault secret missing: missing/);
   });
 });

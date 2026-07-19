@@ -175,12 +175,55 @@ export function embedSecretsInMessage(
     return `- \`{vault:${e.label}}\`${note}`;
   });
   const contextBlock =
-    `VAULT SECRETS EMBEDDED (plaintext values are in the Combo vault only — use \`{vault:label}\` / login / connectors; do not ask the user to paste them again):\n` +
+    `VAULT SECRETS EMBEDDED (plaintext values are in the Combo vault only — pass \`{vault:label}\` into type_index / type_text / login / connectors; Combo resolves them before the browser sees plaintext. Do not ask the user to paste them again):\n` +
     lines.join("\n");
 
   const trimmed = out.trimEnd();
   const withBlock = `${trimmed}\n\n${contextBlock}`;
   return { text: withBlock, contextBlock, replaced };
+}
+
+const VAULT_REF_RE = /\{vault:([a-zA-Z0-9_]+)\}/g;
+
+export type GetVaultSecretFn = (label: string) => Promise<string | null>;
+
+/**
+ * Expand `{vault:label}` placeholders in tool args (strings, nested objects/arrays).
+ * Used so agents can pass vault refs into type_index / login without seeing plaintext.
+ */
+export async function resolveVaultPlaceholders(
+  value: unknown,
+  getSecret: GetVaultSecretFn,
+): Promise<unknown> {
+  if (typeof value === "string") {
+    if (!value.includes("{vault:")) return value;
+    const exact = /^\{vault:([a-zA-Z0-9_]+)\}$/.exec(value.trim());
+    if (exact) {
+      const label = exact[1]!;
+      const secret = await getSecret(label);
+      if (secret == null) throw new Error(`vault secret missing: ${label}`);
+      return secret;
+    }
+    const labels = [...value.matchAll(VAULT_REF_RE)].map((m) => m[1]!);
+    let out = value;
+    for (const label of [...new Set(labels)]) {
+      const secret = await getSecret(label);
+      if (secret == null) throw new Error(`vault secret missing: ${label}`);
+      out = out.split(`{vault:${label}}`).join(secret);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    return Promise.all(value.map((v) => resolveVaultPlaceholders(v, getSecret)));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = await resolveVaultPlaceholders(v, getSecret);
+    }
+    return out;
+  }
+  return value;
 }
 
 /** Mask a secret for UI (keep short prefix/suffix). */

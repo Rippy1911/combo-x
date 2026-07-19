@@ -19,6 +19,8 @@ export type PromoteResult = {
   bytes: number;
   detail: ImageDetail;
   downscaled: boolean;
+  maxSide?: number;
+  jpegQuality?: number;
 };
 
 /** Approx decoded byte length of a data URL. */
@@ -52,7 +54,14 @@ function bytesToBase64(bytes: Uint8Array): string {
  */
 export async function promoteScreenshotToVision(
   dataUrl: string,
-  opts: { maxBytes: number; detail: ImageDetail },
+  opts: {
+    maxBytes: number;
+    detail: ImageDetail;
+    /** Initial longest side when recompressing (default 2560). */
+    maxSide?: number;
+    /** Initial JPEG quality 0–1 (default 0.92). */
+    jpegQuality?: number;
+  },
 ): Promise<PromoteResult> {
   const detail = opts.detail;
   let current = dataUrl;
@@ -76,9 +85,11 @@ export async function promoteScreenshotToVision(
     const blob = new Blob([raw], { type: parsed.mime || "image/png" });
     const bmp = await createImageBitmap(blob);
 
-    let maxSide = 1600;
-    let quality = 0.85;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    let maxSide = Math.max(640, opts.maxSide ?? 2560);
+    let quality = Math.min(0.97, Math.max(0.5, opts.jpegQuality ?? 0.92));
+    let lastSide = maxSide;
+    let lastQ = quality;
+    for (let attempt = 0; attempt < 8; attempt++) {
       const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
       const w = Math.max(1, Math.round(bmp.width * scale));
       const h = Math.max(1, Math.round(bmp.height * scale));
@@ -90,12 +101,33 @@ export async function promoteScreenshotToVision(
       const outBytes = new Uint8Array(await out.arrayBuffer());
       current = `data:image/jpeg;base64,${bytesToBase64(outBytes)}`;
       bytes = outBytes.byteLength;
+      lastSide = maxSide;
+      lastQ = quality;
       if (bytes <= opts.maxBytes) {
-        return { dataUrl: current, bytes, detail, downscaled: true };
+        return {
+          dataUrl: current,
+          bytes,
+          detail,
+          downscaled: true,
+          maxSide: lastSide,
+          jpegQuality: lastQ,
+        };
       }
-      maxSide = Math.max(640, Math.floor(maxSide * 0.75));
-      quality = Math.max(0.5, quality - 0.1);
+      // Prefer dropping JPEG quality slightly before crushing resolution.
+      if (quality > 0.72 && attempt % 2 === 0) {
+        quality = Math.max(0.7, quality - 0.06);
+      } else {
+        maxSide = Math.max(720, Math.floor(maxSide * 0.82));
+      }
     }
+    return {
+      dataUrl: current,
+      bytes: dataUrlByteLength(current),
+      detail,
+      downscaled: true,
+      maxSide: lastSide,
+      jpegQuality: lastQ,
+    };
   } catch {
     /* keep current */
   }
@@ -133,6 +165,9 @@ export function screenshotToolStub(input: {
   visionAttached: boolean;
   note?: string;
   error?: string;
+  quality?: string;
+  detail?: string;
+  downscaled?: boolean;
 }): Record<string, unknown> {
   const out: Record<string, unknown> = {
     ok: input.ok,
@@ -144,5 +179,8 @@ export function screenshotToolStub(input: {
   if (input.height != null) out.height = input.height;
   if (input.note) out.note = input.note;
   if (input.error) out.error = input.error;
+  if (input.quality) out.quality = input.quality;
+  if (input.detail) out.detail = input.detail;
+  if (input.downscaled != null) out.downscaled = input.downscaled;
   return out;
 }

@@ -23,6 +23,7 @@ const chromeManifest = {
     {
       matches: ["<all_urls>"],
       resources: ["setup/index.html", "assets/*", "src/offscreen/offscreen.html"],
+      use_dynamic_url: true,
     },
   ],
 };
@@ -56,10 +57,19 @@ describe("toFirefoxManifest", () => {
     });
   });
 
-  it("strips offscreen from web_accessible_resources", () => {
-    const resources = ff.web_accessible_resources[0].resources;
-    expect(resources).not.toContain("src/offscreen/offscreen.html");
-    expect(resources).toContain("assets/*");
+  it("strips offscreen and use_dynamic_url from web_accessible_resources", () => {
+    const entry = ff.web_accessible_resources[0] as {
+      resources: string[];
+      use_dynamic_url?: boolean;
+    };
+    expect(entry.resources).not.toContain("src/offscreen/offscreen.html");
+    expect(entry.resources).toContain("assets/*");
+    expect(entry.use_dynamic_url).toBeUndefined();
+  });
+
+  it("registers _execute_sidebar_action command", () => {
+    const commands = ff.commands as Record<string, { description?: string }> | undefined;
+    expect(commands?._execute_sidebar_action?.description).toMatch(/sidebar/i);
   });
 
   it("does not mutate the input manifest", () => {

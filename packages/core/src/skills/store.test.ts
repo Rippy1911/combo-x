@@ -18,6 +18,7 @@ const EXPECTED_SEED_NAMES = [
   "combo-ns-food",
   "combo-pdf-attach",
   "combo-openapi-call",
+  "combo-repo-ops",
 ] as const;
 
 const PLAYBOOK_ONLY = new Set([
@@ -32,7 +33,7 @@ const PLAYBOOK_ONLY = new Set([
 ]);
 
 describe("SkillStore", () => {
-  it("seeds fifteen packs on empty db (unique names)", async () => {
+  it("seeds sixteen packs on empty db (unique names)", async () => {
     const defs = seedSkillDefinitions();
     expect(defs.map((d) => d.name).sort()).toEqual([...EXPECTED_SEED_NAMES].sort());
     expect(new Set(defs.map((d) => d.name)).size).toBe(EXPECTED_SEED_NAMES.length);

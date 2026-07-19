@@ -72,6 +72,21 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 
 **Sensitive** (approval-gated): `click`, `type_text`, `click_index`, `type_index`, `open_tab`, `activate_tab`, `navigate`, `go_back`, `close_tab`, `login`, `scrape_catalog`, `scrape_pdps` — see `SENSITIVE_TOOLS` in `packages/core/src/protocol/messages.ts`.
 
+### Element picker (user → agent)
+
+Composer **Pick element** starts an in-page hover/click mode. The sidepanel stores a
+`PickedElementRef` (CSS path + optional `get_interactive` index) and injects it into the
+next turn via `AgentRunOptions.pickedElements` / `formatPickedElementsBlock`.
+
+### Web search
+
+| Tool | Use when |
+|------|----------|
+| `web_search` | DuckDuckGo HTML search for current facts/links (non-OpenRouter, or when OR server search is off) |
+| `web_fetch` | Truncated plaintext of a public URL (no browser) |
+
+On **OpenRouter** with Settings → Enable web search, the client instead injects server tools `openrouter:web_search` / `openrouter:web_fetch` and omits the Combo tools for that run. See [`docs/PROVIDERS.md`](./PROVIDERS.md).
+
 ### Data
 
 Structured extraction, RAG, attachments, views, export.
@@ -122,17 +137,20 @@ Store: `packages/core/src/memory/store.ts` (`combo_x_memory`).
 
 ### Connectors
 
-User-configured REST/MCP — no hardcoded hosts.
+User-configured REST/MCP — no hardcoded hosts. Agents can create/bind connectors (vault refs only).
 
 | Tool | Use when |
 |------|----------|
+| `list_connectors` | See saved REST/MCP ids + vault header refs (no secret values) |
+| `save_rest_connector` | Create/update a REST host with `{vault:label}` / `authVaultLabel` (never plaintext PATs) |
+| `ensure_github_connector` | One-shot bind `api.github.com` → `github-rest` using `github_token` / `github_pat` / `gh_combo_x` |
 | `rest_request` | HTTP call via `ConnectorStore` REST entry |
 | `mcp_list_tools` | Discover remote MCP tools |
 | `mcp_call` | Invoke remote MCP tool |
 
-Secrets resolve through `Vault` labels. Agent `connectorIds` scopes which connectors are callable.
+Unlock via `skill_read combo-rest` (or `combo-repo-ops`). Secrets resolve through `Vault` labels. Agent `connectorIds` scopes which connectors are callable.
 
-**Sensitive:** `rest_request`, `mcp_call`.
+**Sensitive:** `rest_request`, `mcp_call`, `save_rest_connector`, `ensure_github_connector`.
 
 See [`docs/CONNECTORS.md`](./CONNECTORS.md).
 

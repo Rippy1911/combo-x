@@ -1,16 +1,21 @@
 import type { RestConnector } from "./store.js";
 
 /** GitHub REST API connector template (token via vault — no secrets embedded). */
-export function githubRestTemplate(): RestConnector {
+export function githubRestTemplate(opts?: {
+  vaultLabel?: string;
+  id?: string;
+  name?: string;
+}): RestConnector {
+  const vaultLabel = opts?.vaultLabel?.trim() || "github_token";
   return {
-    id: "github-rest",
+    id: opts?.id?.trim() || "github-rest",
     kind: "rest",
-    name: "GitHub REST",
+    name: opts?.name?.trim() || "GitHub REST",
     baseUrl: "https://api.github.com",
     headers: {
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
-      Authorization: { vaultLabel: "github_token" },
+      Authorization: { vaultLabel },
     },
     tools: [
       {

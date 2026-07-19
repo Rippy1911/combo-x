@@ -218,4 +218,10 @@ describe("githubRestTemplate", () => {
     expect(t.headers.Authorization).toEqual({ vaultLabel: "github_token" });
     expect(t.tools?.length).toBeGreaterThan(0);
   });
+
+  it("accepts custom vaultLabel", () => {
+    const t = githubRestTemplate({ vaultLabel: "github_pat", id: "gh" });
+    expect(t.id).toBe("gh");
+    expect(t.headers.Authorization).toEqual({ vaultLabel: "github_pat" });
+  });
 });

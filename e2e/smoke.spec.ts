@@ -24,10 +24,11 @@ test("side panel HTML is present in build", async () => {
   expect(hasContent).toBe(true);
 });
 
-test("loads unpacked extension (headed Chromium)", async () => {
-  // MV3 service workers are unreliable under Playwright headless; use headed.
+test("loads unpacked extension (Chromium)", async () => {
+  // MV3 SW flaky headless locally — default headed; CI sets COMBO_X_HEADLESS=1.
+  const headless = process.env.COMBO_X_HEADLESS === "1";
   const context = await chromium.launchPersistentContext("", {
-    headless: false,
+    headless,
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,

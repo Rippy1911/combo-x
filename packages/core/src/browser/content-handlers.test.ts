@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { handleContentRequest } from "./content-handlers.js";
+import {
+  describePickHover,
+  handleContentRequest,
+  resolvePickTarget,
+} from "./content-handlers.js";
 
 describe("handleContentRequest", () => {
   it("page_digest returns compact map not full chrome dump", () => {
@@ -221,6 +225,47 @@ describe("handleContentRequest", () => {
     expect(res.ok).toBe(true);
     expect((document.getElementById("t") as HTMLInputElement).value).toBe("");
     expect((document.getElementById("title") as HTMLInputElement).value).toBe("Test Push Day");
+  });
+
+  it("get_interactive recovers when page is aria-hidden under open overlay", () => {
+    document.body.innerHTML = `
+      <div id="root" aria-hidden="true">
+        <button type="button" title="More fields" id="more">…</button>
+        <a href="/home">Home</a>
+      </div>
+    `;
+    const snap = handleContentRequest({ op: "get_interactive", limit: 20 }, document);
+    expect(snap.ok).toBe(true);
+    const data = snap.data as { items: Array<{ title?: string; text: string }>; hint?: string; count: number };
+    expect(data.count).toBeGreaterThan(0);
+    expect(data.items.some((x) => x.title === "More fields" || /More|…/.test(x.text))).toBe(true);
+    expect(data.hint).toMatch(/aria-hidden/i);
+  });
+
+  it("resolvePickTarget prefers small interactive over huge containers", () => {
+    document.body.innerHTML = `
+      <nav id="nav" style="width:800px;height:600px">
+        Home Training Chat
+        <button type="button" id="more" title="More fields" style="width:28px;height:28px">…</button>
+      </nav>
+    `;
+    const btn = document.getElementById("more") as HTMLButtonElement;
+    Object.defineProperty(btn, "getBoundingClientRect", {
+      value: () => ({
+        x: 100, y: 100, left: 100, top: 100, right: 128, bottom: 128, width: 28, height: 28, toJSON: () => ({}),
+      }),
+    });
+    const nav = document.getElementById("nav") as HTMLElement;
+    Object.defineProperty(nav, "getBoundingClientRect", {
+      value: () => ({
+        x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, toJSON: () => ({}),
+      }),
+    });
+    // elementsFromPoint isn't in jsdom — stub via document.
+    document.elementsFromPoint = ((_x: number, _y: number) => [btn, nav, document.body]) as typeof document.elementsFromPoint;
+    const hit = resolvePickTarget(110, 110, document);
+    expect(hit?.id).toBe("more");
+    expect(describePickHover(hit!)).toMatch(/More fields|button/i);
   });
 
   it("find_text and scroll", () => {

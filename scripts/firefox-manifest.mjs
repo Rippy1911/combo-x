@@ -32,10 +32,22 @@ export function toFirefoxManifest(chromeManifest) {
   delete firefox.side_panel;
 
   if (Array.isArray(firefox.web_accessible_resources)) {
-    firefox.web_accessible_resources = firefox.web_accessible_resources.map((entry) => ({
-      ...entry,
-      resources: (entry.resources ?? []).filter((r) => !r.includes("offscreen")),
-    }));
+    firefox.web_accessible_resources = firefox.web_accessible_resources.map((entry) => {
+      const { use_dynamic_url: _drop, ...rest } = entry;
+      return {
+        ...rest,
+        resources: (entry.resources ?? []).filter((r) => !r.includes("offscreen")),
+      };
+    });
   }
+
+  // Built-in Firefox command: toggles this extension's sidebar (Zen/Firefox menu + shortcut).
+  firefox.commands = {
+    ...(firefox.commands && typeof firefox.commands === "object" ? firefox.commands : {}),
+    _execute_sidebar_action: {
+      description: "Toggle Combo-X sidebar",
+    },
+  };
+
   return firefox;
 }

@@ -1,4 +1,4 @@
-import type { ChatSession, SessionStore } from "@combo-x/core";
+import { formatSessionExport, type ChatSession, type SessionStore } from "@combo-x/core";
 import { useEffect, useState } from "react";
 import { copyText, formatMessageTime, shortConversationId } from "./chatClipboard";
 import type { SessionRuntimeMeta } from "./sessionRuntime";
@@ -20,6 +20,7 @@ export function SessionsDrawer({
   onOpenSession,
   onNewChat,
   runtimeMeta = [],
+  onExport,
 }: {
   open: boolean;
   pinned: boolean;
@@ -32,6 +33,8 @@ export function SessionsDrawer({
   onOpenSession: (id: string) => void | Promise<void>;
   onNewChat: () => void | Promise<void>;
   runtimeMeta?: SessionRuntimeMeta[];
+  /** Download helper (chrome.downloads / bridge.downloadText). */
+  onExport?: (filename: string, text: string, mime: string) => void | Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [bookmarksOnly, setBookmarksOnly] = useState(false);
@@ -267,6 +270,42 @@ export function SessionsDrawer({
                         >
                           ⎘
                         </button>
+                        {onExport ? (
+                          <button
+                            type="button"
+                            className="msg-action icon-btn"
+                            title="Export JSON (full transcript; no megabase64)"
+                            aria-label="Export session JSON"
+                            onClick={() =>
+                              void (async () => {
+                                const full = (await sessions.get(s.id)) ?? s;
+                                const file = formatSessionExport(full, "json");
+                                await onExport(file.filename, file.body, file.mime);
+                                setMsg(`Exported ${file.filename}`);
+                              })()
+                            }
+                          >
+                            ⇩
+                          </button>
+                        ) : null}
+                        {onExport ? (
+                          <button
+                            type="button"
+                            className="msg-action icon-btn"
+                            title="Export Markdown"
+                            aria-label="Export session Markdown"
+                            onClick={() =>
+                              void (async () => {
+                                const full = (await sessions.get(s.id)) ?? s;
+                                const file = formatSessionExport(full, "md");
+                                await onExport(file.filename, file.body, file.mime);
+                                setMsg(`Exported ${file.filename}`);
+                              })()
+                            }
+                          >
+                            MD
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="msg-action icon-btn dangerish"

@@ -14,7 +14,6 @@ import {
   type ToolPackId,
 } from "./gating.js";
 
-const DEFAULT_TOOL_CHARS = 6_000;
 const DEFAULT_SKILL_LIMIT = 40;
 
 /** Seed skill that unlocks each gated pack. */
@@ -62,9 +61,8 @@ function shortDesc(def: ToolDefinition): string {
 export function formatToolSchemaBlock(
   ceilingNames: string[],
   activeNames: string[],
-  extras?: { custom?: CustomTool[]; maxChars?: number },
+  extras?: { custom?: CustomTool[] },
 ): string {
-  const maxChars = extras?.maxChars ?? DEFAULT_TOOL_CHARS;
   const active = new Set(activeNames);
   const byName = new Map(AGENT_TOOLS.map((t) => [t.function.name, t]));
   for (const c of extras?.custom ?? []) {
@@ -112,10 +110,7 @@ export function formatToolSchemaBlock(
     }
   }
 
-  let out = lines.join("\n");
-  if (out.length > maxChars) {
-    out = `${out.slice(0, maxChars)}\n…(tool catalog truncated)`;
-  }
+  const out = lines.join("\n");
   return ceilingNames.length ? out : "";
 }
 

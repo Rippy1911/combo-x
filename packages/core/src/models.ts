@@ -1,4 +1,4 @@
-/** Curated OpenRouter model presets (verified live 2026-07-16; vision tags 2026-07-16). */
+/** Curated model presets (OpenRouter + Moonshot/Kimi; vision tags 2026-07). */
 export const DEFAULT_MODEL = "x-ai/grok-4.5";
 
 /** Cheap worker model for parse_data / structured extract. */
@@ -30,7 +30,39 @@ export const MODEL_PRESETS: ModelPreset[] = [
     hint: "vision · cheap",
     vision: true,
   },
+  // Moonshot / Kimi (use with provider = moonshot, base https://api.moonshot.ai/v1)
+  {
+    id: "kimi-k3",
+    label: "Kimi K3",
+    hint: "Moonshot · frontier",
+    vision: true,
+  },
+  {
+    id: "kimi-k2.6",
+    label: "Kimi K2.6",
+    hint: "Moonshot",
+    vision: true,
+  },
+  {
+    id: "kimi-k2.7-code",
+    label: "Kimi K2.7 Code",
+    hint: "Moonshot · coding",
+  },
+  {
+    id: "kimi-k2.7-code-highspeed",
+    label: "Kimi K2.7 Code Fast",
+    hint: "Moonshot · coding · fast",
+  },
+  {
+    id: "moonshot-v1-128k",
+    label: "Moonshot v1 128k",
+    hint: "Moonshot · long context",
+  },
 ];
+
+/** Hint shown in Settings — paste any Moonshot/OpenRouter model id into the picker search. */
+export const MODEL_PASTE_HINT =
+  "Paste any model id (e.g. kimi-k3, moonshot-v1-128k) into the model picker search.";
 
 export function normalizeModelId(model: string | null | undefined): string {
   if (!model || LEGACY_BAD_MODELS.has(model)) return DEFAULT_MODEL;

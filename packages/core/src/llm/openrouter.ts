@@ -111,6 +111,11 @@ export function extractReasoningText(part: {
     .join("");
 }
 
+/** OpenAI function tools or OpenRouter server tools (e.g. openrouter:web_search). */
+export type ChatTool =
+  | ToolDefinition
+  | { type: string; [key: string]: unknown };
+
 export interface OpenRouterOptions {
   apiKey: string;
   baseUrl?: string;
@@ -121,6 +126,11 @@ export interface OpenRouterOptions {
   promptUsdPerMTok?: number;
   /** USD per 1M completion tokens. */
   completionUsdPerMTok?: number;
+  /**
+   * When true, append OpenRouter server tools (web_search / web_fetch) to every
+   * chat request that already has tools (or alone if none). OpenRouter only.
+   */
+  enableOpenRouterServerTools?: boolean;
 }
 
 export class LlmError extends Error {
@@ -137,6 +147,11 @@ function emptyUsage(): LlmUsage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
 }
 
+const OPENROUTER_SERVER_TOOLS: ChatTool[] = [
+  { type: "openrouter:web_search" },
+  { type: "openrouter:web_fetch" },
+];
+
 export class OpenRouterClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -145,25 +160,46 @@ export class OpenRouterClient {
   private readonly title: string;
   private readonly promptUsdPerMTok: number;
   private readonly completionUsdPerMTok: number;
+  private readonly enableOpenRouterServerTools: boolean;
 
   constructor(options: OpenRouterOptions) {
-    if (!options.apiKey) throw new Error("apiKey required");
-    this.apiKey = options.apiKey;
+    // Local OpenAI-compat servers often ignore the Bearer token.
+    this.apiKey = (options.apiKey ?? "").trim() || "local";
     this.baseUrl = (options.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.referer = options.referer ?? "https://github.com/Rippy1911/combo-x";
     this.title = options.title ?? "Combo-X";
     this.promptUsdPerMTok = options.promptUsdPerMTok ?? 0.3;
     this.completionUsdPerMTok = options.completionUsdPerMTok ?? 2.5;
+    this.enableOpenRouterServerTools = options.enableOpenRouterServerTools === true;
+  }
+
+  /** Merge function tools with OpenRouter server tools when enabled. */
+  private mergeTools(tools?: ChatTool[]): ChatTool[] | undefined {
+    if (!this.enableOpenRouterServerTools) return tools?.length ? tools : undefined;
+    const base = tools?.length ? [...tools] : [];
+    const have = new Set(base.map((t) => (typeof t.type === "string" ? t.type : "")));
+    for (const st of OPENROUTER_SERVER_TOOLS) {
+      if (!have.has(st.type)) base.push(st);
+    }
+    return base.length ? base : undefined;
+  }
+
+  private isOpenRouter(): boolean {
+    return this.baseUrl.includes("openrouter.ai");
   }
 
   private headers(): Record<string, string> {
-    return {
+    const h: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": this.referer,
-      "X-Title": this.title,
     };
+    // OpenRouter-only attribution headers — other OpenAI-compat hosts may 400.
+    if (this.isOpenRouter()) {
+      h["HTTP-Referer"] = this.referer;
+      h["X-Title"] = this.title;
+    }
+    return h;
   }
 
   private estimate(usage: RawUsage): LlmUsage {
@@ -235,16 +271,24 @@ export class OpenRouterClient {
   async chat(input: {
     model: string;
     messages: ChatMessage[];
-    tools?: ToolDefinition[];
+    tools?: ChatTool[];
     temperature?: number;
     maxTokens?: number;
   }): Promise<ChatResult> {
+    const model = input.model?.trim();
+    if (!model) {
+      throw new LlmError(
+        "No model id provided (empty model) — set orchestrator / vision worker / worker model in Settings",
+        400,
+      );
+    }
     const body: Record<string, unknown> = {
-      model: input.model,
+      model,
       messages: input.messages,
       stream: false,
     };
-    if (input.tools?.length) body.tools = input.tools;
+    const tools = this.mergeTools(input.tools);
+    if (tools?.length) body.tools = tools;
     if (input.temperature !== undefined) body.temperature = input.temperature;
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 
@@ -302,20 +346,33 @@ export class OpenRouterClient {
   async chatStreaming(input: {
     model: string;
     messages: ChatMessage[];
-    tools?: ToolDefinition[];
+    tools?: ChatTool[];
     temperature?: number;
     maxTokens?: number;
     signal?: AbortSignal;
     onDelta?: (accumulated: string) => void;
     onReasoning?: (accumulated: string) => void;
+    /** Fired once per tool index when SSE first reveals function.name. */
+    onToolCallDelta?: (toolName: string) => void;
   }): Promise<ChatResult> {
+    const model = input.model?.trim();
+    if (!model) {
+      throw new LlmError(
+        "No model id provided (empty model) — set orchestrator / vision worker / worker model in Settings",
+        400,
+      );
+    }
     const body: Record<string, unknown> = {
-      model: input.model,
+      model,
       messages: input.messages,
       stream: true,
-      stream_options: { include_usage: true },
     };
-    if (input.tools?.length) body.tools = input.tools;
+    // OpenRouter usage-in-stream only — other compat APIs often 400 on unknown fields.
+    if (this.isOpenRouter()) {
+      body.stream_options = { include_usage: true };
+    }
+    const tools = this.mergeTools(input.tools);
+    if (tools?.length) body.tools = tools;
     if (input.temperature !== undefined) body.temperature = input.temperature;
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 
@@ -396,10 +453,14 @@ export class OpenRouterClient {
           for (const tc of delta?.tool_calls ?? []) {
             const idx = tc.index ?? 0;
             const cur = toolAcc.get(idx) ?? { id: "", name: "", arguments: "" };
+            const hadName = Boolean(cur.name);
             if (tc.id) cur.id = tc.id;
             if (tc.function?.name) cur.name = tc.function.name;
             if (tc.function?.arguments) cur.arguments += tc.function.arguments;
             toolAcc.set(idx, cur);
+            if (!hadName && cur.name) {
+              input.onToolCallDelta?.(cur.name);
+            }
           }
         }
       }
@@ -442,8 +503,10 @@ export class OpenRouterClient {
       model: input.model,
       messages: input.messages,
       stream: true,
-      stream_options: { include_usage: true },
     };
+    if (this.isOpenRouter()) {
+      body.stream_options = { include_usage: true };
+    }
     if (input.temperature !== undefined) body.temperature = input.temperature;
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 

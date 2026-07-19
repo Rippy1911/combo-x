@@ -31,6 +31,8 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "extract",
   "scroll",
   "find_text",
+  "web_search",
+  "web_fetch",
   "parse_data",
   "remember",
   "save_memory",
@@ -39,6 +41,7 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   ...SKILL_META_TOOLS,
   "search_sessions",
   "get_session",
+  "export_session",
   "list_tasks",
   "create_task",
   "update_task",
@@ -73,6 +76,7 @@ export const FORCE_ATTACH_TOOL_NAMES: readonly string[] = [
   "page_css_clear",
   "skill_search",
   "skill_read",
+  "export_session",
 ];
 
 export const TOOL_PACKS = {
@@ -92,7 +96,14 @@ export const TOOL_PACKS = {
     "save_site_profile",
     "get_site_profile",
   ],
-  rest: ["rest_request", "mcp_list_tools", "mcp_call"],
+  rest: [
+    "list_connectors",
+    "save_rest_connector",
+    "ensure_github_connector",
+    "rest_request",
+    "mcp_list_tools",
+    "mcp_call",
+  ],
   rag: ["rag_search", "rag_read_file", "rag_status", "list_attachments", "read_attachment"],
   "page-ext": [
     "create_page_extension",

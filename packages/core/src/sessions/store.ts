@@ -34,6 +34,8 @@ export interface SessionRunContext {
   taskBlock: string;
   skillBlock: string;
   toolCatalogBlock: string;
+  /** User turn payload (tab + picks + message) as sent to the LLM. */
+  userPreview?: string;
   toolNames: string[];
   model: string;
   transport: "stream" | "full";
@@ -64,6 +66,10 @@ export interface SessionMessage {
   blocks?: SessionTurnBlock[];
   /** User turns only — system/memories/tasks/skills/tool index for Context inspect. */
   runContext?: SessionRunContext;
+  /** User turns — element picker refs (JSON-safe). */
+  picks?: Array<Record<string, unknown>>;
+  /** User turns — active tab snapshot at send. */
+  activeTab?: { tabId?: number; url?: string; title?: string; at: string };
 }
 
 const RUN_CONTEXT_FIELD_MAX = 24_000;
@@ -81,6 +87,7 @@ export function slimRunContextForStorage(ctx: SessionRunContext): SessionRunCont
     taskBlock: trim(ctx.taskBlock),
     skillBlock: trim(ctx.skillBlock),
     toolCatalogBlock: trim(ctx.toolCatalogBlock),
+    userPreview: ctx.userPreview ? trim(ctx.userPreview) : ctx.userPreview,
     toolNames: ctx.toolNames.slice(0, 200),
   };
 }
@@ -175,6 +182,161 @@ export interface ChatSession {
   estimatedCostUsd: number;
   /** Operator starred this conversation */
   bookmarked?: boolean;
+  /** Pin DOM/navigate tools to this browser tab (no activate_tab). */
+  boundTabId?: number;
+}
+
+/** Strip megabase64 so exports stay small; keep attachment ids. */
+function stripDataUrlsDeep(value: unknown, depth = 0): unknown {
+  if (depth > 8) return "[…]";
+  if (typeof value === "string") {
+    if (value.startsWith("data:") && value.length > 200) {
+      return `data:…[omitted ${value.length} chars]`;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((v) => stripDataUrlsDeep(v, depth + 1));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = stripDataUrlsDeep(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+export type SessionExportFormat = "json" | "md";
+
+/** Full conversation dump for download / publish (no megabase64). */
+export function formatSessionExport(
+  session: ChatSession,
+  format: SessionExportFormat = "json",
+): { filename: string; mime: string; body: string } {
+  const safeTitle = (session.title || "chat")
+    .replace(/[^\w\-]+/g, "_")
+    .slice(0, 48);
+  const stamp = session.updatedAt.slice(0, 10);
+
+  const messages = session.messages.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    createdAt: m.createdAt,
+    bookmarked: m.bookmarked,
+    picks: m.picks,
+    activeTab: m.activeTab,
+    runContext: m.runContext
+      ? {
+          model: m.runContext.model,
+          transport: m.runContext.transport,
+          toolNames: m.runContext.toolNames,
+          userPreview: m.runContext.userPreview,
+          // Full blocks available via get_session / Context UI — keep export lean but complete enough
+          systemPrompt: m.runContext.systemPrompt,
+          memoryBlock: m.runContext.memoryBlock,
+          taskBlock: m.runContext.taskBlock,
+          skillBlock: m.runContext.skillBlock,
+          toolCatalogBlock: m.runContext.toolCatalogBlock,
+        }
+      : undefined,
+    tools: m.tools?.map((t) => ({
+      id: t.id,
+      name: t.name,
+      status: t.status,
+      args: stripDataUrlsDeep(t.args),
+      result: stripDataUrlsDeep(t.result),
+    })),
+    blocks: m.blocks
+      ? stripDataUrlsDeep(
+          m.blocks.map((b) => {
+            if (b.kind === "artifact") {
+              const a = { ...b.artifact };
+              if (a.src?.startsWith("data:")) a.src = a.attachmentId
+                ? `attachment:${a.attachmentId}`
+                : "data:…[omitted]";
+              if (a.beforeSrc?.startsWith("data:")) {
+                a.beforeSrc = a.beforeAttachmentId
+                  ? `attachment:${a.beforeAttachmentId}`
+                  : "data:…[omitted]";
+              }
+              if (a.afterSrc?.startsWith("data:")) {
+                a.afterSrc = a.afterAttachmentId
+                  ? `attachment:${a.afterAttachmentId}`
+                  : "data:…[omitted]";
+              }
+              return { ...b, artifact: a };
+            }
+            return b;
+          }),
+        )
+      : undefined,
+  }));
+
+  if (format === "md") {
+    const lines: string[] = [
+      `# ${session.title || "Untitled"}`,
+      "",
+      `- id: \`${session.id}\``,
+      `- updated: ${session.updatedAt}`,
+      `- boundTabId: ${session.boundTabId ?? "(none)"}`,
+      `- tokens: ${session.totalTokens}`,
+      "",
+      "---",
+      "",
+    ];
+    for (const m of messages) {
+      lines.push(`## ${m.role} · ${m.createdAt}`);
+      lines.push("");
+      lines.push(m.content || "_(empty)_");
+      lines.push("");
+      if (m.tools?.length) {
+        lines.push("### Tools");
+        for (const t of m.tools) {
+          lines.push(`- **${t.name}** (${t.status})`);
+          lines.push("```json");
+          lines.push(JSON.stringify({ args: t.args, result: t.result }, null, 2).slice(0, 12_000));
+          lines.push("```");
+        }
+        lines.push("");
+      }
+      if (m.picks?.length) {
+        lines.push("### Picks");
+        lines.push("```json");
+        lines.push(JSON.stringify(m.picks, null, 2));
+        lines.push("```");
+        lines.push("");
+      }
+    }
+    lines.push("---");
+    lines.push("");
+    lines.push(
+      "_Endpoint note: Combo-X is MV3 local-first. The public URL (if published) + `get_session` / `export_session` are how agents re-read this transcript._",
+    );
+    return {
+      filename: `combo-x-${safeTitle}-${stamp}.md`,
+      mime: "text/markdown;charset=utf-8",
+      body: lines.join("\n"),
+    };
+  }
+
+  const payload = {
+    id: session.id,
+    title: session.title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    bookmarked: !!session.bookmarked,
+    boundTabId: session.boundTabId ?? null,
+    totalTokens: session.totalTokens,
+    estimatedCostUsd: session.estimatedCostUsd,
+    messages,
+    note: "Images referenced by attachmentId — no megabase64. Publish via publish_upload for a public URL.",
+  };
+  return {
+    filename: `combo-x-${safeTitle}-${stamp}.json`,
+    mime: "application/json;charset=utf-8",
+    body: JSON.stringify(payload, null, 2),
+  };
 }
 
 function openDb(name: string): Promise<IDBDatabase> {

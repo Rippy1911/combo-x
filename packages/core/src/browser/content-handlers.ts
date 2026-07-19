@@ -3,6 +3,7 @@ import {
   PREVIEW_STYLE_ID,
   validatePreviewCss,
 } from "../vision/annotateHtml.js";
+import { buildCssPath, type PickedElementRef } from "./elementRef.js";
 
 /** Pure DOM helpers used by the content script (and unit-tested with jsdom). */
 
@@ -167,7 +168,7 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           i: index,
           tag: el.tagName.toLowerCase(),
           role: el.getAttribute("role") ?? undefined,
-          text: (el.innerText || el.textContent || el.getAttribute("aria-label") || "")
+          text: (el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "")
             .trim()
             .replace(/\s+/g, " ")
             .slice(0, 100),
@@ -176,18 +177,20 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           placeholder:
             isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
           name: el.getAttribute("name") ?? undefined,
+          title: el.getAttribute("title") ?? undefined,
         }));
         return {
           ok: true,
           data: {
             items,
             count: items.length,
-            /** dialog = open modal/sheet; page = full document */
+            /** dialog = open modal/menu/sheet; page = full document */
             scope: collected.scope,
             hint:
-              collected.scope === "dialog"
-                ? "Scoped to topmost dialog/overlay (ARIA or high-z portal) — indices are only inside that layer, not the page behind."
-                : undefined,
+              collected.hint ??
+              (items.length === 0
+                ? "No interactive elements found. Close overlays, hard-refresh the tab, or reload the extension."
+                : undefined),
           },
         };
       }
@@ -477,19 +480,21 @@ function doScroll(
   return { ok: true, data: { scrolled: direction, percent: percent ?? null } };
 }
 
-const INTERACTIVE_SEL =
-  'a[href], button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], summary, [contenteditable="true"]';
+/** Exported for element picker targeting. */
+export const INTERACTIVE_SEL =
+  'a[href], button, input:not([type="hidden"]), textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"]';
 
 /**
- * Topmost open dialog/modal.
+ * Topmost open dialog/modal/menu.
  * 1) ARIA: [aria-modal], role=dialog, dialog[open]
- * 2) Heuristic (Nanobrowser-style stacking): high-z fixed/absolute portals on
- *    document.body — e.g. airon.coach FloatingWorkoutEditor (z-index 9999) which
- *    historically lacked role=dialog, so calendar buttons filled the index.
+ * 2) Open menus/listboxes (Radix DropdownMenu etc.)
+ * 3) Heuristic: high-z fixed/absolute portals on document.body
  */
 function findTopModal(doc: Document): HTMLElement | null {
   const candidates = Array.from(
-    doc.querySelectorAll('[aria-modal="true"], dialog[open], [role="dialog"]'),
+    doc.querySelectorAll(
+      '[aria-modal="true"], dialog[open], [role="dialog"], [role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-dropdown-menu-content], [data-state="open"][role="menu"]',
+    ),
   ) as HTMLElement[];
   for (let i = candidates.length - 1; i >= 0; i--) {
     const el = candidates[i]!;
@@ -549,7 +554,7 @@ function findTopStackedOverlay(doc: Document): HTMLElement | null {
 function collectInteractive(
   doc: Document,
   limit: number,
-): { els: HTMLElement[]; scope: "dialog" | "page" } {
+): { els: HTMLElement[]; scope: "dialog" | "page"; hint?: string } {
   const modal = findTopModal(doc);
   const root: ParentNode = modal ?? doc;
   const raw = Array.from(root.querySelectorAll(INTERACTIVE_SEL)) as HTMLElement[];
@@ -557,12 +562,94 @@ function collectInteractive(
   for (const el of raw) {
     if (out.length >= limit) break;
     if (!isVisible(el)) continue;
-    // When scoped to dialog, keep everything visible inside it.
+    // When scoped to dialog/menu, keep everything visible inside it.
     // On full page, skip nodes under aria-hidden / inert ancestors.
     if (!modal && isOccluded(el)) continue;
     out.push(el);
   }
-  return { els: out, scope: modal ? "dialog" : "page" };
+  // Radix/shadcn often set aria-hidden on #root while a portal menu is open.
+  // If that hides every control and we didn't detect the portal, fall back.
+  if (!out.length && !modal && raw.length) {
+    const relaxed: HTMLElement[] = [];
+    for (const el of raw) {
+      if (relaxed.length >= limit) break;
+      if (!isVisible(el)) continue;
+      relaxed.push(el);
+    }
+    if (relaxed.length) {
+      return {
+        els: relaxed,
+        scope: "page",
+        hint: "Page controls were under aria-hidden (open overlay?). Showing them anyway — prefer get_interactive again after closing menus.",
+      };
+    }
+  }
+  return {
+    els: out,
+    scope: modal ? "dialog" : "page",
+    hint: modal
+      ? "Scoped to topmost dialog/menu/overlay — indices are only inside that layer."
+      : undefined,
+  };
+}
+
+/** Deepest useful pick target under the cursor (not the whole page/nav). */
+export function resolvePickTarget(
+  clientX: number,
+  clientY: number,
+  doc: Document = document,
+): HTMLElement | null {
+  const view = doc.defaultView;
+  if (!view) return null;
+  const stack = (view.document.elementsFromPoint(clientX, clientY) || []) as Element[];
+  const usable = stack.filter(
+    (el): el is HTMLElement =>
+      el instanceof HTMLElement &&
+      el.id !== "combo-x-element-picker-hover" &&
+      el.id !== "combo-x-element-picker-banner" &&
+      el.id !== "combo-x-element-picker-tip" &&
+      el.id !== "combo-x-element-picker-style",
+  );
+  if (!usable.length) return null;
+
+  for (const el of usable) {
+    if (el.matches(INTERACTIVE_SEL)) return el;
+  }
+  for (const el of usable) {
+    const a = el.closest(INTERACTIVE_SEL) as HTMLElement | null;
+    if (a) return a;
+  }
+
+  const vw = view.innerWidth || 1;
+  const vh = view.innerHeight || 1;
+  let best: HTMLElement | null = null;
+  let bestArea = Infinity;
+  for (const el of usable.slice(0, 16)) {
+    if (el === doc.body || el === doc.documentElement) continue;
+    const r = el.getBoundingClientRect();
+    const area = Math.max(0, r.width) * Math.max(0, r.height);
+    if (area < 16) continue;
+    if (area / (vw * vh) > 0.45) continue;
+    if (area < bestArea) {
+      best = el;
+      bestArea = area;
+    }
+  }
+  return best ?? usable.find((el) => el !== doc.body && el !== doc.documentElement) ?? null;
+}
+
+/** One-line hover tip for the picker. */
+export function describePickHover(el: HTMLElement): string {
+  const tag = el.tagName.toLowerCase();
+  const label =
+    (el.getAttribute("aria-label") ||
+      el.getAttribute("title") ||
+      (el as HTMLInputElement).placeholder ||
+      el.getAttribute("name") ||
+      (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ")
+    ).slice(0, 48) || tag;
+  const interactive = el.matches(INTERACTIVE_SEL) ? "interactive" : "node";
+  return `${tag} · ${interactive} · ${label}`;
 }
 
 /** Hidden by an ancestor (common for closed drawers / offscreen menus). */
@@ -603,4 +690,84 @@ function visibleText(doc: Document): string {
 export async function waitMs(ms: number): Promise<void> {
   const capped = Math.min(Math.max(0, ms), 10_000);
   await new Promise((r) => setTimeout(r, capped));
+}
+
+/**
+ * Snapshot a user-picked element for agent context.
+ * Refreshes the interactive map so interactiveIndex matches get_interactive.
+ */
+export function buildPickedElementRef(el: HTMLElement, doc: Document = document): PickedElementRef {
+  const collected = collectInteractive(doc, 120);
+  interactiveMaps.set(doc, collected.els);
+  let target = el;
+  let interactiveIndex = collected.els.indexOf(el);
+  if (interactiveIndex < 0) {
+    const ancestor = el.closest(INTERACTIVE_SEL) as HTMLElement | null;
+    if (ancestor) {
+      target = ancestor;
+      interactiveIndex = collected.els.indexOf(ancestor);
+    }
+  }
+  const rect = target.getBoundingClientRect?.();
+  const ariaLabel = target.getAttribute("aria-label")?.trim() || undefined;
+  const titleAttr = target.getAttribute("title")?.trim() || undefined;
+  const text = (
+    ariaLabel ||
+    titleAttr ||
+    target.innerText ||
+    target.textContent ||
+    ""
+  )
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
+  const className = (target.getAttribute("class") || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
+  let value: string | undefined;
+  if (isInputEl(target) || isTextAreaEl(target)) {
+    const v = target.value?.trim();
+    if (v) value = v.slice(0, 120);
+  } else if (target instanceof HTMLSelectElement) {
+    const v = target.value?.trim();
+    if (v) value = v.slice(0, 120);
+  }
+  const outerHtml = (target.outerHTML || "").replace(/\s+/g, " ").trim().slice(0, 280);
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `pick-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id,
+    url: doc.location?.href ?? "",
+    title: doc.title || undefined,
+    selector: buildCssPath(target),
+    interactiveIndex: interactiveIndex >= 0 ? interactiveIndex : undefined,
+    scope: collected.scope,
+    tag: target.tagName.toLowerCase(),
+    role: target.getAttribute("role") ?? undefined,
+    text: text || undefined,
+    name: target.getAttribute("name") ?? undefined,
+    type: isInputEl(target) ? resolveInputType(target) : undefined,
+    placeholder:
+      isInputEl(target) || isTextAreaEl(target) ? target.placeholder || undefined : undefined,
+    href: target.tagName === "A" ? (target as HTMLAnchorElement).href : undefined,
+    ariaLabel,
+    className: className || undefined,
+    disabled:
+      target.hasAttribute("disabled") || target.getAttribute("aria-disabled") === "true"
+        ? true
+        : undefined,
+    checked:
+      isInputEl(target) && (target.type === "checkbox" || target.type === "radio")
+        ? target.checked
+        : undefined,
+    value,
+    outerHtml: outerHtml || undefined,
+    rect: rect
+      ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height }
+      : undefined,
+    pickedAt: new Date().toISOString(),
+  };
 }
