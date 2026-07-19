@@ -155,6 +155,23 @@ describe("SkillStore", () => {
     expect(rest?.toolHints).toHaveLength(6);
   });
 
+  it("rewrites incomplete combo-rest toolHints even without seed tag", async () => {
+    const dbName = `skills_${crypto.randomUUID()}`;
+    const store = new SkillStore({ dbName, skipSeed: true });
+    // Agent skill_save overwrite — no seed tag, incomplete hints
+    await store.save({
+      name: "combo-rest",
+      description: "agent rewrite",
+      body: "Use rest_request only against saved connectors",
+      tags: ["rest"],
+      toolHints: ["rest_request", "mcp_list_tools", "mcp_call"],
+    });
+    const store2 = new SkillStore({ dbName });
+    const rest = (await store2.list()).find((s) => s.name === "combo-rest");
+    expect(rest?.body).toContain("ensure_github_connector");
+    expect(rest?.toolHints).toContain("ensure_github_connector");
+  });
+
   it("drops toolHints that are not real tools", async () => {
     const store = new SkillStore({
       dbName: `skills_${crypto.randomUUID()}`,

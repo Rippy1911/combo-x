@@ -3,7 +3,6 @@ import {
   DEFAULT_SKIP_DIRS,
   grantAndIndex,
   ensureGithubRestConnector,
-  githubRestTemplate,
   uploadsRestTemplate,
   nsFoodRestTemplate,
   LLM_BASE_URL_KEY,
@@ -354,19 +353,34 @@ export function SettingsPanel({
   };
 
   const addGithubTemplate = async () => {
-    const token = await vault.getByLabel(GH_TOKEN_LABEL);
-    if (!token) {
-      setMsg("Add github_token in Vault/API keys first");
+    // Prefer id `gh` (agent recipe) + any of github_pat|github_token|gh_combo_x.
+    const result = await ensureGithubRestConnector(
+      connectorStore,
+      (label) => vault.getByLabel(label),
+      { connectorId: "gh" },
+    );
+    if (!result.ok) {
+      setMsg(
+        `${result.error} — paste PAT in Settings “GitHub token” or embed {vault:github_pat} in chat.`,
+      );
       return;
     }
-    await connectorStore.put(githubRestTemplate());
+    // Keep legacy id for older prompts.
+    await ensureGithubRestConnector(
+      connectorStore,
+      (label) => vault.getByLabel(label),
+      { connectorId: "github-rest", preferredVaultLabel: result.vaultLabel },
+    );
     await refreshConnectors();
     setEnabledTools((prev) => {
       const next = new Set(prev);
       next.add("rest_request");
+      next.add("list_connectors");
+      next.add("ensure_github_connector");
+      next.add("save_rest_connector");
       return next;
     });
-    setMsg("GitHub REST template added");
+    setMsg(`${result.note} (also mirrored as github-rest)`);
   };
 
   const addUploadsTemplate = async () => {

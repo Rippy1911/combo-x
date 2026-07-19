@@ -73,13 +73,13 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /** Bump when a seed body/toolHints must refresh existing IDB rows. */
-export const SEED_REVISION = "v1.6.42";
+export const SEED_REVISION = "v1.6.43";
 
 /**
  * Playbook-only seeds (empty toolHints) rewritten when revision advances.
- * Pack seeds with toolHints always refresh when SEED_REVISION is missing —
- * otherwise skill_read keeps stale unlocks (e.g. combo-rest stuck at 3 tools
- * while TOOL INDEX lists ensure_github_connector).
+ * Pack seeds with toolHints refresh when SEED_REVISION is missing OR when
+ * IDB toolHints are missing any current pack tool (covers non-seed skill_save
+ * overwrites that kept the combo-rest name).
  */
 const SEED_FORCE_REFRESH = new Set([
   "combo-ux-critique",
@@ -379,11 +379,17 @@ export class SkillStore {
         }
         const isSeed = (existing.tags ?? []).includes("seed");
         const staleRevision = !(existing.tags ?? []).includes(SEED_REVISION);
-        const hasPackHints = (def.toolHints?.length ?? 0) > 0;
+        const defHints = def.toolHints ?? [];
+        const hasPackHints = defHints.length > 0;
+        const existingHints = new Set(existing.toolHints ?? []);
+        const hintsMissing = defHints.some((h) => !existingHints.has(h));
+        // Refresh seed rows on revision bump; also rewrite same-named pack skills
+        // when unlock hints are incomplete (stale IDB after skill_save / old seed).
         const needsRefresh =
-          isSeed &&
-          staleRevision &&
-          (SEED_FORCE_REFRESH.has(def.name) || hasPackHints);
+          (isSeed &&
+            staleRevision &&
+            (SEED_FORCE_REFRESH.has(def.name) || hasPackHints)) ||
+          (hasPackHints && hintsMissing);
         if (!needsRefresh) continue;
         const row: Skill = {
           ...existing,
