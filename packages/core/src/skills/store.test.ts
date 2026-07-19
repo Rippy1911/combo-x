@@ -58,11 +58,12 @@ describe("SkillStore", () => {
   it("upserts missing seed skills on existing db", async () => {
     const dbName = `skills_${crypto.randomUUID()}`;
     const store = new SkillStore({ dbName, skipSeed: true });
+    // Current revision tag → keep custom description (pack refresh skips)
     await store.save({
       name: "combo-scrape",
       description: "old",
       body: "old body",
-      tags: ["seed"],
+      tags: ["seed", "tools", SEED_REVISION],
       toolHints: [...TOOL_PACKS.scrape],
     });
     // New store instance with seeding enabled should fill missing seeds only
@@ -127,6 +128,31 @@ describe("SkillStore", () => {
     expect(ux?.description).not.toBe("old ux");
     expect(ux?.body).toContain("annotate_screenshot");
     expect(ux?.tags).toContain(SEED_REVISION);
+  });
+
+  it("refreshes stale combo-rest toolHints when SEED_REVISION advances", async () => {
+    const dbName = `skills_${crypto.randomUUID()}`;
+    const store = new SkillStore({ dbName, skipSeed: true });
+    await store.save({
+      name: "combo-rest",
+      description: "old rest",
+      body: "old playbook",
+      tags: ["seed", "tools", "v1.6.29", "rest"],
+      // Pre-1.6.41 pack — missing ensure_github_connector
+      toolHints: ["rest_request", "mcp_list_tools", "mcp_call"],
+    });
+    const store2 = new SkillStore({ dbName });
+    const rest = (await store2.list()).find((s) => s.name === "combo-rest");
+    expect(rest?.tags).toContain(SEED_REVISION);
+    expect(rest?.toolHints).toEqual(expect.arrayContaining([
+      "list_connectors",
+      "save_rest_connector",
+      "ensure_github_connector",
+      "rest_request",
+      "mcp_list_tools",
+      "mcp_call",
+    ]));
+    expect(rest?.toolHints).toHaveLength(6);
   });
 
   it("drops toolHints that are not real tools", async () => {
