@@ -8,10 +8,13 @@ import {
   COMBO_VAULT_PACK_VERSION_LABEL,
   ConnectorStore,
   DEFAULT_COMBO_API_BASE,
+  VAULT_RECIPES,
+  applySetupBundle,
   buildVaultPack,
   canPickDirectory,
   cloudClientFromConfig,
   ensureDeviceId,
+  getVaultRecipe,
   loadCloudConfig,
   loadDirectoryHandle,
   mergeVaultPack,
@@ -32,6 +35,7 @@ import {
   unsealSetupPack,
   writeVaultPackToDirectory,
   type Vault,
+  type VaultRecipeId,
   type VaultRegistryState,
 } from "@combo-x/core";
 import { useEffect, useState } from "react";
@@ -347,6 +351,36 @@ export function CloudVaultSection({
     setMsg("Vault renamed");
   };
 
+  /** Install recipe connectors + note labels (secret values still entered in Settings). */
+  const applyRecipe = async (recipeId: VaultRecipeId) => {
+    if (locked || !vault.isUnlocked()) {
+      setMsg("Unlock vault first");
+      return;
+    }
+    const vaultId = registry.activeId;
+    if (!vaultId) {
+      setMsg("No active vault");
+      return;
+    }
+    setBusy(true);
+    try {
+      const recipe = getVaultRecipe(recipeId);
+      const r = await applySetupBundle(vault, connectors, { recipeId }, vaultId);
+      if (!r.ok) {
+        setMsg(r.error);
+        return;
+      }
+      const labels = recipe?.secretLabels.join(", ") ?? "";
+      setMsg(
+        `${r.summary}. Fill secrets in Settings/Vault labels: ${labels || "(none)"}.`,
+      );
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveDisk = async () => {
     setBusy(true);
     try {
@@ -427,6 +461,39 @@ export function CloudVaultSection({
           Rename
         </button>
       </div>
+
+      <h3>Vault recipes</h3>
+      <p className="hint wrap">
+        One-click connector packs for this vault. Does not overwrite existing secrets — paste keys
+        afterward under Settings / Labels.
+      </p>
+      <div className="row">
+        {(Object.keys(VAULT_RECIPES) as VaultRecipeId[]).map((id) => {
+          const r = VAULT_RECIPES[id];
+          return (
+            <button
+              key={id}
+              type="button"
+              disabled={locked || busy}
+              title={r.description}
+              onClick={() => void applyRecipe(id)}
+            >
+              Apply {r.name}
+            </button>
+          );
+        })}
+      </div>
+      <ul className="list compact">
+        {(Object.keys(VAULT_RECIPES) as VaultRecipeId[]).map((id) => {
+          const r = VAULT_RECIPES[id];
+          return (
+            <li key={id} className="hint wrap">
+              <strong>{r.name}</strong> — {r.description}. Labels:{" "}
+              <code>{r.secretLabels.join(", ")}</code>
+            </li>
+          );
+        })}
+      </ul>
 
       <h3>Disk backup folder</h3>
       <p className="hint wrap">
