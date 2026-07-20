@@ -12,6 +12,11 @@ corepack pnpm build:firefox        # builds Chrome dist, then writes extension/d
 Load it:
 1. Open `about:debugging#/runtime/this-firefox`
 2. **Load Temporary Add-on…** → pick `extension/dist-firefox/manifest.json`
+3. After rebuilds: click **Reload** on the already-loaded add-on (keeps IndexedDB). Prefer Reload over Remove → Load.
+
+**Storage (vault / sessions / connectors):** Temporary add-ons keep data only while that install lives. **Remove** (or a new temporary install after Remove) wipes IndexedDB — unlock then finds no vaults. Create a vault again, or **Pull from Cloud** / **Load from folder** (see `docs/VAULTS.md`). Prefer **Reload** over Remove. Permanent install (signed/`web-ext run` with profile) is more durable.
+
+`pnpm build` always refreshes both `extension/dist` and `extension/dist-firefox` (same version). Do not load a stale `dist-firefox` after a Chrome-only build.
 
 Package for AMO:
 ```bash
@@ -51,7 +56,6 @@ npx web-ext lint  --source-dir extension/dist-firefox   # expect 0 errors
   (not `toggle`) and registers the listener once. Chrome still uses
   `sidePanel.setPanelBehavior`. After rebuild, reload the temporary add-on.
   Alternate: menu **View → Sidebar → Combo-X** (`_execute_sidebar_action`).
-
 ## Zen / multi-tab (pinned target tab)
 
 Combo-X is one extension instance per browser profile. DOM tools default to the

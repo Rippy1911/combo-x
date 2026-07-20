@@ -406,6 +406,16 @@ body {
   white-space: nowrap;
 }
 
+.model-picker-price {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-picker-pop {
   position: absolute;
   z-index: 40;
@@ -1925,6 +1935,26 @@ code {
   background: color-mix(in srgb, var(--accent-dim) 35%, var(--bg));
   color: var(--text);
   max-width: 100%;
+}
+
+.attach-chip.muted {
+  opacity: 0.55;
+}
+
+.model-picker-section {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 8px 10px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-picker-provider {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 4px;
 }
 
 .attach-chip.done {

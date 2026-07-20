@@ -78,6 +78,7 @@ export const TOOL_GROUPS = {
     "list_connectors",
     "save_rest_connector",
     "ensure_github_connector",
+    "dispatch_cursor_agent",
     "rest_request",
     "mcp_list_tools",
     "mcp_call",

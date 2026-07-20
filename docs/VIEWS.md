@@ -43,7 +43,7 @@ Chat Preview → **Views** stashes the table (`combo_x_views_pending_table`) and
 
 ## Out of scope
 
-- MCP remote control of Combo chat (parked)
+- MCP remote control of Combo chat (parked) — prefer Combo Link command envelope (`chat.send` etc.) as the shared adapter; see [`COMBO_LINK.md`](./COMBO_LINK.md)
 - Heavy chart / dashboard builders
 - Editing IDB rows in Inspector
 - Encrypted multi-device sync of views

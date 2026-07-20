@@ -26,7 +26,51 @@ export {
   RuntimeMessageSchema,
 } from "./protocol/messages.js";
 
-export { Vault, VaultLockedError, VaultSealedError, VAULT_KDF_ITERATIONS } from "./vault/vault.js";
+export {
+  Vault,
+  VaultLockedError,
+  VaultSealedError,
+  VAULT_KDF_ITERATIONS,
+  SEALED_VAULT_FORMAT,
+} from "./vault/vault.js";
+export type { SealedVaultBlob, VaultOptions } from "./vault/vault.js";
+export {
+  VAULT_REGISTRY_KEY,
+  LEGACY_VAULT_DB,
+  emptyRegistry,
+  loadRegistry,
+  saveRegistry,
+  vaultDbNameForId,
+  createVaultEntry,
+  ensureRegistryMigrated,
+  openVaultFromEntry,
+  getActiveEntry,
+  upsertVaultEntry,
+  renameVaultEntry,
+  setActiveVaultId,
+} from "./vault/registry.js";
+export type { VaultRegistryEntry, VaultRegistryState } from "./vault/registry.js";
+export {
+  VAULT_PACK_FORMAT,
+  isVaultPack,
+  buildVaultPack,
+  packToCiphertextB64,
+  packFromCiphertextB64,
+  mergeVaultPack,
+} from "./vault/pack.js";
+export type { VaultPack, VaultPackEntry } from "./vault/pack.js";
+export { VAULT_RECIPES, getVaultRecipe } from "./vault/recipes.js";
+export type { VaultRecipe, VaultRecipeId, ApplyBundlePayload } from "./vault/recipes.js";
+export {
+  VAULT_PACK_FILENAME,
+  canPickDirectory,
+  pickVaultBackupDirectory,
+  loadDirectoryHandle,
+  saveDirectoryHandle,
+  clearDirectoryHandle,
+  writeVaultPackToDirectory,
+  readVaultPackFromDirectory,
+} from "./vault/diskFolder.js";
 export {
   detectChatSecrets,
   assignUniqueLabels,
@@ -40,6 +84,89 @@ export type {
   ChatSecretKind,
   GetVaultSecretFn,
 } from "./vault/chatSecrets.js";
+export {
+  CloudClient,
+  DEFAULT_COMBO_API_BASE,
+  CLOUD_CONFIG_KEY,
+  DEVICE_ID_KEY,
+  COMBO_SYNC_TOKEN_LABEL,
+  COMBO_API_BASE_LABEL,
+  COMBO_DEVICE_ID_LABEL,
+  COMBO_VAULT_PACK_VERSION_LABEL,
+  ensureDeviceId,
+  loadCloudConfig,
+  saveCloudConfig,
+  clearCloudConfig,
+  cloudClientFromConfig,
+  hydrateCloudConfigFromVault,
+} from "./cloud/client.js";
+export type { CloudConfig, CloudClientOptions } from "./cloud/client.js";
+
+export {
+  probeComboApi,
+  probeLlmEndpoint,
+  normalizeComboApiBase,
+} from "./cloud/connectionProbe.js";
+export type { ProbeResult } from "./cloud/connectionProbe.js";
+
+export {
+  LINK_ENABLED_KEY,
+  SYNC_CHATS_KEY,
+  loadLinkConfig,
+  saveLinkConfig,
+  loadSessionSyncVersions,
+  saveSessionSyncVersions,
+} from "./cloud/linkConfig.js";
+export type { LinkLocalConfig } from "./cloud/linkConfig.js";
+
+export {
+  LinkClient,
+  linkClientFromConfig,
+  portalLinkDevices,
+} from "./cloud/linkClient.js";
+export type {
+  LinkCommand,
+  LinkCommandType,
+  LinkDevice,
+  LinkSessionSnapshot,
+} from "./cloud/linkClient.js";
+
+export {
+  encodeSessionBlob,
+  decodeSessionBlob,
+  encodeManifest,
+  decodeManifest,
+  pushSessionSync,
+  pullSessionSync,
+} from "./cloud/sessionSync.js";
+export type { SessionsManifest, SessionsManifestEntry } from "./cloud/sessionSync.js";
+
+export {
+  SETUP_PACK_FORMAT,
+  isSealedSetupPack,
+  sanitizeConnectorForSync,
+  sealSetupPack,
+  unsealSetupPack,
+  setupPackToB64,
+  setupPackFromB64,
+} from "./cloud/setupPack.js";
+export type { SetupPackPlain, SealedSetupPack } from "./cloud/setupPack.js";
+
+export {
+  applyVaultPutSecrets,
+  applyVaultDeleteSecrets,
+  applyUpsertConnectors,
+  applySetupBundle,
+} from "./cloud/vaultAdmin.js";
+
+export {
+  dispatchCursorAgent,
+  resolveCursorApiKey,
+  CURSOR_VAULT_LABELS,
+  DEFAULT_CURSOR_REPO,
+  DEFAULT_CURSOR_MODEL,
+} from "./cloud/dispatchCursor.js";
+export type { DispatchCursorInput, DispatchCursorResult } from "./cloud/dispatchCursor.js";
 
 export {
   extractProductsFromOrderCsv,
@@ -71,6 +198,15 @@ export {
   LLM_BASE_URL_KEY,
   LLM_PROVIDER_KEY,
   LLM_API_KEY_LABEL,
+  LLM_ACTIVE_MODEL_LABEL,
+  LLM_ACTIVE_WORKER_MODEL_LABEL,
+  apiKeyVaultLabel,
+  baseUrlVaultLabel,
+  modelVaultLabel,
+  workerModelVaultLabel,
+  isProviderReady,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
   resolveProvider,
   normalizeBaseUrl,
 } from "./llm/providers.js";
@@ -139,6 +275,7 @@ export {
   historyFromUiTurns,
   redactToolResultSnippet,
   scrubDataUrls,
+  truncateToolResultForLlm,
 } from "./agent/leanHistory.js";
 export type { UiHistoryTurn } from "./agent/leanHistory.js";
 
@@ -201,9 +338,12 @@ export {
   BUDGET_GET_PAGE_CHARS,
   BUDGET_LEAN_HISTORY_CHARS,
   NORMAL_LEAN_HISTORY_CHARS,
+  BUDGET_MID_LOOP_TOOL_CHARS,
+  NORMAL_MID_LOOP_TOOL_CHARS,
   resolveMaxSteps,
   defaultGetPageMaxChars,
   leanHistoryMaxChars,
+  midLoopToolResultMaxChars,
   BUDGET_SYSTEM_ADDON,
   BUDGET_MODE_HELP,
   shouldRejectGetPageFull,
@@ -237,6 +377,9 @@ export {
   githubRestTemplate,
   uploadsRestTemplate,
   nsFoodRestTemplate,
+  anatomeRestTemplate,
+  ideaforgeRestTemplate,
+  nsExecRestTemplate,
 } from "./connectors/templates.js";
 export {
   ensureGithubRestConnector,
@@ -297,6 +440,8 @@ export {
   initialActiveTools,
   ensureForceAttachTools,
   unlockFromHints,
+  packHintsForSkillName,
+  effectiveToolHints,
 } from "./tools/gating.js";
 export type { ToolPackId } from "./tools/gating.js";
 
@@ -322,6 +467,10 @@ export {
   MODEL_PRESETS,
   MODEL_PASTE_HINT,
   normalizeModelId,
+  defaultModelsForProvider,
+  presetsForProvider,
+  looksLikeCloudModelId,
+  looksLikeLocalModelId,
 } from "./models.js";
 export type { ModelPreset } from "./models.js";
 

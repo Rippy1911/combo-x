@@ -3,11 +3,28 @@
  * Pattern reused from combo Phase B; DB name namespaced to combo-x.
  */
 
+import { b64ToBytes, bytesToB64 } from "./bytes.js";
+
 export const VAULT_KDF_ITERATIONS = 100_000;
 export const VAULT_IV_BYTES = 12;
+export const SEALED_VAULT_FORMAT = "combo-x-sealed-vault-v1" as const;
 const VERIFIER_PLAINTEXT = "combo-x-vault-verifier-v1";
 const SALT_KEY = "__salt__";
 const VERIFIER_KEY = "__verifier__";
+
+/** Ciphertext-only dump — safe to sync / write to disk; unlock still needs passphrase. */
+export type SealedVaultBlob = {
+  format: typeof SEALED_VAULT_FORMAT;
+  salt_b64: string;
+  verifier: { iv_b64: string; ciphertext_b64: string };
+  entries: Array<{
+    id: string;
+    iv_b64: string;
+    ciphertext_b64: string;
+    createdAt: string;
+    label: string | null;
+  }>;
+};
 
 export class VaultLockedError extends Error {
   constructor() {
@@ -107,6 +124,10 @@ export class Vault {
   constructor(options: VaultOptions = {}) {
     this.dbName = options.dbName ?? "combo_x_vault";
     this.storeName = options.storeName ?? "entries";
+  }
+
+  getDbName(): string {
+    return this.dbName;
   }
 
   isUnlocked(): boolean {
@@ -237,6 +258,21 @@ export class Vault {
     return null;
   }
 
+  /**
+   * Encrypt an arbitrary UTF-8 payload with the unlocked vault KEK
+   * (used for sealed setup packs — connectors travel ciphertext-only).
+   */
+  async sealPayload(plaintext: string): Promise<{ iv_b64: string; ciphertext_b64: string }> {
+    if (!this.kek) throw new VaultLockedError();
+    const { iv, ciphertext } = await encrypt(this.kek, plaintext);
+    return { iv_b64: bytesToB64(iv), ciphertext_b64: bytesToB64(ciphertext) };
+  }
+
+  async unsealPayload(iv_b64: string, ciphertext_b64: string): Promise<string> {
+    if (!this.kek) throw new VaultLockedError();
+    return decrypt(this.kek, b64ToBytes(iv_b64), b64ToBytes(ciphertext_b64));
+  }
+
   /** Upsert a secret by label (replaces previous ciphertext for that label). */
   async putByLabel(label: string, value: string): Promise<string> {
     if (!this.kek) throw new VaultLockedError();
@@ -264,5 +300,83 @@ export class Vault {
     await idbReq(this.store("readwrite").delete(id));
     await idbReq(this.store("readwrite").delete(`label:${id}`));
     return true;
+  }
+
+  /**
+   * Export salt + verifier + entry ciphertexts (no unlock required).
+   * Returns null if vault is not initialized.
+   */
+  async exportSealed(): Promise<SealedVaultBlob | null> {
+    if (!(await this.isInitialized())) return null;
+    await this.getDb();
+    const salt = await this.getMeta<Uint8Array<ArrayBuffer>>(SALT_KEY);
+    const verifier = await this.getMeta<{
+      iv: Uint8Array<ArrayBuffer>;
+      ciphertext: Uint8Array<ArrayBuffer>;
+    }>(VERIFIER_KEY);
+    if (!salt || !verifier) return null;
+    const all = await idbReq<Rec[]>(this.store("readonly").getAll());
+    const entries: SealedVaultBlob["entries"] = [];
+    for (const rec of all) {
+      if (rec.kind !== "entry") continue;
+      const label = await this.getMeta<string>(`label:${rec.id}`);
+      entries.push({
+        id: rec.id,
+        iv_b64: bytesToB64(rec.iv),
+        ciphertext_b64: bytesToB64(rec.ciphertext),
+        createdAt: rec.createdAt,
+        label: label ?? null,
+      });
+    }
+    return {
+      format: SEALED_VAULT_FORMAT,
+      salt_b64: bytesToB64(salt),
+      verifier: {
+        iv_b64: bytesToB64(verifier.iv),
+        ciphertext_b64: bytesToB64(verifier.ciphertext),
+      },
+      entries,
+    };
+  }
+
+  /** Replace vault contents with a sealed blob. Locks the vault afterward. */
+  async importSealed(blob: SealedVaultBlob): Promise<void> {
+    if (blob.format !== SEALED_VAULT_FORMAT) {
+      throw new Error(`unsupported sealed vault format: ${blob.format}`);
+    }
+    if (!blob.salt_b64 || !blob.verifier?.iv_b64 || !blob.verifier?.ciphertext_b64) {
+      throw new Error("sealed vault missing salt/verifier");
+    }
+    await this.getDb();
+    const all = await idbReq<Rec[]>(this.store("readonly").getAll());
+    const tx = this.db!.transaction(this.storeName, "readwrite");
+    const store = tx.objectStore(this.storeName);
+    for (const rec of all) {
+      store.delete(rec.id);
+    }
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("clear vault failed"));
+    });
+
+    const salt = b64ToBytes(blob.salt_b64);
+    const verifier = {
+      iv: b64ToBytes(blob.verifier.iv_b64),
+      ciphertext: b64ToBytes(blob.verifier.ciphertext_b64),
+    };
+    await this.putMeta(SALT_KEY, salt);
+    await this.putMeta(VERIFIER_KEY, verifier);
+    for (const e of blob.entries ?? []) {
+      const rec: EntryRec = {
+        id: e.id,
+        kind: "entry",
+        iv: b64ToBytes(e.iv_b64),
+        ciphertext: b64ToBytes(e.ciphertext_b64),
+        createdAt: e.createdAt || new Date().toISOString(),
+      };
+      await idbReq(this.store("readwrite").put(rec));
+      if (e.label) await this.putMeta(`label:${e.id}`, e.label);
+    }
+    this.kek = null;
   }
 }

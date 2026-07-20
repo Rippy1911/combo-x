@@ -1485,4 +1485,90 @@ describe("AgentLoop", () => {
     expect(kinds).toContain("tool");
     appendSpy.mockRestore();
   });
+
+  it("mid-loop tool rows are truncated for LLM while UI gets full payload", async () => {
+    const fat = "Z".repeat(12_000);
+    let secondCallToolContent = "";
+    const llm = mockLlm(
+      [
+        {
+          content: null,
+          toolCalls: [{ id: "1", name: "page_digest", args: "{}" }],
+        },
+        { content: "Compared." },
+      ],
+      (_model, messages) => {
+        if (!messages) return;
+        const toolRows = messages.filter((m) => m.role === "tool");
+        if (toolRows.length) {
+          secondCallToolContent = String(toolRows[0]?.content ?? "");
+        }
+      },
+    );
+    const browser = stubBrowser({
+      runContent: vi.fn(async () => ({
+        ok: true,
+        data: { title: "Hotel", text: fat },
+      })),
+    });
+    const fullResults: unknown[] = [];
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    await agent.run({
+      model: "mock",
+      userMessage: "digest",
+      approvalMode: "auto_all",
+      onEvent: (e) => {
+        if (e.type === "tool_result" && e.tool === "page_digest") {
+          fullResults.push(e.result);
+        }
+      },
+    });
+    expect(JSON.stringify(fullResults[0])).toContain(fat);
+    expect(secondCallToolContent).toContain("truncated");
+    expect(secondCallToolContent.length).toBeLessThan(5_000);
+    expect(secondCallToolContent).not.toContain(fat);
+  });
+
+  it("runs consecutive non-sensitive tools in parallel", async () => {
+    let inflight = 0;
+    let maxInflight = 0;
+    const browser = stubBrowser({
+      runContent: vi.fn(async () => {
+        inflight += 1;
+        maxInflight = Math.max(maxInflight, inflight);
+        await new Promise((r) => setTimeout(r, 40));
+        inflight -= 1;
+        return { ok: true, data: { title: "t", text: "ok" } };
+      }),
+    });
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          { id: "a", name: "page_digest", args: "{}" },
+          { id: "b", name: "page_digest", args: "{}" },
+        ],
+      },
+      { content: "done" },
+    ]);
+    const agent = new AgentLoop(
+      llm,
+      browser,
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "mock",
+      userMessage: "two digests",
+      approvalMode: "auto_all",
+    });
+    expect(result.finalText).toContain("done");
+    expect(browser.runContent).toHaveBeenCalledTimes(2);
+    expect(maxInflight).toBe(2);
+    const toolMsgs = result.messages.filter((m) => m.role === "tool");
+    expect(toolMsgs.map((m) => m.tool_call_id)).toEqual(["a", "b"]);
+  });
 });

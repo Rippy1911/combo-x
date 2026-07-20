@@ -24,12 +24,18 @@ Local-first **browser agent** Chrome extension (MV3).
 | Memory inject + lean history | ✅ |
 | Activity log | ✅ |
 | Local folder RAG (multi-folder + excludes) | ✅ |
+| Combo Link + vault-admin / sync history | ✅ |
+| Self-improve (`dispatch_cursor_agent`) | ✅ |
 
 ### Feature docs
 
 | Doc | Topic |
 |-----|-------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System design (start here) |
+| [`docs/SELF_IMPROVE.md`](./docs/SELF_IMPROVE.md) | Cursor Cloud Agent dispatch |
+| [`docs/VAULTS.md`](./docs/VAULTS.md) | Multi-vault, sync history, recipes |
+| [`docs/COMBO_LINK.md`](./docs/COMBO_LINK.md) | Portal remote control |
+| [`docs/LOCAL_NETWORK.md`](./docs/LOCAL_NETWORK.md) | LAN API + Ollama |
 | [`docs/TOOLS.md`](./docs/TOOLS.md) | Tool catalog + groups |
 | [`docs/AGENTS.md`](./docs/AGENTS.md) | Agent profiles |
 | [`docs/SUBAGENTS.md`](./docs/SUBAGENTS.md) | Sub-agent protocol |

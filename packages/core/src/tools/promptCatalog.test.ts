@@ -20,7 +20,7 @@ describe("promptCatalog inject", () => {
     const block = formatSkillIndexBlock(skills);
     expect(block).toContain("AVAILABLE SKILLS");
     expect(block).toContain("combo-scrape");
-    expect(block).toContain("unlock:[scrape_pdps]");
+    expect(block).toMatch(/unlock:\[.*scrape_pdps/);
     expect(block).not.toContain("SECRET BODY");
   });
 

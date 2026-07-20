@@ -5,14 +5,24 @@ import {
   ensureGithubRestConnector,
   uploadsRestTemplate,
   nsFoodRestTemplate,
+  LLM_ACTIVE_MODEL_LABEL,
+  LLM_ACTIVE_WORKER_MODEL_LABEL,
   LLM_BASE_URL_KEY,
   LLM_PROVIDER_KEY,
   LLM_PROVIDER_PRESETS,
   MODEL_PASTE_HINT,
+  apiKeyVaultLabel,
+  baseUrlVaultLabel,
+  defaultModelsForProvider,
+  modelVaultLabel,
   normalizeModelId,
   parseMcpDefinition,
+  probeLlmEndpoint,
   reindexSaved,
   resolveProvider,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  workerModelVaultLabel,
   type AgentBudgetMode,
   type AgentProfile,
   type AgentProfileStore,
@@ -74,6 +84,8 @@ export type SettingsPanelProps = {
   setRagMeta: (m: RagMeta | null) => void;
   onLockVault: () => void;
   onRefreshVaultLabels: () => void;
+  /** Current vault secret labels (for “configured” provider chips). */
+  vaultLabels?: string[];
 };
 
 function profileToolsToSet(allowlist: AgentProfile["toolAllowlist"], all: string[]): Set<string> {
@@ -125,6 +137,7 @@ export function SettingsPanel({
   setRagMeta,
   onLockVault,
   onRefreshVaultLabels,
+  vaultLabels = [],
 }: SettingsPanelProps) {
   const allToolNames = useMemo(() => AGENT_TOOLS.map((t) => t.function.name), []);
   const [msg, setMsg] = useState("");
@@ -258,21 +271,84 @@ export function SettingsPanel({
     setMsg("Agent deleted");
   };
 
+  const loadProviderIntoForm = useCallback(
+    async (providerId: LlmProviderId) => {
+      const preset = resolveProvider(providerId);
+      const get = (label: string) => vault.getByLabel(label);
+      const key = await resolveProviderApiKey(providerId, get);
+      const base = await resolveProviderBaseUrl(providerId, get, {
+        activeProviderId: providerId,
+      });
+      const storedOrch = (await get(modelVaultLabel(providerId)))?.trim();
+      const storedWorker = (await get(workerModelVaultLabel(providerId)))?.trim();
+      const defaults = defaultModelsForProvider(providerId);
+      const orch = normalizeModelId(storedOrch || defaults.orchestrator, providerId);
+      const worker = normalizeModelId(storedWorker || defaults.worker, providerId);
+      setLlmProvider(preset.id);
+      setApiKey(key);
+      setLlmBaseUrl(base);
+      setModel(orch);
+      setWorkerModel(worker);
+      setCustomModel(orch);
+      setCustomWorkerModel(worker);
+      setVisionSettings({
+        ...visionSettings,
+        visionWorkerModel: defaults.vision,
+      });
+      if (preset.local) setWebSearchEnabled(false);
+    },
+    [
+      setApiKey,
+      setCustomModel,
+      setCustomWorkerModel,
+      setLlmBaseUrl,
+      setLlmProvider,
+      setModel,
+      setWebSearchEnabled,
+      setWorkerModel,
+      setVisionSettings,
+      vault,
+      visionSettings,
+    ],
+  );
+
   const saveVaultKeys = async () => {
     const preset = resolveProvider(llmProvider);
-    const m = normalizeModelId(customModel.trim() || model);
-    const w = normalizeModelId(customWorkerModel.trim() || workerModel);
+    const m = normalizeModelId(customModel.trim() || model, preset.id);
+    const w = normalizeModelId(customWorkerModel.trim() || workerModel, preset.id);
     const base = llmBaseUrl.trim() || preset.baseUrl;
-    if (apiKey.trim()) await vault.putByLabel("openrouter_api_key", apiKey.trim());
+    const keyLabel = apiKeyVaultLabel(preset.id);
+    if (apiKey.trim()) {
+      await vault.putByLabel(keyLabel, apiKey.trim());
+    } else if (!preset.keyOptional) {
+      setMsg(`API key required for ${preset.label} (${keyLabel})`);
+      return;
+    }
     await vault.putByLabel(LLM_PROVIDER_KEY, preset.id);
+    await vault.putByLabel(baseUrlVaultLabel(preset.id), base);
     await vault.putByLabel(LLM_BASE_URL_KEY, base);
-    await vault.putByLabel("openrouter_model", m);
-    await vault.putByLabel("openrouter_worker_model", w);
+    await vault.putByLabel(modelVaultLabel(preset.id), m);
+    await vault.putByLabel(workerModelVaultLabel(preset.id), w);
+    await vault.putByLabel(LLM_ACTIVE_MODEL_LABEL, m);
+    await vault.putByLabel(LLM_ACTIVE_WORKER_MODEL_LABEL, w);
     setLlmBaseUrl(base);
     setModel(m);
     setWorkerModel(w);
-    setMsg(`Saved ${preset.label} · orch=${m} · worker=${w}`);
+    setCustomModel(m);
+    setCustomWorkerModel(w);
+    setMsg(`Saved ${preset.label} · key→${keyLabel} · orch=${m} · worker=${w}`);
     await onRefreshVaultLabels();
+  };
+
+  const testLlm = async () => {
+    setMsg("Testing LLM…");
+    const preset = resolveProvider(llmProvider);
+    const r = await probeLlmEndpoint({
+      baseUrl: llmBaseUrl.trim() || preset.baseUrl,
+      apiKey,
+      keyOptional: preset.keyOptional,
+    });
+    setMsg(r.ok ? `LLM OK — ${r.detail}` : `LLM failed — ${r.detail}`);
   };
 
   const providerPreset = resolveProvider(llmProvider);
@@ -510,6 +586,7 @@ export function SettingsPanel({
             value={draftOrch}
             apiKey={apiKey}
             baseUrl={llmBaseUrl}
+            providerId={llmProvider}
             keyOptional={providerPreset.keyOptional}
             onChange={setDraftOrch}
           />
@@ -518,6 +595,7 @@ export function SettingsPanel({
             value={draftWorker}
             apiKey={apiKey}
             baseUrl={llmBaseUrl}
+            providerId={llmProvider}
             keyOptional={providerPreset.keyOptional}
             onChange={setDraftWorker}
           />
@@ -845,32 +923,64 @@ export function SettingsPanel({
 
       <h3>LLM provider</h3>
       <p className="hint wrap">
-        OpenAI-compatible chat API. OpenRouter adds built-in web search when enabled below. Other
-        providers use Combo-X <code>web_search</code> / <code>web_fetch</code>.
+        OpenAI-compatible chat API — OpenRouter, OpenAI, Moonshot/Kimi, <strong>Ollama</strong>, or
+        any LAN host. Keys are saved <strong>per provider</strong> — keep OpenRouter and Kimi both
+        without overwriting. Prefer tool-capable local models (e.g. <code>qwen2.5:32b</code>).
       </p>
+      <div className="chips" aria-label="Configured providers">
+        {LLM_PROVIDER_PRESETS.map((p) => {
+          const ready =
+            p.keyOptional || vaultLabels.includes(apiKeyVaultLabel(p.id));
+          return (
+            <span
+              key={p.id}
+              className={ready ? "attach-chip" : "attach-chip muted"}
+              title={
+                ready
+                  ? `${p.label} ready (${apiKeyVaultLabel(p.id)})`
+                  : `${p.label} — no key yet`
+              }
+            >
+              {p.label}
+              {ready ? " · ok" : ""}
+            </span>
+          );
+        })}
+      </div>
       <label className="hint">Provider</label>
       <select
         value={llmProvider}
         onChange={(e) => {
           const next = resolveProvider(e.target.value);
-          setLlmProvider(next.id);
-          setLlmBaseUrl(next.baseUrl);
+          void loadProviderIntoForm(next.id).catch((err) =>
+            setMsg(err instanceof Error ? err.message : String(err)),
+          );
         }}
       >
         {LLM_PROVIDER_PRESETS.map((p) => (
           <option key={p.id} value={p.id}>
             {p.label}
+            {p.keyOptional || vaultLabels.includes(apiKeyVaultLabel(p.id))
+              ? " ✓"
+              : ""}
           </option>
         ))}
       </select>
       {providerPreset.hint ? <p className="hint wrap">{providerPreset.hint}</p> : null}
-      <label className="hint">Base URL</label>
+      <p className="hint wrap">
+        Vault label for this key: <code>{apiKeyVaultLabel(llmProvider)}</code>
+      </p>
+      <label className="hint">Base URL (advanced — LAN OK)</label>
       <input
         type="url"
         value={llmBaseUrl}
         onChange={(e) => setLlmBaseUrl(e.target.value)}
         placeholder={providerPreset.baseUrl}
       />
+      <p className="hint wrap">
+        Ollama on another device: <code>http://192.168.x.x:11434/v1</code>. Pull models first:{" "}
+        <code>ollama pull qwen2.5:32b</code>
+      </p>
       <label className="hint">API key {providerPreset.keyOptional ? "(optional)" : ""}</label>
       <input
         type="password"
@@ -887,13 +997,14 @@ export function SettingsPanel({
         Enable web search
         {providerPreset.openRouterServerTools
           ? " (OpenRouter server tools)"
-          : " (Combo DuckDuckGo + fetch)"}
+          : " (Combo DuckDuckGo + fetch — needs internet)"}
       </label>
       <label className="hint">Orchestrator model (global default)</label>
       <ModelPicker
         value={model}
         apiKey={apiKey}
         baseUrl={llmBaseUrl}
+        providerId={llmProvider}
         keyOptional={providerPreset.keyOptional}
         onChange={(id) => {
           setModel(id);
@@ -906,6 +1017,7 @@ export function SettingsPanel({
         value={workerModel}
         apiKey={apiKey}
         baseUrl={llmBaseUrl}
+        providerId={llmProvider}
         keyOptional={providerPreset.keyOptional}
         onChange={(id) => {
           setWorkerModel(id);
@@ -930,6 +1042,9 @@ export function SettingsPanel({
         <button type="button" className="primary" onClick={() => void saveVaultKeys()}>
           Save keys
         </button>
+        <button type="button" onClick={() => void testLlm()}>
+          Test LLM
+        </button>
         <button type="button" className="danger" onClick={onLockVault}>
           Lock vault
         </button>
@@ -945,6 +1060,7 @@ export function SettingsPanel({
         value={visionSettings.visionWorkerModel}
         apiKey={apiKey}
         baseUrl={llmBaseUrl}
+        providerId={llmProvider}
         keyOptional={providerPreset.keyOptional}
         onChange={(id) =>
           setVisionSettings({ ...visionSettings, visionWorkerModel: id })

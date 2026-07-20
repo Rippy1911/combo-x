@@ -46,6 +46,8 @@ export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   createdAt: string;
+  /** Origin of this turn — e.g. Combo Link remote control */
+  source?: "local" | "link" | "mcp";
   /** Operator starred this turn for later reference */
   bookmarked?: boolean;
   usage?: {
@@ -184,6 +186,8 @@ export interface ChatSession {
   bookmarked?: boolean;
   /** Pin DOM/navigate tools to this browser tab (no activate_tab). */
   boundTabId?: number;
+  /** How this session was created / driven (local UI vs Combo Link / MCP). */
+  source?: "local" | "link" | "mcp";
 }
 
 /** Strip megabase64 so exports stay small; keep attachment ids. */
@@ -382,7 +386,10 @@ export class SessionStore {
     return this.db.transaction("sessions", mode).objectStore("sessions");
   }
 
-  async create(title = "New chat"): Promise<ChatSession> {
+  async create(
+    title = "New chat",
+    opts?: { source?: ChatSession["source"] },
+  ): Promise<ChatSession> {
     const session: ChatSession = {
       id: crypto.randomUUID(),
       title,
@@ -391,6 +398,7 @@ export class SessionStore {
       messages: [],
       totalTokens: 0,
       estimatedCostUsd: 0,
+      source: opts?.source,
     };
     await this.getDb();
     await idbReq(this.store("readwrite").put(session));

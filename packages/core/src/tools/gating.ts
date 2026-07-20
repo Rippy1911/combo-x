@@ -61,6 +61,12 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "annotate_screenshot",
   "page_css_preview",
   "page_css_clear",
+  /** Connector setup — always callable so agent can create `gh` without skill unlock */
+  "list_connectors",
+  "save_rest_connector",
+  "ensure_github_connector",
+  /** Self-improve — Cursor Cloud Agent dispatch (vault cursor_api_key) */
+  "dispatch_cursor_agent",
 ];
 
 /**
@@ -77,6 +83,10 @@ export const FORCE_ATTACH_TOOL_NAMES: readonly string[] = [
   "skill_search",
   "skill_read",
   "export_session",
+  "list_connectors",
+  "save_rest_connector",
+  "ensure_github_connector",
+  "dispatch_cursor_agent",
 ];
 
 export const TOOL_PACKS = {
@@ -96,10 +106,8 @@ export const TOOL_PACKS = {
     "save_site_profile",
     "get_site_profile",
   ],
+  // HTTP/MCP calls stay gated; connector *setup* is ALWAYS_ON above.
   rest: [
-    "list_connectors",
-    "save_rest_connector",
-    "ensure_github_connector",
     "rest_request",
     "mcp_list_tools",
     "mcp_call",
@@ -199,4 +207,38 @@ export function unlockFromHints(
     (n) => ceiling.has(n) && (GATED_SET.has(n) || ALWAYS_ON_SET.has(n)),
   );
   return { active: unionNames(active, unlocked), unlocked };
+}
+
+/**
+ * Canonical pack tools for known seed/playbook skill names.
+ * Used so skill_read unlocks never depend on stale IndexedDB toolHints.
+ */
+const SKILL_NAME_PACK_HINTS: Record<string, readonly string[]> = {
+  "combo-scrape": TOOL_PACKS.scrape,
+  "combo-rest": TOOL_PACKS.rest,
+  "combo-rag": TOOL_PACKS.rag,
+  "combo-page-ext": TOOL_PACKS["page-ext"],
+  "combo-media": TOOL_PACKS.media,
+  // Rest-pack aliases (same unlock set as combo-rest)
+  "combo-repo-ops": TOOL_PACKS.rest,
+  "combo-ns-food": TOOL_PACKS.rest,
+  "combo-openapi-call": TOOL_PACKS.rest,
+  // Playbook-only (dispatch_cursor_agent is ALWAYS_ON)
+  "combo-self-improve": [],
+};
+
+/** Live pack tools for a skill name, or [] if not a known pack skill. */
+export function packHintsForSkillName(name: string): readonly string[] {
+  return SKILL_NAME_PACK_HINTS[name.trim()] ?? [];
+}
+
+/**
+ * Merge stored IDB hints with the live pack for that skill name.
+ * Stale combo-rest rows (pre-ensure_github_connector) still unlock the full rest pack.
+ */
+export function effectiveToolHints(
+  skillName: string,
+  stored?: readonly string[] | null,
+): string[] {
+  return unionNames(stored ?? [], packHintsForSkillName(skillName));
 }

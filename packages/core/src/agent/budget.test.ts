@@ -3,6 +3,7 @@ import {
   BUDGET_MODE_HELP,
   defaultGetPageMaxChars,
   leanHistoryMaxChars,
+  midLoopToolResultMaxChars,
   preferPageDigest,
   resolveMaxSteps,
   rewriteGetPageArgs,
@@ -23,6 +24,11 @@ describe("budget mode", () => {
   it("leanHistoryMaxChars is tighter in budget but never zero", () => {
     expect(leanHistoryMaxChars("budget")).toBeLessThan(leanHistoryMaxChars("normal"));
     expect(leanHistoryMaxChars("budget")).toBeGreaterThan(8_000);
+  });
+
+  it("midLoopToolResultMaxChars is tighter in budget", () => {
+    expect(midLoopToolResultMaxChars("budget")).toBe(2_000);
+    expect(midLoopToolResultMaxChars("normal")).toBe(4_000);
   });
 
   it("help copy promises no tool truncation", () => {
