@@ -70,9 +70,24 @@ Full LAN guide: [`LOCAL_NETWORK.md`](./LOCAL_NETWORK.md).
 ### Moonshot / Kimi
 
 1. Settings → Provider → **Moonshot / Kimi**
-2. Paste Moonshot API key (saved as `moonshot_api_key`)
-3. Pick a model (`kimi-k3`, …) or paste any id from
+2. Paste Moonshot API key (saved as `moonshot_api_key`) — keys from
+   platform.kimi.ai / .com / .cn are **not** interchangeable with the wrong host
+3. Confirm Base URL is `https://api.moonshot.ai/v1` (or `.cn` / `api.kimi.com` for your key region)
+4. Pick a model (`kimi-k3`, `kimi-k2.6`, …) or paste any id from
    [platform.kimi.ai/docs/models](https://platform.kimi.ai/docs/models)
+
+**401 `Missing Authentication header`:** That JSON shape is from **OpenRouter**, not
+Moonshot. It usually means a Moonshot `sk-…` key was sent to `openrouter.ai`
+(stale Base URL after switching providers). Combo-X 1.6.59+ coerces the base URL
+back to Moonshot when the active provider is Moonshot. Reload the extension, re-open
+Settings → Moonshot, click Save, then retry. For OpenRouter’s `~moonshotai/kimi-latest`
+use an `sk-or-v1-…` key under provider OpenRouter — or pick Moonshot’s native `kimi-k3`.
+
+**Kimi fixed sampling:** Per [Kimi model params](https://platform.kimi.ai/docs/api/models-overview#temperature),
+`kimi-k3` / `kimi-k2.6` / `kimi-k2.7-code*` reject an explicit `temperature` (and
+related sampling fields). Combo-X omits `temperature` for those model ids even though
+the agent loop still passes `0.2` for other providers. Do not send `tool_choice:
+"required"` on K2.x (only K3 supports it) — Combo-X does not set `tool_choice` today.
 
 OpenRouter-only headers (`HTTP-Referer`, `X-Title`) and `stream_options.include_usage`
 are **not** sent to non-OpenRouter hosts.

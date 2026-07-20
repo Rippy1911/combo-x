@@ -143,7 +143,12 @@ export async function resolveProviderApiKey(
 
 /**
  * Resolve base URL for a provider: per-provider label, then shared `llm_base_url`
- * only when that provider is the currently stored active provider, else preset default.
+ * only when that provider is active **and** the URL still belongs to this provider,
+ * else preset default.
+ *
+ * Important: do not reuse a leftover OpenRouter shared URL after switching to
+ * Moonshot — OpenRouter answers Moonshot `sk-` keys with
+ * `401 {"error":{"message":"Missing Authentication header","code":401}}`.
  */
 export async function resolveProviderBaseUrl(
   id: LlmProviderId | string,
@@ -152,11 +157,15 @@ export async function resolveProviderBaseUrl(
 ): Promise<string> {
   const preset = resolveProvider(id);
   const specific = (await getByLabel(baseUrlVaultLabel(preset.id)))?.trim();
-  if (specific) return normalizeBaseUrl(specific);
+  if (specific && baseUrlCompatibleWithProvider(specific, preset.id)) {
+    return normalizeBaseUrl(specific);
+  }
   const activeId = opts?.activeProviderId ?? (await getByLabel(LLM_PROVIDER_KEY));
   if (resolveProvider(activeId).id === preset.id) {
     const shared = (await getByLabel(LLM_BASE_URL_KEY))?.trim();
-    if (shared) return normalizeBaseUrl(shared);
+    if (shared && baseUrlCompatibleWithProvider(shared, preset.id)) {
+      return normalizeBaseUrl(shared);
+    }
   }
   return normalizeBaseUrl(preset.baseUrl);
 }
@@ -168,4 +177,71 @@ export function resolveProvider(id: string | null | undefined): LlmProviderPrese
 
 export function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/$/, "") || resolveProvider("openrouter").baseUrl;
+}
+
+function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url.includes("://") ? url : `https://${url}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+const KNOWN_CLOUD_LLM_HOSTS = new Set([
+  "openrouter.ai",
+  "api.openai.com",
+  "api.moonshot.ai",
+  "api.moonshot.cn",
+  "api.kimi.com",
+]);
+
+/**
+ * True when `url` is safe to use for this provider.
+ * Prevents the shared `llm_base_url` (or a mis-saved per-provider URL) from
+ * sending a Moonshot key to OpenRouter — which returns
+ * `401 Missing Authentication header` for non-`sk-or-` keys.
+ */
+export function baseUrlCompatibleWithProvider(
+  url: string,
+  providerId: LlmProviderId | string | null | undefined,
+): boolean {
+  const preset = resolveProvider(providerId);
+  const host = hostnameOf(normalizeBaseUrl(url));
+  if (!host) return false;
+  if (preset.id === "custom") return true;
+  if (preset.local) {
+    // Ollama/LAN: any host except other cloud LLM APIs.
+    return !KNOWN_CLOUD_LLM_HOSTS.has(host) || host === hostnameOf(preset.baseUrl);
+  }
+  if (preset.id === "moonshot") {
+    return (
+      host === "api.moonshot.ai" ||
+      host === "api.moonshot.cn" ||
+      host === "api.kimi.com" ||
+      host.endsWith(".moonshot.ai") ||
+      host.endsWith(".moonshot.cn") ||
+      host.endsWith(".kimi.com")
+    );
+  }
+  if (preset.id === "openrouter") {
+    return host === "openrouter.ai" || host.endsWith(".openrouter.ai");
+  }
+  if (preset.id === "openai") {
+    return host === "api.openai.com" || host.endsWith(".openai.com");
+  }
+  const presetHost = hostnameOf(preset.baseUrl);
+  return Boolean(presetHost && host === presetHost);
+}
+
+/** Prefer caller URL when compatible; otherwise the provider preset default. */
+export function coerceProviderBaseUrl(
+  providerId: LlmProviderId | string | null | undefined,
+  url: string | null | undefined,
+): string {
+  const preset = resolveProvider(providerId);
+  const raw = (url ?? "").trim();
+  if (raw && baseUrlCompatibleWithProvider(raw, preset.id)) {
+    return normalizeBaseUrl(raw);
+  }
+  return normalizeBaseUrl(preset.baseUrl);
 }

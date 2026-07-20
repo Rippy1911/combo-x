@@ -76,6 +76,29 @@ export function looksLikeLocalModelId(model: string): boolean {
   return true;
 }
 
+/** Strip OpenRouter `moonshotai/` (and `~` routing) prefixes for direct Moonshot. */
+export function moonshotNativeModelId(model: string): string {
+  let id = model.trim();
+  if (id.startsWith("~")) id = id.slice(1);
+  const m = /^moonshotai\/(.+)$/i.exec(id);
+  if (m?.[1]) id = m[1];
+  // OpenRouter marketing slug — Moonshot's current frontier default.
+  if (/^kimi-latest$/i.test(id)) return "kimi-k3";
+  return id;
+}
+
+/**
+ * Kimi K2/K3 fix temperature (and top_p / n / penalties) server-side —
+ * passing any other value returns invalid_request_error.
+ * @see https://platform.kimi.ai/docs/api/models-overview#temperature
+ */
+export function modelOmitsTemperature(model: string | null | undefined): boolean {
+  if (!model?.trim()) return false;
+  const id = moonshotNativeModelId(model).toLowerCase();
+  // kimi-k3, kimi-k2.6, kimi-k2.7-code(+highspeed), legacy kimi-k2.5 / kimi-k2*
+  return /^kimi-k\d/.test(id) || id === "kimi-latest";
+}
+
 export function normalizeModelId(
   model: string | null | undefined,
   providerId?: LlmProviderId | string | null,
@@ -87,6 +110,9 @@ export function normalizeModelId(
   // Switching to Ollama/custom with a leftover OpenRouter id → use local default
   if (provider.local && looksLikeCloudModelId(model)) {
     return provider.defaultOrchestratorModel;
+  }
+  if (provider.id === "moonshot") {
+    return moonshotNativeModelId(model);
   }
   // Switching to cloud with a bare local tag → use cloud default
   if (!provider.local && looksLikeLocalModelId(model) && !model.includes("kimi") && !model.startsWith("moonshot") && !model.startsWith("gpt-")) {

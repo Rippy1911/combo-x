@@ -209,6 +209,8 @@ export {
   resolveProviderBaseUrl,
   resolveProvider,
   normalizeBaseUrl,
+  baseUrlCompatibleWithProvider,
+  coerceProviderBaseUrl,
 } from "./llm/providers.js";
 export type { LlmProviderId, LlmProviderPreset } from "./llm/providers.js";
 
@@ -467,6 +469,8 @@ export {
   MODEL_PRESETS,
   MODEL_PASTE_HINT,
   normalizeModelId,
+  moonshotNativeModelId,
+  modelOmitsTemperature,
   defaultModelsForProvider,
   presetsForProvider,
   looksLikeCloudModelId,

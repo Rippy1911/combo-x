@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   apiKeyVaultLabel,
+  baseUrlCompatibleWithProvider,
   baseUrlVaultLabel,
+  coerceProviderBaseUrl,
   isProviderReady,
   LLM_API_KEY_LABEL,
   LLM_BASE_URL_KEY,
@@ -58,17 +60,41 @@ describe("llm providers", () => {
     expect(await resolveProviderApiKey("openai", get)).toBe("");
   });
 
-  it("resolveProviderBaseUrl prefers per-provider then shared for active", async () => {
+  it("resolveProviderBaseUrl prefers per-provider then compatible shared for active", async () => {
     const bag: Record<string, string> = {
       llm_provider: "moonshot",
-      [LLM_BASE_URL_KEY]: "https://shared.example/v1",
+      [LLM_BASE_URL_KEY]: "https://api.moonshot.cn/v1",
       llm_base_url_ollama: "http://192.168.1.5:11434/v1",
     };
     const get = async (l: string) => bag[l] ?? null;
     expect(await resolveProviderBaseUrl("ollama", get)).toBe("http://192.168.1.5:11434/v1");
-    expect(await resolveProviderBaseUrl("moonshot", get)).toBe("https://shared.example/v1");
+    expect(await resolveProviderBaseUrl("moonshot", get)).toBe("https://api.moonshot.cn/v1");
     expect(await resolveProviderBaseUrl("openrouter", get)).toBe(
       resolveProvider("openrouter").baseUrl,
     );
+  });
+
+  it("resolveProviderBaseUrl ignores OpenRouter leftover when resolving Moonshot", async () => {
+    const bag: Record<string, string> = {
+      llm_provider: "moonshot",
+      [LLM_BASE_URL_KEY]: "https://openrouter.ai/api/v1",
+      llm_base_url_moonshot: "https://openrouter.ai/api/v1",
+    };
+    const get = async (l: string) => bag[l] ?? null;
+    expect(await resolveProviderBaseUrl("moonshot", get)).toBe(
+      "https://api.moonshot.ai/v1",
+    );
+  });
+
+  it("coerceProviderBaseUrl rejects cross-provider hosts", () => {
+    expect(baseUrlCompatibleWithProvider("https://openrouter.ai/api/v1", "moonshot")).toBe(
+      false,
+    );
+    expect(
+      coerceProviderBaseUrl("moonshot", "https://openrouter.ai/api/v1"),
+    ).toBe("https://api.moonshot.ai/v1");
+    expect(
+      coerceProviderBaseUrl("moonshot", "https://api.moonshot.ai/v1/"),
+    ).toBe("https://api.moonshot.ai/v1");
   });
 });

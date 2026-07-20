@@ -1,5 +1,5 @@
 import {
-  normalizeBaseUrl,
+  coerceProviderBaseUrl,
   OpenRouterClient,
   resolveProvider,
   type LlmProviderId,
@@ -12,7 +12,8 @@ export function buildLlmClient(opts: {
   webSearchEnabled: boolean;
 }): OpenRouterClient {
   const preset = resolveProvider(opts.provider);
-  const baseUrl = normalizeBaseUrl(opts.baseUrl || preset.baseUrl);
+  // Coerce so a stale OpenRouter base never carries a Moonshot key.
+  const baseUrl = coerceProviderBaseUrl(opts.provider, opts.baseUrl);
   const enableOpenRouterServerTools =
     Boolean(preset.openRouterServerTools) && opts.webSearchEnabled !== false;
   return new OpenRouterClient({

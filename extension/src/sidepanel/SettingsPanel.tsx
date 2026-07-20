@@ -13,6 +13,7 @@ import {
   MODEL_PASTE_HINT,
   apiKeyVaultLabel,
   baseUrlVaultLabel,
+  coerceProviderBaseUrl,
   defaultModelsForProvider,
   modelVaultLabel,
   normalizeModelId,
@@ -316,7 +317,7 @@ export function SettingsPanel({
     const preset = resolveProvider(llmProvider);
     const m = normalizeModelId(customModel.trim() || model, preset.id);
     const w = normalizeModelId(customWorkerModel.trim() || workerModel, preset.id);
-    const base = llmBaseUrl.trim() || preset.baseUrl;
+    const base = coerceProviderBaseUrl(preset.id, llmBaseUrl);
     const keyLabel = apiKeyVaultLabel(preset.id);
     if (apiKey.trim()) {
       await vault.putByLabel(keyLabel, apiKey.trim());
@@ -344,7 +345,7 @@ export function SettingsPanel({
     setMsg("Testing LLM…");
     const preset = resolveProvider(llmProvider);
     const r = await probeLlmEndpoint({
-      baseUrl: llmBaseUrl.trim() || preset.baseUrl,
+      baseUrl: coerceProviderBaseUrl(preset.id, llmBaseUrl),
       apiKey,
       keyOptional: preset.keyOptional,
     });

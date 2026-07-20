@@ -3,6 +3,7 @@
  * Combo Phase B had stream/chat only — no tools. That blocked a real agent.
  */
 
+import { modelOmitsTemperature } from "../models.js";
 import { modalitySupportsVision } from "../vision/capability.js";
 
 /** OpenAI/OpenRouter multimodal content parts (text + image_url). */
@@ -289,7 +290,10 @@ export class OpenRouterClient {
     };
     const tools = this.mergeTools(input.tools);
     if (tools?.length) body.tools = tools;
-    if (input.temperature !== undefined) body.temperature = input.temperature;
+    // Kimi K2/K3 reject explicit temperature (fixed server-side).
+    if (input.temperature !== undefined && !modelOmitsTemperature(model)) {
+      body.temperature = input.temperature;
+    }
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
@@ -373,7 +377,9 @@ export class OpenRouterClient {
     }
     const tools = this.mergeTools(input.tools);
     if (tools?.length) body.tools = tools;
-    if (input.temperature !== undefined) body.temperature = input.temperature;
+    if (input.temperature !== undefined && !modelOmitsTemperature(model)) {
+      body.temperature = input.temperature;
+    }
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
@@ -507,7 +513,12 @@ export class OpenRouterClient {
     if (this.isOpenRouter()) {
       body.stream_options = { include_usage: true };
     }
-    if (input.temperature !== undefined) body.temperature = input.temperature;
+    if (
+      input.temperature !== undefined &&
+      !modelOmitsTemperature(input.model)
+    ) {
+      body.temperature = input.temperature;
+    }
     if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {

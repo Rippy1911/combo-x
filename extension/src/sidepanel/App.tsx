@@ -22,6 +22,7 @@ import {
   LLM_PROVIDER_PRESETS,
   apiKeyVaultLabel,
   baseUrlVaultLabel,
+  coerceProviderBaseUrl,
   defaultModelsForProvider,
   isProviderReady,
   modelVaultLabel,
@@ -852,9 +853,11 @@ export function App() {
       const get = (label: string) => vault.getByLabel(label);
       const key =
         providerCreds[pid]?.key ?? (await resolveProviderApiKey(pid, get));
-      const base =
+      const base = coerceProviderBaseUrl(
+        pid,
         providerCreds[pid]?.base ??
-        (await resolveProviderBaseUrl(pid, get, { activeProviderId: pid }));
+          (await resolveProviderBaseUrl(pid, get, { activeProviderId: pid })),
+      );
       const defaults = defaultModelsForProvider(pid);
       const orch = normalizeModelId(modelId, pid);
       const storedWorker = (await get(workerModelVaultLabel(pid)))?.trim();

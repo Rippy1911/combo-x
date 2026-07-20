@@ -130,6 +130,28 @@ describe("OpenRouterClient.chatStreaming", () => {
     expect(headers?.get("HTTP-Referer")).toBeNull();
     expect(headers?.get("X-Title")).toBeNull();
   });
+
+  it("omits temperature for Kimi models (API fixes sampling)", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response("data: [DONE]\n", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+    const client = new OpenRouterClient({
+      apiKey: "sk-moon",
+      baseUrl: "https://api.moonshot.ai/v1",
+      fetchImpl,
+    });
+    await client.chatStreaming({
+      model: "kimi-k3",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.2,
+    });
+    expect(body.temperature).toBeUndefined();
+  });
 });
 
 describe("OpenRouterClient.chat", () => {
