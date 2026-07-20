@@ -406,6 +406,16 @@ body {
   white-space: nowrap;
 }
 
+.model-picker-price {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-picker-pop {
   position: absolute;
   z-index: 40;
@@ -576,13 +586,16 @@ body {
 .chip-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  width: auto;
+  max-width: 100%;
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-family: var(--mono);
   font-size: 11px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .chip-toggle.on {
@@ -597,6 +610,7 @@ body {
 .tool-chip-grid {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 6px;
 }
 
@@ -1482,9 +1496,9 @@ body {
 }
 
 .composer textarea,
-.panel input,
+.panel input:not([type="checkbox"]):not([type="radio"]),
 .panel select,
-.onboarding input,
+.onboarding input:not([type="checkbox"]):not([type="radio"]),
 .onboarding select,
 .composer select {
   width: 100%;
@@ -1494,6 +1508,23 @@ body {
   color: var(--text);
   padding: 10px;
   font: inherit;
+}
+
+/* Checkboxes must stay intrinsic — panel width:100% was stretching tool chips. */
+.panel input[type="checkbox"],
+.panel input[type="radio"],
+.onboarding input[type="checkbox"],
+.onboarding input[type="radio"],
+.chip-toggle input,
+.tool-row input {
+  width: auto;
+  min-width: 1rem;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  accent-color: var(--accent);
 }
 
 .composer.composer-compact textarea,
@@ -1898,7 +1929,6 @@ button:disabled {
 
 .tool-row input {
   margin-top: 3px;
-  width: auto;
 }
 
 code {
@@ -1925,6 +1955,26 @@ code {
   background: color-mix(in srgb, var(--accent-dim) 35%, var(--bg));
   color: var(--text);
   max-width: 100%;
+}
+
+.attach-chip.muted {
+  opacity: 0.55;
+}
+
+.model-picker-section {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 8px 10px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-picker-provider {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 4px;
 }
 
 .attach-chip.done {

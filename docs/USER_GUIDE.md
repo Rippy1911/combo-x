@@ -15,8 +15,11 @@ vault). Nothing is sent to a Combo-X server.
 1. Install the extension (Chrome: load `extension/dist`; Firefox: see [FIREFOX](./FIREFOX.md)).
 2. Open the side panel and complete onboarding:
    - Set a **passphrase** — this derives the AES-GCM key for your secret vault.
-   - Paste your **API key** (BYOK — stored encrypted). Defaults to OpenRouter; change
-     provider / base URL in Settings (see [PROVIDERS](./PROVIDERS.md)).
+   - Paste your **API key** (BYOK — stored encrypted), or pick **Ollama** / custom for
+     local models (no key). You can save **several providers at once** (e.g. OpenRouter
+     + Moonshot/Kimi) — keys do not overwrite each other; the chat model picker lists
+     all ready providers. See [PROVIDERS](./PROVIDERS.md) and
+     [LOCAL_NETWORK](./LOCAL_NETWORK.md) for LAN / offline.
 
 ![Onboarding — local agent, your keys](./images/01-onboarding.png)
 
@@ -91,6 +94,14 @@ This keeps prompts small and cheap while still exposing deep capability. See
   the agent never acts destructively without me. → Approval mode `ask`.
 - **As a builder**, I want to inject a small script into a page and read data back
   safely, so that I can automate a site I trust. → Page extensions + permissioned bridge.
+- **As an operator**, I want private vs work vaults with different APIs.
+  → Multi-vault + recipes ([VAULTS](./VAULTS.md)).
+- **As a traveler**, I want Combo on LAN with Ollama, no cloud LLM.
+  → [LOCAL_NETWORK](./LOCAL_NETWORK.md).
+- **As a power user**, I want OpenRouter and Kimi keys both saved, and pick models from either in chat.
+  → Multi-provider vault keys ([PROVIDERS](./PROVIDERS.md)).
+- **As a maintainer**, I want Combo to open Cursor PRs on its own repo.
+  → `combo-self-improve` ([SELF_IMPROVE](./SELF_IMPROVE.md)).
 
 ## Use cases
 
@@ -127,6 +138,19 @@ Agent uses `combo-rag` to search an indexed local folder and any attached PDFs.
 > "Research three competitors and summarize each."
 
 Agent spawns scoped sub-agents, each with its own budget, and merges results.
+
+### 7. Restore an older vault sync
+> Vault → History… → Restore a prior ciphertext version after a bad Push.
+
+Cloud never sees your passphrase; history depth follows Free/Pro keep limits.
+
+### 8. Self-improve via Cursor
+> "Audit yourself and dispatch fixes to Cursor."
+
+Requires vault `cursor_api_key`. Merge PRs, rebuild, Reload temp add-on, continue.
+
+### 9. LAN + Ollama weekend
+> Point Combo API at `http://<lan-ip>:8050`, provider Ollama, work offline on the home LAN.
 
 ## Safety & privacy
 

@@ -54,6 +54,36 @@ export function redactToolResultSnippet(raw: unknown, max = RESULT_SNIPPET): str
   return snippet(scrubDataUrls(text), max);
 }
 
+/**
+ * Cap a mid-loop tool result for the LLM `messages[]` row.
+ * Full payload still goes to UI via tool_result events — this only shrinks the
+ * prompt replayed on every subsequent model turn.
+ */
+export function truncateToolResultForLlm(result: unknown, maxChars: number): string {
+  const cap = Math.max(256, maxChars);
+  let text: string;
+  if (typeof result === "string") {
+    try {
+      text = JSON.stringify(redactSensitiveDeep(JSON.parse(result)));
+    } catch {
+      text = result;
+    }
+  } else {
+    text = JSON.stringify(redactSensitiveDeep(result));
+  }
+  text = scrubDataUrls(text);
+  if (text.length <= cap) return text;
+  // Leave room for the envelope keys so the stored string stays near `cap`.
+  const previewBudget = Math.max(128, cap - 96);
+  const preview =
+    text.length > previewBudget ? `${text.slice(0, previewBudget)}…` : text;
+  return JSON.stringify({
+    truncated: true,
+    chars: text.length,
+    preview,
+  });
+}
+
 function collectToolResultLines(
   history: ChatMessage[],
   startIdx: number,

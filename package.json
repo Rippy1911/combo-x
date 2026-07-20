@@ -4,8 +4,8 @@
   "type": "module",
   "packageManager": "pnpm@9.15.4",
   "scripts": {
-    "build": "pnpm --filter @combo-x/extension build",
-    "build:firefox": "pnpm --filter @combo-x/extension build && node scripts/build-firefox.mjs",
+    "build": "pnpm --filter @combo-x/extension build && node scripts/build-firefox.mjs",
+    "build:firefox": "pnpm build",
     "dev": "pnpm --filter @combo-x/extension dev",
     "typecheck": "tsc --build",
     "test": "vitest run",

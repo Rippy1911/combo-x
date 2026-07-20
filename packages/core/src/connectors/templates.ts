@@ -38,7 +38,7 @@ export function githubRestTemplate(opts?: {
  * ns-fc-uploads protected tier (Bearer fcu_* in vault label `fc_uploads_key`).
  * Prefer tool `publish_upload` for multipart; this connector is for list/admin JSON calls.
  */
-export function uploadsRestTemplate(): RestConnector {
+export function uploadsRestTemplate(opts?: { vaultId?: string }): RestConnector {
   return {
     id: "ns-uploads",
     kind: "rest",
@@ -48,6 +48,7 @@ export function uploadsRestTemplate(): RestConnector {
       Authorization: { vaultLabel: "fc_uploads_key" },
       Accept: "application/json",
     },
+    vaultId: opts?.vaultId,
     tools: [
       {
         name: "list",
@@ -66,7 +67,7 @@ export function uploadsRestTemplate(): RestConnector {
 }
 
 /** ns-food nutrition API (Bearer nsk_* in vault label `ns_food_key`). */
-export function nsFoodRestTemplate(): RestConnector {
+export function nsFoodRestTemplate(opts?: { vaultId?: string }): RestConnector {
   return {
     id: "ns-food",
     kind: "rest",
@@ -76,6 +77,7 @@ export function nsFoodRestTemplate(): RestConnector {
       Authorization: { vaultLabel: "ns_food_key" },
       Accept: "application/json",
     },
+    vaultId: opts?.vaultId,
     tools: [
       {
         name: "search",
@@ -95,6 +97,60 @@ export function nsFoodRestTemplate(): RestConnector {
         path: "/v1/autocomplete",
         description: "Prefix autocomplete ?q=&locale=",
       },
+    ],
+  };
+}
+
+/** Anatome platform API (airon.coach / fitness data) — key in vault `anatome_api_key`. */
+export function anatomeRestTemplate(opts?: { vaultId?: string; vaultLabel?: string }): RestConnector {
+  const vaultLabel = opts?.vaultLabel?.trim() || "anatome_api_key";
+  return {
+    id: "anatome",
+    kind: "rest",
+    name: "Anatome",
+    baseUrl: "https://anatome.nextsolutions.studio",
+    headers: {
+      Authorization: { vaultLabel },
+      Accept: "application/json",
+    },
+    vaultId: opts?.vaultId,
+    tools: [
+      { name: "health", method: "GET", path: "/v1/health", description: "API health" },
+      { name: "exercises", method: "GET", path: "/v1/exercises", description: "List exercises" },
+    ],
+  };
+}
+
+/** IdeaForge portfolio hub — vault label `ideaforge_shared_api_key`. */
+export function ideaforgeRestTemplate(opts?: { vaultId?: string }): RestConnector {
+  return {
+    id: "ideaforge",
+    kind: "rest",
+    name: "IdeaForge",
+    baseUrl: "https://ideaforge.base44.app",
+    headers: {
+      "X-API-Key": { vaultLabel: "ideaforge_shared_api_key" },
+      Accept: "application/json",
+    },
+    vaultId: opts?.vaultId,
+  };
+}
+
+/** ns-exec VM bridge — vault label `ns_exec_token`. */
+export function nsExecRestTemplate(opts?: { vaultId?: string }): RestConnector {
+  return {
+    id: "ns-exec",
+    kind: "rest",
+    name: "NS Exec",
+    baseUrl: "https://ns-exec.nextsolutions.studio",
+    headers: {
+      Authorization: { vaultLabel: "ns_exec_token" },
+      Accept: "application/json",
+    },
+    vaultId: opts?.vaultId,
+    tools: [
+      { name: "health", method: "GET", path: "/health", description: "Proxy health" },
+      { name: "exec", method: "POST", path: "/exec", description: "Allowlisted command" },
     ],
   };
 }

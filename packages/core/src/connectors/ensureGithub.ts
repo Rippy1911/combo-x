@@ -33,7 +33,8 @@ export async function ensureGithubRestConnector(
   getSecret: GetSecretFn,
   opts?: { connectorId?: string; preferredVaultLabel?: string },
 ): Promise<EnsureGithubResult> {
-  const connectorId = (opts?.connectorId ?? "github-rest").trim() || "github-rest";
+  // Prefer `gh` (agent recipes); Settings also mirrors `github-rest`.
+  const connectorId = (opts?.connectorId ?? "gh").trim() || "gh";
   const preferred = opts?.preferredVaultLabel?.trim();
 
   let vaultLabel: string | undefined;

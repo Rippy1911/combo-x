@@ -1119,13 +1119,13 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "ensure_github_connector",
       description:
-        "One-shot: bind GitHub REST (api.github.com) to a vault PAT already saved (github_token, github_pat, or gh_combo_x). Creates/updates connector github-rest. Prefer over manual save_rest_connector for GitHub.",
+        "ALWAYS AVAILABLE. Bind api.github.com to a vault PAT (github_pat|github_token|gh_combo_x). Creates/updates connectors gh + github-rest. Then rest_request({ connectorId:\"gh\", method:\"GET\", path:\"/user\" }). Never echo the token. Prefer over manual save_rest_connector for GitHub.",
       parameters: {
         type: "object",
         properties: {
           connectorId: {
             type: "string",
-            description: "Default github-rest",
+            description: "Primary id (default gh). Also mirrors github-rest.",
           },
           vaultLabel: {
             type: "string",
@@ -1139,9 +1139,48 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "dispatch_cursor_agent",
+      description:
+        "ALWAYS AVAILABLE. Launch a Cursor Cloud Agent on a GitHub repo (default Rippy1911/combo-x) with autoCreatePR. Requires vault label cursor_api_key (or CURSOR_API_KEY). Use after skill_read combo-self-improve for audits. Never echo the key. Tell the user the watchUrl and when to reload the extension after PR merge.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Full self-contained brief for the cloud agent (files, acceptance, hard rules).",
+          },
+          repo: {
+            type: "string",
+            description: 'owner/repo (default Rippy1911/combo-x)',
+          },
+          model: {
+            type: "string",
+            description: "Cursor model id (default grok-4.5)",
+          },
+          ref: {
+            type: "string",
+            description: "Starting git ref (default main)",
+          },
+          name: {
+            type: "string",
+            description: "Short title used for branch slug",
+          },
+          branchName: {
+            type: "string",
+            description: "Optional explicit branch name",
+          },
+        },
+        required: ["prompt"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "rest_request",
       description:
-        "Call a configured REST connector. Headers resolve vault secret refs. Use ensure_github_connector or save_rest_connector first if missing. No hardcoded hosts.",
+        "Call a configured REST connector (skill_read combo-rest to unlock). Headers resolve vault secret refs. If gh missing: call ensure_github_connector first (always-on). No hardcoded hosts.",
       parameters: {
         type: "object",
         properties: {

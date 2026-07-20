@@ -85,8 +85,19 @@ const CURATED: Record<string, CatalogMeta> = {
       "Bind api.github.com to github_token / github_pat / gh_combo_x",
       "Finish PAT embed → rest_request without Settings handoff",
     ],
-    whenToUse: "User embedded a GitHub PAT; need github-rest before Contents/PR calls.",
+    whenToUse:
+      "Always-on. Vault has a GitHub PAT; create gh (+ github-rest) before rest_request.",
     whenNotToUse: "Non-GitHub APIs — use save_rest_connector.",
+  },
+  dispatch_cursor_agent: {
+    group: "connectors",
+    useCases: [
+      "Launch Cursor Cloud Agent on Rippy1911/combo-x (or another repo)",
+      "Self-audit → open PR with autoCreatePR",
+    ],
+    whenToUse:
+      "Always-on. Vault has cursor_api_key; user asked to fix/improve Combo via Cursor.",
+    whenNotToUse: "Tiny one-file tweak via GitHub Contents — skill_read combo-repo-ops.",
   },
   rest_request: {
     group: "connectors",
@@ -351,6 +362,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   list_connectors: "connectors",
   save_rest_connector: "connectors",
   ensure_github_connector: "connectors",
+  dispatch_cursor_agent: "connectors",
   rest_request: "connectors",
   mcp_list_tools: "connectors",
   mcp_call: "connectors",

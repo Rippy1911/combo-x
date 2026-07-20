@@ -44,4 +44,18 @@ describe("Vault", () => {
     const labels = await vault.listLabels();
     expect(labels.filter((l) => l === "openrouter_model")).toHaveLength(1);
   });
+
+  it("exportSealed / importSealed round-trip without unlock for export", async () => {
+    await vault.setPassphrase("seal-pass");
+    await vault.putByLabel("token", "abc");
+    await vault.lock();
+    const sealed = await vault.exportSealed();
+    expect(sealed?.format).toBe("combo-x-sealed-vault-v1");
+    expect(sealed?.entries.length).toBe(1);
+
+    const other = new Vault({ dbName: `test_vault_${crypto.randomUUID()}` });
+    await other.importSealed(sealed!);
+    expect(await other.unlock("seal-pass")).toBe(true);
+    await expect(other.getByLabel("token")).resolves.toBe("abc");
+  });
 });

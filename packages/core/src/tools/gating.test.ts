@@ -5,6 +5,7 @@ import {
   FORCE_ATTACH_TOOL_NAMES,
   SKILL_GATED_TOOL_NAMES,
   TOOL_PACKS,
+  effectiveToolHints,
   ensureForceAttachTools,
   initialActiveTools,
   isSkillGatedTool,
@@ -40,14 +41,27 @@ describe("tool gating", () => {
     expect(active).not.toContain("scrape_pdps");
   });
 
-  it("ensureForceAttachTools merges Vision Lab into non-empty allowlists", () => {
+  it("ensureForceAttachTools merges Vision Lab + connector setup into non-empty allowlists", () => {
     expect(FORCE_ATTACH_TOOL_NAMES).toContain("ux_critique");
+    expect(FORCE_ATTACH_TOOL_NAMES).toContain("ensure_github_connector");
     const next = ensureForceAttachTools(["navigate", "get_page"]);
     expect(next).toContain("navigate");
     expect(next).toContain("ux_critique");
     expect(next).toContain("annotate_screenshot");
     expect(next).toContain("page_css_preview");
+    expect(next).toContain("ensure_github_connector");
     expect(ensureForceAttachTools([])).toEqual([]);
+  });
+
+  it("connector setup tools are always-on (not skill-gated)", () => {
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("ensure_github_connector");
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("list_connectors");
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("save_rest_connector");
+    expect(ALWAYS_ON_TOOL_NAMES).toContain("dispatch_cursor_agent");
+    expect(FORCE_ATTACH_TOOL_NAMES).toContain("dispatch_cursor_agent");
+    expect(isSkillGatedTool("ensure_github_connector")).toBe(false);
+    expect(isSkillGatedTool("dispatch_cursor_agent")).toBe(false);
+    expect(isSkillGatedTool("rest_request")).toBe(true);
   });
 
   it("unlockFromHints expands active set", () => {
@@ -60,5 +74,12 @@ describe("tool gating", () => {
     expect(unlocked).toContain("scrape_pdps");
     expect(active).toContain("scrape_pdps");
     expect(isSkillGatedTool("scrape_pdps")).toBe(true);
+  });
+
+  it("effectiveToolHints merges live rest pack over stale IDB hints", () => {
+    const hints = effectiveToolHints("combo-rest", ["rest_request"]);
+    expect(hints).toEqual(expect.arrayContaining([...TOOL_PACKS.rest]));
+    expect(hints).toContain("mcp_call");
+    expect(effectiveToolHints("custom-skill", ["navigate"])).toEqual(["navigate"]);
   });
 });

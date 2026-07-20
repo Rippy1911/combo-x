@@ -18,6 +18,8 @@ export interface RestConnector {
   baseUrl: string;
   headers: Record<string, string | SecretRef>;
   tools?: RestToolSpec[];
+  /** When set, connector belongs to this vault (private/work isolation). */
+  vaultId?: string;
 }
 
 export interface McpConnector {
@@ -28,6 +30,7 @@ export interface McpConnector {
   url: string;
   headers: Record<string, string | SecretRef>;
   toolsCache?: unknown;
+  vaultId?: string;
 }
 
 export type Connector = RestConnector | McpConnector;
@@ -61,12 +64,14 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 export class ConnectorStore {
   constructor(private readonly dbName = DB_NAME) {}
 
-  async list(): Promise<Connector[]> {
+  async list(vaultId?: string | null): Promise<Connector[]> {
     const db = await openDb(this.dbName);
     try {
-      return await idbReq<Connector[]>(
+      const all = await idbReq<Connector[]>(
         db.transaction(STORE, "readonly").objectStore(STORE).getAll(),
       );
+      if (vaultId == null || vaultId === "") return all;
+      return all.filter((c) => !c.vaultId || c.vaultId === vaultId);
     } finally {
       db.close();
     }

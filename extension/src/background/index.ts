@@ -668,8 +668,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         try {
           const tab = await chrome.tabs.get(tabId);
-          if (tab.url?.startsWith("chrome://") || tab.url?.startsWith("chrome-extension://") ||
-              tab.url?.startsWith("about:") || tab.url?.startsWith("moz-extension://")) {
+          if (
+            tab.url?.startsWith("chrome://") ||
+            tab.url?.startsWith("chrome-extension://") ||
+            tab.url?.startsWith("about:") ||
+            tab.url?.startsWith("moz-extension://")
+          ) {
             sendResponse({ ok: false, error: "cannot pick on browser-internal pages" });
             break;
           }

@@ -19,6 +19,7 @@ const EXPECTED_SEED_NAMES = [
   "combo-pdf-attach",
   "combo-openapi-call",
   "combo-repo-ops",
+  "combo-self-improve",
 ] as const;
 
 const PLAYBOOK_ONLY = new Set([
@@ -30,10 +31,11 @@ const PLAYBOOK_ONLY = new Set([
   "combo-map",
   "combo-uploads",
   "combo-pdf-attach",
+  "combo-self-improve",
 ]);
 
 describe("SkillStore", () => {
-  it("seeds sixteen packs on empty db (unique names)", async () => {
+  it("seeds seventeen packs on empty db (unique names)", async () => {
     const defs = seedSkillDefinitions();
     expect(defs.map((d) => d.name).sort()).toEqual([...EXPECTED_SEED_NAMES].sort());
     expect(new Set(defs.map((d) => d.name)).size).toBe(EXPECTED_SEED_NAMES.length);
@@ -145,14 +147,12 @@ describe("SkillStore", () => {
     const rest = (await store2.list()).find((s) => s.name === "combo-rest");
     expect(rest?.tags).toContain(SEED_REVISION);
     expect(rest?.toolHints).toEqual(expect.arrayContaining([
-      "list_connectors",
-      "save_rest_connector",
-      "ensure_github_connector",
       "rest_request",
       "mcp_list_tools",
       "mcp_call",
     ]));
-    expect(rest?.toolHints).toHaveLength(6);
+    expect(rest?.toolHints).toHaveLength(3);
+    expect(rest?.body).toContain("ALWAYS ON");
   });
 
   it("rewrites incomplete combo-rest toolHints even without seed tag", async () => {
@@ -164,12 +164,42 @@ describe("SkillStore", () => {
       description: "agent rewrite",
       body: "Use rest_request only against saved connectors",
       tags: ["rest"],
-      toolHints: ["rest_request", "mcp_list_tools", "mcp_call"],
+      toolHints: ["rest_request"],
     });
     const store2 = new SkillStore({ dbName });
     const rest = (await store2.list()).find((s) => s.name === "combo-rest");
-    expect(rest?.body).toContain("ensure_github_connector");
-    expect(rest?.toolHints).toContain("ensure_github_connector");
+    expect(rest?.body).toContain("ALWAYS ON");
+    expect(rest?.toolHints).toEqual(expect.arrayContaining([...TOOL_PACKS.rest]));
+  });
+
+  it("refreshes every duplicate combo-rest row (not only Map last-write)", async () => {
+    const dbName = `skills_${crypto.randomUUID()}`;
+    const store = new SkillStore({ dbName, skipSeed: true });
+    const a = await store.save({
+      id: "rest-stale-a",
+      name: "combo-rest",
+      description: "stale A",
+      body: "Use rest_request only against saved connectors",
+      tags: ["rest"],
+      toolHints: ["rest_request", "mcp_list_tools", "mcp_call"],
+    });
+    const b = await store.save({
+      id: "rest-stale-b",
+      name: "combo-rest",
+      description: "stale B",
+      body: "Use rest_request only against saved connectors",
+      tags: ["rest"],
+      toolHints: ["rest_request"],
+    });
+    expect(a.id).toBe("rest-stale-a");
+    expect(b.id).toBe("rest-stale-b");
+    const store2 = new SkillStore({ dbName });
+    const byIdA = await store2.get("rest-stale-a");
+    const byIdB = await store2.get("rest-stale-b");
+    expect(byIdA?.toolHints).toContain("rest_request");
+    expect(byIdB?.toolHints).toContain("mcp_call");
+    const byName = await store2.getByName("combo-rest");
+    expect(byName?.toolHints).toEqual(expect.arrayContaining([...TOOL_PACKS.rest]));
   });
 
   it("drops toolHints that are not real tools", async () => {

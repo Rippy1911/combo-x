@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../llm/openrouter.js";
-import { historyFromUiTurns, leanHistory, scrubDataUrls } from "./leanHistory.js";
+import {
+  historyFromUiTurns,
+  leanHistory,
+  scrubDataUrls,
+  truncateToolResultForLlm,
+} from "./leanHistory.js";
 
 describe("leanHistory (T-LEAN-1)", () => {
   it("drops tool rows and keeps assistant crumbs", () => {
@@ -96,6 +101,33 @@ describe("leanHistory (T-LEAN-1)", () => {
     expect(String(msgs[1]?.content)).toContain("[redacted]");
     expect(String(msgs[1]?.content)).not.toContain("nope");
     expect(String(msgs[1]?.content)).toContain("ok");
+  });
+
+  it("truncateToolResultForLlm keeps small payloads and caps large ones", () => {
+    expect(truncateToolResultForLlm({ ok: true, n: 1 }, 4_000)).toBe(
+      JSON.stringify({ ok: true, n: 1 }),
+    );
+    const big = { text: "x".repeat(10_000) };
+    const capped = truncateToolResultForLlm(big, 4_000);
+    const parsed = JSON.parse(capped) as {
+      truncated: boolean;
+      chars: number;
+      preview: string;
+    };
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.chars).toBeGreaterThan(4_000);
+    expect(parsed.preview.length).toBeLessThan(4_000);
+    expect(capped.length).toBeLessThan(4_500);
+  });
+
+  it("truncateToolResultForLlm scrubs data URLs", () => {
+    const b64 = "B".repeat(200);
+    const capped = truncateToolResultForLlm(
+      { dataUrl: `data:image/png;base64,${b64}` },
+      4_000,
+    );
+    expect(capped).toContain("data:image…[redacted]");
+    expect(capped).not.toContain(b64);
   });
 
   it("scrubs megabase64 data URLs from crumbs", () => {

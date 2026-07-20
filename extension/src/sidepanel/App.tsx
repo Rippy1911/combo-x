@@ -15,14 +15,43 @@ import {
   DEFAULT_SKIP_DIRS,
   DEFAULT_WORKER_MODEL,
   MemoryStore,
+  LLM_ACTIVE_MODEL_LABEL,
+  LLM_ACTIVE_WORKER_MODEL_LABEL,
   LLM_BASE_URL_KEY,
   LLM_PROVIDER_KEY,
+  LLM_PROVIDER_PRESETS,
+  apiKeyVaultLabel,
+  baseUrlVaultLabel,
+  defaultModelsForProvider,
+  isProviderReady,
+  modelVaultLabel,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  workerModelVaultLabel,
+  hydrateCloudConfigFromVault,
   RagStore,
   SessionStore,
   SkillStore,
   Vault,
   ViewStore,
+  emptyRegistry,
+  ensureRegistryMigrated,
+  getActiveEntry,
+  openVaultFromEntry,
+  buildVaultPack,
+  cloudClientFromConfig,
+  loadCloudConfig,
+  loadDirectoryHandle,
+  mergeVaultPack,
+  packFromCiphertextB64,
+  packToCiphertextB64,
+  saveCloudConfig,
+  saveRegistry,
+  sealSetupPack,
+  setupPackToB64,
+  writeVaultPackToDirectory,
   type AgentToolMode,
+  type VaultRegistryState,
   extractTargetUrl,
   getProtocolVersion,
   historyFromUiTurns,
@@ -100,6 +129,8 @@ import { MessagesViewport } from "./MessagesViewport";
 import { SessionsDrawer } from "./SessionsDrawer";
 import { ToolAccessPicker } from "./ToolAccessPicker";
 import { TabBar } from "./TabBar";
+import { CloudVaultSection } from "./CloudVaultSection";
+import { VaultGate } from "./VaultGate";
 import { resolveEnabledToolsFromSetup } from "./setupApply";
 import {
   createEmptyRuntime,
@@ -109,14 +140,14 @@ import {
   type SessionRuntime,
   type SessionRuntimeMeta,
 } from "./sessionRuntime";
+import { useComboLink } from "./useComboLink";
 
 const APP_VERSION =
   typeof chrome !== "undefined" && chrome.runtime?.getManifest
     ? chrome.runtime.getManifest().version
     : "dev";
-const KEY_LABEL = "openrouter_api_key";
-const MODEL_LABEL = "openrouter_model";
-const WORKER_MODEL_LABEL = "openrouter_worker_model";
+const MODEL_LABEL = LLM_ACTIVE_MODEL_LABEL;
+const WORKER_MODEL_LABEL = LLM_ACTIVE_WORKER_MODEL_LABEL;
 const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const DETECT_SECRETS_KEY = "combo_x_detect_secrets";
 const APPROVAL_KEY = "combo_x_approval_mode";
@@ -182,6 +213,8 @@ type UiTurn = {
   content: string;
   createdAt?: string;
   bookmarked?: boolean;
+  /** Origin — Combo Link remote turns are badged in UI. */
+  source?: "local" | "link" | "mcp";
   attachments?: Array<{ id: string; name: string; kind: string }>;
   /** User-picked DOM elements attached to this turn. */
   picks?: PickedElementRef[];
@@ -326,7 +359,8 @@ function loadApproval(): ApprovalMode {
 }
 
 export function App() {
-  const vault = useMemo(() => new Vault(), []);
+  const [registry, setRegistry] = useState<VaultRegistryState>(() => emptyRegistry());
+  const [vault, setVault] = useState(() => new Vault());
   const memory = useMemo(() => new MemoryStore(), []);
   const skills = useMemo(() => new SkillStore(), []);
   const sessions = useMemo(() => new SessionStore(), []);
@@ -364,12 +398,14 @@ export function App() {
   const bridge = useMemo(() => createChromeBridge(), []);
 
   const [ready, setReady] = useState(false);
-  const [needsOnboarding, setNeedsOnboarding] = useState(true);
   const [locked, setLocked] = useState(false);
-  const [passphrase, setPassphrase] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [llmProvider, setLlmProvider] = useState<LlmProviderId>("openrouter");
   const [llmBaseUrl, setLlmBaseUrl] = useState(() => resolveProvider("openrouter").baseUrl);
+  /** Per-provider key + base for multi ModelPicker (refreshed on unlock / settings save). */
+  const [providerCreds, setProviderCreds] = useState<
+    Partial<Record<LlmProviderId, { key: string; base: string }>>
+  >({});
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     () => localStorage.getItem(WEB_SEARCH_KEY) !== "0",
   );
@@ -430,6 +466,7 @@ export function App() {
     secrets: PendingSecret[];
     picks: PickedElementRef[];
     activeTab?: ActiveTabContext;
+    source?: "local" | "link" | "mcp";
   };
   const [sendQueue, setSendQueue] = useState<QueuedSend[]>([]);
   const sendQueueRef = useRef<QueuedSend[]>([]);
@@ -456,6 +493,21 @@ export function App() {
   const historyRef = useRef<ChatMessage[]>([]);
   const runtimesRef = useRef<Map<string, SessionRuntime>>(new Map());
   const abortBySessionRef = useRef<Map<string, AbortController>>(new Map());
+  /** Combo Link — filled after useComboLink / send are defined */
+  const linkPersistRef = useRef<
+    ((session: ChatSession, running: boolean) => void | Promise<void>) | null
+  >(null);
+  const linkPublishRef = useRef<
+    | ((
+        events: Array<Record<string, unknown>>,
+        opts?: { sessionId?: string; commandId?: string },
+      ) => void | Promise<void>)
+    | null
+  >(null);
+  const sendRef = useRef<
+    (overrideText?: string, queued?: QueuedSend) => Promise<boolean>
+  >(async () => false);
+  const loadSessionRef = useRef<(id: string) => Promise<void>>(async () => {});
   const pendingApprovalBySessionRef = useRef<
     Map<
       string,
@@ -782,6 +834,53 @@ export function App() {
     setVaultLabels(await vault.listLabels());
   }, [vault]);
 
+  const readyProviders = useMemo(() => {
+    return LLM_PROVIDER_PRESETS.filter((p) =>
+      isProviderReady(p, providerCreds[p.id]?.key),
+    ).map((p) => ({
+      id: p.id,
+      label: p.label,
+      apiKey: providerCreds[p.id]?.key ?? "",
+      baseUrl: providerCreds[p.id]?.base ?? p.baseUrl,
+      keyOptional: p.keyOptional,
+    }));
+  }, [providerCreds]);
+
+  const selectProviderModel = useCallback(
+    async (pid: LlmProviderId, modelId: string) => {
+      const preset = resolveProvider(pid);
+      const get = (label: string) => vault.getByLabel(label);
+      const key =
+        providerCreds[pid]?.key ?? (await resolveProviderApiKey(pid, get));
+      const base =
+        providerCreds[pid]?.base ??
+        (await resolveProviderBaseUrl(pid, get, { activeProviderId: pid }));
+      const defaults = defaultModelsForProvider(pid);
+      const orch = normalizeModelId(modelId, pid);
+      const storedWorker = (await get(workerModelVaultLabel(pid)))?.trim();
+      const worker = normalizeModelId(storedWorker || defaults.worker, pid);
+      setLlmProvider(pid);
+      setApiKey(key);
+      setLlmBaseUrl(base);
+      setModel(orch);
+      setWorkerModel(worker);
+      setCustomModel(orch);
+      setCustomWorkerModel(worker);
+      if (preset.local) setWebSearchEnabled(false);
+      void (async () => {
+        await vault.putByLabel(LLM_PROVIDER_KEY, pid);
+        await vault.putByLabel(MODEL_LABEL, orch);
+        await vault.putByLabel(WORKER_MODEL_LABEL, worker);
+        await vault.putByLabel(modelVaultLabel(pid), orch);
+        await vault.putByLabel(workerModelVaultLabel(pid), worker);
+        await vault.putByLabel(LLM_BASE_URL_KEY, base);
+        await vault.putByLabel(baseUrlVaultLabel(pid), base);
+      })();
+      setStatus(`Provider → ${preset.label} · ${orch}`);
+    },
+    [providerCreds, vault],
+  );
+
   const refreshSessions = useCallback(async () => {
     setSessionList(await sessions.list(40));
   }, [sessions]);
@@ -797,6 +896,7 @@ export function App() {
           bookmarked: t.bookmarked,
           usage: t.usage,
           tools: t.tools,
+          source: t.source,
         };
         if (t.role === "assistant" && t.blocks?.length) {
           base.blocks = t.blocks;
@@ -830,6 +930,8 @@ export function App() {
           localStorage.setItem(LAST_SESSION_KEY, updated.id);
         }
         await refreshSessions();
+        // Combo Link / chat sync — best-effort (refs filled after hook mounts)
+        void linkPersistRef.current?.(updated, false);
       } catch (err) {
         console.error("[persistSession] failed", err);
         if (activeSessionIdRef.current === updated.id) {
@@ -842,34 +944,70 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
-      const initialized = await vault.isInitialized();
-      setNeedsOnboarding(!initialized);
-      if (initialized) setLocked(true);
+      const state = await ensureRegistryMigrated();
+      setRegistry(state);
+      const entry = getActiveEntry(state);
+      if (entry) {
+        setVault(openVaultFromEntry(entry));
+        setLocked(true);
+      } else {
+        setVault(new Vault());
+        setLocked(false);
+      }
       setReady(true);
       await refreshSessions();
     })();
-  }, [refreshSessions, vault]);
+  }, [refreshSessions]);
 
-  const afterUnlock = useCallback(async () => {
-    const key = await vault.getByLabel(KEY_LABEL);
-    const storedProvider = await vault.getByLabel(LLM_PROVIDER_KEY);
+  const refreshProviderCreds = useCallback(async (v: Vault) => {
+    const get = (label: string) => v.getByLabel(label);
+    const next: Partial<Record<LlmProviderId, { key: string; base: string }>> = {};
+    for (const p of LLM_PROVIDER_PRESETS) {
+      next[p.id] = {
+        key: await resolveProviderApiKey(p.id, get),
+        base: await resolveProviderBaseUrl(p.id, get),
+      };
+    }
+    setProviderCreds(next);
+  }, []);
+
+  const afterUnlock = useCallback(async (activeVault?: Vault) => {
+    const v = activeVault ?? vault;
+    // Restore Combo API base / sync token from vault labels (LAN config survives)
+    await hydrateCloudConfigFromVault((label) => v.getByLabel(label));
+    const get = (label: string) => v.getByLabel(label);
+    const storedProvider = await v.getByLabel(LLM_PROVIDER_KEY);
     const provider = resolveProvider(storedProvider);
     setLlmProvider(provider.id);
-    const storedBase = await vault.getByLabel(LLM_BASE_URL_KEY);
-    setLlmBaseUrl(storedBase?.trim() || provider.baseUrl);
-    let storedModel = await vault.getByLabel(MODEL_LABEL);
-    const normalized = normalizeModelId(storedModel);
-    if (storedModel !== normalized) {
-      await vault.putByLabel(MODEL_LABEL, normalized);
+    const key = await resolveProviderApiKey(provider.id, get);
+    const storedBase = await resolveProviderBaseUrl(provider.id, get, {
+      activeProviderId: provider.id,
+    });
+    setLlmBaseUrl(storedBase);
+    let storedModel =
+      (await v.getByLabel(modelVaultLabel(provider.id))) ||
+      (await v.getByLabel(MODEL_LABEL));
+    const normalized = normalizeModelId(storedModel, provider.id);
+    if (storedModel && storedModel !== normalized) {
+      await v.putByLabel(MODEL_LABEL, normalized);
       storedModel = normalized;
     }
-    setModel(normalized);
-    const storedWorker = await vault.getByLabel(WORKER_MODEL_LABEL);
-    setWorkerModel(storedWorker ? normalizeModelId(storedWorker) : DEFAULT_WORKER_MODEL);
-    if (key) setApiKey(key);
-    setNeedsOnboarding(!key && !provider.keyOptional);
+    if (normalized) setModel(normalized);
+    const storedWorker =
+      (await v.getByLabel(workerModelVaultLabel(provider.id))) ||
+      (await v.getByLabel(WORKER_MODEL_LABEL));
+    const workerNorm = storedWorker
+      ? normalizeModelId(storedWorker, provider.id)
+      : provider.defaultWorkerModel;
+    setWorkerModel(workerNorm);
+    if (storedWorker && storedWorker !== workerNorm) {
+      await v.putByLabel(WORKER_MODEL_LABEL, workerNorm);
+    }
+    if (provider.local) setWebSearchEnabled(false);
+    setApiKey(key);
     setLocked(false);
-    await refreshVaultLabels();
+    setVaultLabels(await v.listLabels());
+    await refreshProviderCreds(v);
     setRagMeta(await rag.getMeta());
     setActiveAgentId(await agentProfiles.getActiveId());
     setAgentList(await agentProfiles.list());
@@ -917,48 +1055,19 @@ export function App() {
         localStorage.setItem(LAST_SESSION_KEY, s.id);
       }
     }
-    setStatus("Unlocked");
-  }, [agentProfiles, connectorStore, currentSession, rag, refreshVaultLabels, sessions, vault]);
-
-  const unlockExisting = useCallback(async () => {
-    const ok = await vault.unlock(passphrase);
-    if (!ok) return setStatus("Wrong passphrase");
-    await afterUnlock();
-  }, [afterUnlock, passphrase, vault]);
-
-  const completeOnboarding = useCallback(async () => {
-    const provider = resolveProvider(llmProvider);
-    if (!passphrase) return setStatus("Passphrase required");
-    if (!apiKey.trim() && !provider.keyOptional) {
-      return setStatus("Passphrase + API key required");
+    if (!key && !provider.keyOptional) {
+      setStatus(
+        `Unlocked — add ${provider.label} key in Settings (${apiKeyVaultLabel(provider.id)}) before chatting`,
+      );
+    } else {
+      setStatus("Unlocked");
     }
-    const initialized = await vault.isInitialized();
-    if (!initialized) await vault.setPassphrase(passphrase);
-    else if (!(await vault.unlock(passphrase))) return setStatus("Wrong passphrase");
-    const m = normalizeModelId(model);
-    const w = normalizeModelId(workerModel);
-    if (apiKey.trim()) await vault.putByLabel(KEY_LABEL, apiKey.trim());
-    await vault.putByLabel(LLM_PROVIDER_KEY, provider.id);
-    await vault.putByLabel(LLM_BASE_URL_KEY, llmBaseUrl.trim() || provider.baseUrl);
-    await vault.putByLabel(MODEL_LABEL, m);
-    await vault.putByLabel(WORKER_MODEL_LABEL, w);
-    setLlmProvider(provider.id);
-    setLlmBaseUrl(llmBaseUrl.trim() || provider.baseUrl);
-    setModel(m);
-    setWorkerModel(w);
-    setNeedsOnboarding(false);
-    setLocked(false);
-    const s = await sessions.create("New chat");
-    setCurrentSession(s);
-    await refreshVaultLabels();
-    setTab("chat");
   }, [
-    apiKey,
-    llmBaseUrl,
-    llmProvider,
-    model,
-    workerModel,
-    passphrase,
+    agentProfiles,
+    connectorStore,
+    currentSession,
+    rag,
+    refreshProviderCreds,
     refreshVaultLabels,
     sessions,
     vault,
@@ -1247,7 +1356,10 @@ export function App() {
     if (!vault.isUnlocked()) return setStatus("Unlock vault first");
     try {
       setStatus("Building outbound preview…");
-      const key = (await vault.getByLabel(KEY_LABEL)) ?? "preview";
+      const key =
+        (await resolveProviderApiKey(llmProvider, (l) => vault.getByLabel(l))) ||
+        apiKey ||
+        "preview";
       const llm = buildLlmClient({
         apiKey: key,
         provider: llmProvider,
@@ -1256,8 +1368,14 @@ export function App() {
       });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
-      const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
-      const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
+      const runModel = normalizeModelId(
+        activeProfile?.orchestratorModel ?? model,
+        llmProvider,
+      );
+      const runWorker = normalizeModelId(
+        activeProfile?.workerModel ?? workerModel,
+        llmProvider,
+      );
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runToolMode: AgentToolMode = activeProfile?.toolMode ?? "skill_gated";
       const runTools =
@@ -1378,9 +1496,11 @@ export function App() {
 
   const send = useCallback(
     async (overrideText?: string, queued?: QueuedSend): Promise<boolean> => {
-      const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
-      if (activeId && runtimesRef.current.get(activeId)?.running) return false;
-      if (!activeId && runningRef.current) return false;
+      // Busy-check the *target* session (Link may send to a non-active chat).
+      const targetId =
+        queued?.sessionId ?? activeSessionIdRef.current ?? currentSession?.id ?? null;
+      if (targetId && runtimesRef.current.get(targetId)?.running) return false;
+      if (!targetId && runningRef.current) return false;
       let text = (overrideText ?? (queued ? queued.text : input)).trim();
       const pending = queued?.attachments ?? pendingAttachments;
       // Snapshot immediately — React state may clear before await points below.
@@ -1420,10 +1540,15 @@ export function App() {
       }
 
       const provider = resolveProvider(llmProvider);
-      const key = apiKey || (await vault.getByLabel(KEY_LABEL)) || "";
+      const key =
+        apiKey.trim() ||
+        (await resolveProviderApiKey(llmProvider, (l) => vault.getByLabel(l))) ||
+        "";
       if (!key.trim() && !provider.keyOptional) {
-        setTab("settings");
-        setStatus("Missing API key — add it in Settings");
+        // Stay on Chat — forced tab switch felt like a redirect bug.
+        setStatus(
+          `Missing API key for ${provider.label}. Open Settings → LLM and paste your key (vault label ${apiKeyVaultLabel(provider.id)}), or pick a model from another configured provider / Ollama.`,
+        );
         return false;
       }
 
@@ -1436,9 +1561,20 @@ export function App() {
             : "");
 
       let session = currentSession;
+      if (queued?.sessionId && queued.sessionId !== session?.id) {
+        const targeted = await sessions.get(queued.sessionId);
+        if (targeted) session = targeted;
+      }
       if (!session) {
-        session = await sessions.create(displayText.slice(0, 60) || "Attachments");
-        setCurrentSession(session);
+        session = await sessions.create(displayText.slice(0, 60) || "Attachments", {
+          source: queued?.source,
+        });
+        if (!activeSessionIdRef.current || queued?.source === "link") {
+          setCurrentSession(session);
+        }
+      } else if (queued?.source === "link" && !session.source) {
+        session = { ...session, source: "link" };
+        await sessions.save(session);
       }
 
       if (!overrideText && !queued) setInput("");
@@ -1495,6 +1631,7 @@ export function App() {
         role: "user",
         content: displayText,
         createdAt: nowIso,
+        source: queued?.source ?? "local",
         attachments: pending.map((p) => ({ id: p.id, name: p.name, kind: p.kind })),
         picks: picks.length ? picks : undefined,
         activeTab: tabSnap,
@@ -1568,8 +1705,14 @@ export function App() {
       const omitComboWebSearch = shouldOmitComboWebSearch(llmProvider, webSearchEnabled);
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
-      const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
-      const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
+      const runModel = normalizeModelId(
+        activeProfile?.orchestratorModel ?? model,
+        llmProvider,
+      );
+      const runWorker = normalizeModelId(
+        activeProfile?.workerModel ?? workerModel,
+        llmProvider,
+      );
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runApproval = activeProfile?.approvalMode ?? approvalModeRef.current;
       // Prefer composer override; profile maxSteps only if explicitly stored (not resolve default 32).
@@ -1683,6 +1826,29 @@ export function App() {
       };
 
       const onEvent = (event: AgentEvent) => {
+        // Mirror select events to Combo Link portal (TLS relay — not E2E)
+        if (
+          event.type === "assistant_delta" ||
+          event.type === "reasoning_delta" ||
+          event.type === "tool_start" ||
+          event.type === "tool_result" ||
+          event.type === "status" ||
+          event.type === "done" ||
+          event.type === "error"
+        ) {
+          void linkPublishRef.current?.(
+            [
+              {
+                type: event.type,
+                session_id: boundId,
+                message: event.message,
+                tool: event.tool,
+                toolCallId: event.toolCallId,
+              },
+            ],
+            { sessionId: boundId },
+          );
+        }
         if (event.type === "status" && event.message) {
           if (event.message.startsWith("Calling model")) {
             if (isBoundActive()) setPlanningTool(null);
@@ -1716,6 +1882,17 @@ export function App() {
             resolve: event.resolve,
           };
           pendingApprovalBySessionRef.current.set(boundId, pending);
+          void linkPublishRef.current?.(
+            [
+              {
+                type: "tool_approval",
+                session_id: boundId,
+                tool: pending.tool,
+                args: pending.args,
+              },
+            ],
+            { sessionId: boundId },
+          );
           if (!isBoundActive()) {
             rt.unread = true;
             publishStatus(`Needs approval: ${pending.tool}`);
@@ -2145,6 +2322,163 @@ export function App() {
     vault,
   ]);
 
+  // Keep refs fresh for Combo Link command handlers
+  sendRef.current = send;
+  loadSessionRef.current = loadSession;
+
+  const comboLink = useComboLink(!locked && vault.isUnlocked(), sessions, {
+    onLinkSend: async ({ sessionId, text, createNew }) => {
+      try {
+        let sid = sessionId;
+        if (createNew || !sid) {
+          const created = await sessions.create(text.slice(0, 60) || "Link chat", {
+            source: "link",
+          });
+          sid = created.id;
+          await loadSessionRef.current(sid);
+        } else {
+          const existing = await sessions.get(sid);
+          if (!existing) {
+            return { ok: false, error: "session not found" };
+          }
+          await loadSessionRef.current(sid);
+        }
+        const ok = await sendRef.current(text, {
+          sessionId: sid!,
+          text,
+          attachments: [],
+          secrets: [],
+          picks: [],
+          source: "link",
+        });
+        return ok
+          ? { ok: true, sessionId: sid }
+          : { ok: false, sessionId: sid, error: "send rejected (busy or locked)" };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    onLinkAbort: (sessionId) => {
+      const sid = sessionId ?? activeSessionIdRef.current;
+      if (!sid) {
+        abortRef.current?.abort();
+        return;
+      }
+      const c = abortBySessionRef.current.get(sid);
+      c?.abort();
+    },
+    onLinkApproval: (sessionId, allow) => {
+      const sid = sessionId ?? activeSessionIdRef.current;
+      if (!sid) return;
+      const pending = pendingApprovalBySessionRef.current.get(sid);
+      if (!pending) return;
+      pending.resolve(allow);
+      pendingApprovalBySessionRef.current.delete(sid);
+      if (activeSessionIdRef.current === sid) setPendingApproval(null);
+    },
+    getSessionSnapshot: (sessionId) => {
+      const rt = runtimesRef.current.get(sessionId);
+      const turnsLocal = (rt?.turns as UiTurn[] | undefined) ?? [];
+      if (!turnsLocal.length && currentSession?.id === sessionId) {
+        return {
+          title: currentSession.title,
+          running: !!rt?.running,
+          messages: turns.map((t) => ({
+            id: t.id,
+            role: t.role,
+            content: t.content,
+            createdAt: t.createdAt,
+            source: t.source,
+          })),
+        };
+      }
+      if (!turnsLocal.length) return null;
+      return {
+        title: turnsLocal.find((t) => t.role === "user")?.content.slice(0, 60) || "Chat",
+        running: !!rt?.running,
+        messages: turnsLocal.map((t) => ({
+          id: t.id,
+          role: t.role,
+          content: t.content,
+          createdAt: t.createdAt,
+          source: t.source,
+        })),
+      };
+    },
+    getVault: () => (vault.isUnlocked() ? vault : null),
+    getActiveVaultId: () => registry.activeId,
+    onSyncPushNow: async (_scopes) => {
+      try {
+        const cfg = loadCloudConfig();
+        if (!cfg?.syncToken) return { ok: false, error: "no sync token" };
+        if (!vault.isUnlocked()) return { ok: false, error: "vault locked" };
+        const client = cloudClientFromConfig(cfg);
+        const pack = await buildVaultPack(registry.vaults);
+        const nextVersion = (cfg.packVersion || 0) + 1;
+        const res = await client.syncPush({
+          scope: "vault",
+          version: nextVersion,
+          prev_version: cfg.packVersion || undefined,
+          ciphertext_b64: packToCiphertextB64(pack),
+        });
+        if (!res.ok) return { ok: false, error: res.error ?? "vault push failed" };
+        const ver = res.version ?? nextVersion;
+        let setupVer = cfg.setupPackVersion ?? 0;
+        const activeId = registry.activeId ?? "";
+        if (activeId) {
+          const store = new ConnectorStore();
+          const list = await store.list(activeId);
+          if (list.length) {
+            const entry = registry.vaults.find((v) => v.id === activeId);
+            const sealed = await sealSetupPack(vault, {
+              vaultId: activeId,
+              vaultName: entry?.name,
+              connectors: list,
+            });
+            const nextSetup = setupVer + 1;
+            const sRes = await client.syncPush({
+              scope: "setup",
+              version: nextSetup,
+              prev_version: setupVer || undefined,
+              ciphertext_b64: setupPackToB64(sealed),
+            });
+            if (sRes.ok) setupVer = sRes.version ?? nextSetup;
+          }
+        }
+        saveCloudConfig({ ...cfg, packVersion: ver, setupPackVersion: setupVer });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    onRestoreVaultPack: async (ciphertextB64, version) => {
+      try {
+        const pack = packFromCiphertextB64(ciphertextB64);
+        const { state, imported } = await mergeVaultPack(registry, pack);
+        saveRegistry(state);
+        setRegistry(state);
+        const cfg = loadCloudConfig();
+        if (cfg) saveCloudConfig({ ...cfg, packVersion: version });
+        // Restored salt/ciphertext may not match the live KEK — force re-unlock.
+        if (vault.isUnlocked()) {
+          await vault.lock();
+          setLocked(true);
+        }
+        return imported.length
+          ? { ok: true }
+          : { ok: false, error: "no vaults imported" };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  });
+
+  linkPublishRef.current = comboLink.publishLinkEvents;
+  linkPersistRef.current = async (session, running) => {
+    await comboLink.pushLinkSnapshot(session, running);
+    await comboLink.syncSessionCloud(session);
+  };
+
   useEffect(() => {
     const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
     if (!activeId) return;
@@ -2178,69 +2512,19 @@ export function App() {
     );
   }
 
-  if ((needsOnboarding && !vault.isUnlocked() && !locked) || (locked && !vault.isUnlocked())) {
-    const isUnlock = locked || (!needsOnboarding && !vault.isUnlocked());
+  if (!vault.isUnlocked()) {
     return (
-      <div className="app">
-        <header className="header">
-          <div className="brand">
-            Combo<span>-X</span>
-            <span className="brand-version" title={`Protocol ${getProtocolVersion()}`}>
-              v{APP_VERSION}
-            </span>
-          </div>
-        </header>
-        <div className="onboarding">
-          <h1>{isUnlock ? "Unlock vault" : "Local agent. Your keys."}</h1>
-          {!isUnlock ? (
-            <p>
-              Encrypted vault (AES-GCM). BYOK via OpenRouter, OpenAI, Ollama, or any OpenAI-compatible
-              endpoint. Sessions persist locally. Sync is planned — not in this build.
-            </p>
-          ) : null}
-          <input
-            type="password"
-            value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
-            placeholder="passphrase"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void (isUnlock ? unlockExisting() : completeOnboarding());
-            }}
-          />
-          {!isUnlock ? (
-            <>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={resolveProvider(llmProvider).keyPlaceholder}
-              />
-              <ModelPicker
-                value={model}
-                apiKey={apiKey}
-                baseUrl={llmBaseUrl}
-                keyOptional={resolveProvider(llmProvider).keyOptional}
-                onChange={setModel}
-              />
-            </>
-          ) : null}
-          <div className="row">
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void (isUnlock ? unlockExisting() : completeOnboarding())}
-            >
-              {isUnlock ? "Unlock" : "Start"}
-            </button>
-            {!isUnlock ? (
-              <button type="button" onClick={() => setLocked(true)}>
-                Unlock existing
-              </button>
-            ) : null}
-          </div>
-          {status ? <p className="hint">{status}</p> : null}
-        </div>
-      </div>
+      <VaultGate
+        appVersion={APP_VERSION}
+        protocolVersion={getProtocolVersion()}
+        registry={registry}
+        onRegistryChange={setRegistry}
+        vault={vault}
+        onVaultChange={setVault}
+        onUnlocked={(v) => afterUnlock(v)}
+        status={status}
+        setStatus={setStatus}
+      />
     );
   }
 
@@ -2252,6 +2536,27 @@ export function App() {
           <span className="brand-version" title={`Protocol ${getProtocolVersion()}`}>
             v{APP_VERSION}
           </span>
+          {comboLink.linkConfig.linkEnabled ? (
+            <span
+              className="brand-version"
+              title={
+                comboLink.linkStatus === "online"
+                  ? "Combo Link online — portal can drive this device"
+                  : comboLink.linkError || `Combo Link: ${comboLink.linkStatus}`
+              }
+              style={{
+                marginLeft: 6,
+                color:
+                  comboLink.linkStatus === "online"
+                    ? "#16a34a"
+                    : comboLink.linkStatus === "error"
+                      ? "#dc2626"
+                      : undefined,
+              }}
+            >
+              {comboLink.linkStatus === "online" ? "Link·on" : "Link·…"}
+            </span>
+          ) : null}
         </div>
         <TabBar
           className="header-tabs"
@@ -2724,6 +3029,11 @@ export function App() {
                               {t.delivery === "stream" ? "sse" : "full"}
                             </span>
                           ) : null}
+                          {t.role === "user" && t.source === "link" ? (
+                            <span className="delivery-pill stream" title="Sent via Combo Link (portal)">
+                              link
+                            </span>
+                          ) : null}
                           {t.role === "user" ? (
                             <button
                               type="button"
@@ -2849,6 +3159,11 @@ export function App() {
                 </div>
               ) : null}
               {status && running ? <div className="bubble system">{status}</div> : null}
+              {status && !running ? (
+                <div className="bubble system" role="status">
+                  {status}
+                </div>
+              ) : null}
             </div>
             <PreviewDrawer
               preview={preview}
@@ -2897,11 +3212,18 @@ export function App() {
                 value={model}
                 apiKey={apiKey}
                 baseUrl={llmBaseUrl}
+                providerId={llmProvider}
                 keyOptional={resolveProvider(llmProvider).keyOptional}
-                title="Search and select a model"
+                title="Search models across configured providers"
+                multi={readyProviders}
+                activeProviderId={llmProvider}
                 onChange={(id) => {
                   setModel(id);
                   void vault.putByLabel(MODEL_LABEL, id);
+                  void vault.putByLabel(modelVaultLabel(llmProvider), id);
+                }}
+                onSelectProviderModel={(pid, modelId) => {
+                  void selectProviderModel(pid, modelId);
                 }}
               />
               <label className="steps-pick" title="Max orchestrator turns for the next send">
@@ -3373,12 +3695,27 @@ export function App() {
           onLockVault={() => {
             void (async () => {
               abortRef.current?.abort();
+              try {
+                const handle = await loadDirectoryHandle();
+                if (handle && registry.vaults.length) {
+                  const pack = await buildVaultPack(registry.vaults);
+                  await writeVaultPackToDirectory(handle, pack);
+                }
+              } catch {
+                /* best-effort disk autosave */
+              }
               await vault.lock();
               setLocked(true);
               setApiKey("");
             })();
           }}
-          onRefreshVaultLabels={() => void refreshVaultLabels()}
+          vaultLabels={vaultLabels}
+          onRefreshVaultLabels={() => {
+            void (async () => {
+              await refreshVaultLabels();
+              await refreshProviderCreds(vault);
+            })();
+          }}
         />
       ) : null}
 
@@ -3386,16 +3723,43 @@ export function App() {
         <div className="panel">
           <h2>Vault</h2>
           <p className="hint wrap">
-            Yes — secrets (API keys, model prefs) are AES-GCM encrypted with a key derived from your
-            passphrase (PBKDF2). Bookmarks/reports/sessions are local plaintext IndexedDB for now
-            (encrypt-at-rest for those is a sync-design item).
+            Secrets are AES-GCM encrypted with your passphrase. Manage vaults, disk backup, and Combo
+            Cloud sync here. LLM API keys still live under Settings → LLM provider.
           </p>
+          <CloudVaultSection
+            vault={vault}
+            registry={registry}
+            onRegistryChange={setRegistry}
+            linkEnabled={comboLink.linkConfig.linkEnabled}
+            syncChats={comboLink.linkConfig.syncChats}
+            linkStatus={comboLink.linkStatus}
+            linkError={comboLink.linkError}
+            onLinkConfigChange={(partial) => {
+              comboLink.setLinkConfig(partial);
+            }}
+            onPullSessions={() => comboLink.pullSessionsCloud()}
+            onSwitchVault={async (nextVault) => {
+              abortRef.current?.abort();
+              await vault.lock();
+              setVault(nextVault);
+              setApiKey("");
+              setLocked(true);
+              setStatus("Switched vault — unlock with passphrase");
+            }}
+            locked={locked}
+          />
+          <h3>Labels in this vault</h3>
+          <p className="hint wrap">Names only — values stay encrypted.</p>
           <ul className="list">
-            {vaultLabels.map((l) => (
-              <li key={l}>
-                <code>{l}</code>
-              </li>
-            ))}
+            {vaultLabels.length === 0 ? (
+              <li className="hint">No labels yet</li>
+            ) : (
+              vaultLabels.map((l) => (
+                <li key={l}>
+                  <code>{l}</code>
+                </li>
+              ))
+            )}
           </ul>
         </div>
       ) : null}

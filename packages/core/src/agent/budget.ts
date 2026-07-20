@@ -9,6 +9,9 @@ export const NORMAL_GET_PAGE_CHARS = 12_000;
 /** Lean chat history cap (prior turns only — never tool schemas / TOOL INDEX). */
 export const BUDGET_LEAN_HISTORY_CHARS = 16_000;
 export const NORMAL_LEAN_HISTORY_CHARS = 24_000;
+/** Mid-loop tool row cap in orchestrator messages[] (UI Preview keeps full result). */
+export const BUDGET_MID_LOOP_TOOL_CHARS = 2_000;
+export const NORMAL_MID_LOOP_TOOL_CHARS = 4_000;
 
 /**
  * System addon for budget runs.
@@ -19,6 +22,7 @@ export const BUDGET_SYSTEM_ADDON = `BUDGET MODE (minimize tokens & steps — too
 - Full TOOL INDEX and ACTIVE tool schemas remain available. Do not claim tools are missing or truncated.
 - Prefer page_digest over get_page. get_page mode=full is REJECTED (use page_digest or mode=snippet|structure).
 - Prefer extract / query_all / find_text with tight selectors over dumping page text.
+- Multi-tab compare: list_tabs once, then ONE model turn with parallel page_digest/extract (not serial get_page dumps).
 - Prefer scrape_pdps for many SAPs/URLs (one tool turn). Prefer ensure_scrape_table BEFORE first navigate.
 - Prefer parse_data (cheap worker) to structure text/rows — do NOT paste huge text into your replies.
 - For product PDPs: page_digest once per template; navigate via /s/{SAP}; avoid re-reading chrome/nav.
@@ -33,7 +37,8 @@ export const BUDGET_MODE_HELP = `Budget mode cuts cost/latency without hiding to
 • Caps orchestrator steps (16 vs 32) unless you override Max turns
 • Prefers page_digest; rejects get_page mode=full; shortens page text reads
 • Slightly tighter chat-history packing (prior turns only)
-• System hint: extract/parse_data over dumping whole pages
+• Tighter mid-loop tool JSON caps in the LLM prompt (UI Preview still full)
+• System hint: extract/parse_data over dumping whole pages; multi-tab digests in one turn
 
 Normal mode: longer page reads, 32 steps, fuller history. Active agent profiles can override.`;
 
@@ -51,6 +56,10 @@ export function defaultGetPageMaxChars(budgetMode: AgentBudgetMode | undefined):
 
 export function leanHistoryMaxChars(budgetMode: AgentBudgetMode | undefined): number {
   return budgetMode === "budget" ? BUDGET_LEAN_HISTORY_CHARS : NORMAL_LEAN_HISTORY_CHARS;
+}
+
+export function midLoopToolResultMaxChars(budgetMode: AgentBudgetMode | undefined): number {
+  return budgetMode === "budget" ? BUDGET_MID_LOOP_TOOL_CHARS : NORMAL_MID_LOOP_TOOL_CHARS;
 }
 
 export function shouldRejectGetPageFull(

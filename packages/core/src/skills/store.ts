@@ -73,7 +73,7 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /** Bump when a seed body/toolHints must refresh existing IDB rows. */
-export const SEED_REVISION = "v1.6.43";
+export const SEED_REVISION = "v1.6.52";
 
 /**
  * Playbook-only seeds (empty toolHints) rewritten when revision advances.
@@ -85,6 +85,8 @@ const SEED_FORCE_REFRESH = new Set([
   "combo-ux-critique",
   "combo-tasks",
   "combo-vault-setup",
+  "combo-self-improve",
+  "combo-repo-ops",
 ]);
 
 export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "updatedAt">[] {
@@ -108,12 +110,14 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       name: "combo-rest",
       description: "Call REST and remote MCP connectors (vault secret refs)",
       body: `REST/MCP PLAYBOOK
-- list_connectors to see saved ids (vault refs only, no secret values)
-- Missing GitHub: ensure_github_connector (binds github_token|github_pat|gh_combo_x → github-rest)
+- list_connectors / save_rest_connector / ensure_github_connector are ALWAYS ON (no unlock)
+- Missing GitHub: ensure_github_connector({ vaultLabel:"github_pat" }) → creates gh + github-rest
 - Other hosts: save_rest_connector({ id, baseUrl, authVaultLabel }) — never plaintext PATs
-- Then rest_request({ connectorId, method, path, … })
+- skill_read this skill unlocks rest_request / mcp_* only
+- Then rest_request({ connectorId:"gh", method, path, … })
 - mcp_list_tools then mcp_call; never invent hosts
-- Secrets stay as vault labels — do not echo secret values`,
+- Secrets stay as vault labels — do not echo secret values
+- NEVER tell the user to load PR builds or about:debugging — just call ensure_github_connector`,
       tags: [...nowTag, "rest", "mcp"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rest],
@@ -310,13 +314,15 @@ NEVER answer a visual UX audit from get_page / get_links alone.
       description: "Open PRs on Rippy1911/combo-x via GitHub REST + vault PAT",
       body: `COMBO REPO OPS (self-edit via GitHub API — not local filesystem)
 
+PREFER for multi-file / test / CI work: skill_read combo-self-improve → dispatch_cursor_agent (Cursor Cloud Agent + autoCreatePR). Use THIS skill only for tiny one-file Contents API edits.
+
 SETUP (once — agent can finish after PAT is in vault):
 1) User creates a fine-grained GitHub PAT scoped to Rippy1911/combo-x (Contents R/W, Pull requests R/W, Metadata R) — do NOT automate PAT creation in the GitHub UI
 2) Embed/save PAT to vault as github_pat, github_token, or gh_combo_x (never echo it)
-3) skill_read combo-repo-ops (unlocks rest pack) → ensure_github_connector → rest_request
-   (ensure_github_connector creates github-rest → api.github.com; no Settings handoff)
+3) ensure_github_connector (always-on) → skill_read combo-repo-ops (unlocks rest_request) → call API
+   (creates gh + github-rest → api.github.com; no Settings / no PR builds)
 
-BRANCH + FILE CHANGE (Contents API via rest_request connectorId=github-rest):
+BRANCH + FILE CHANGE (Contents API via rest_request connectorId=gh):
 1) GET /repos/Rippy1911/combo-x/git/ref/heads/main → commit sha
 2) POST /repos/Rippy1911/combo-x/git/refs { ref:"refs/heads/combo-x/<short>", sha }
 3) GET /repos/Rippy1911/combo-x/contents/<path>?ref=<branch> → sha + base64 content
@@ -331,6 +337,39 @@ RULES:
       tags: [...nowTag, "github", "repo", "rest", "self-edit"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rest],
+    },
+    {
+      name: "combo-self-improve",
+      description:
+        "Audit Combo-X and dispatch Cursor Cloud Agents to Rippy1911/combo-x (vault cursor_api_key)",
+      body: `COMBO SELF-IMPROVE (audit → Cursor PR — preferred over combo-repo-ops for real fixes)
+
+SETUP (once):
+1) User puts Cursor API key in vault as cursor_api_key (aliases: CURSOR_API_KEY, cursor_key). Never echo it.
+2) skill_read combo-self-improve (this playbook). dispatch_cursor_agent is ALWAYS ON.
+
+WHEN USER SAYS "audit yourself" / "dispatch fixes to Cursor" / "self-improve":
+1) skill_search + skill_read relevant playbooks; recall memory; list_connectors
+2) Rank 2–5 concrete improvements (bugs, UX lies, missing tests, docs drift). Prefer high ROI.
+3) For EACH fix worth a PR: call dispatch_cursor_agent with a SELF-CONTAINED prompt:
+   - Repo: Rippy1911/combo-x (default) unless user names another
+   - Include: problem, files/areas to touch, acceptance checks, hard rules
+     (extension rebuild: pnpm build; Firefox temp add-on from extension/dist-firefox;
+      no secret values in commits; focused PR)
+   - model default grok-4.5; name = short slug
+4) Tell the user clearly:
+   - watchUrl for each agent
+   - AFTER they merge PRs: rebuild (or pull) then Reload Temporary Add-on → continue in chat
+5) Do NOT claim the fix is LIVE until they confirm reload.
+
+RULES:
+- Never print vault secrets
+- One focused PR per dispatch (split large audits)
+- Tiny one-file edit only → combo-repo-ops is OK; otherwise Cursor
+- If missing cursor_api_key: ask user once to add it; do not invent workarounds`,
+      tags: [...nowTag, "cursor", "self-improve", "dispatch"],
+      scope: "global",
+      toolHints: [],
     },
   ];
 }
@@ -363,11 +402,16 @@ export class SkillStore {
     await this.getDb();
     if (!this.skipSeed) {
       const all = await idbReq<Skill[]>(this.store("readonly").getAll());
-      const byName = new Map(all.map((s) => [s.name, s]));
+      const byName = new Map<string, Skill[]>();
+      for (const s of all) {
+        const list = byName.get(s.name) ?? [];
+        list.push(s);
+        byName.set(s.name, list);
+      }
       const now = new Date().toISOString();
       for (const def of seedSkillDefinitions()) {
-        const existing = byName.get(def.name);
-        if (!existing) {
+        const existingList = byName.get(def.name) ?? [];
+        if (!existingList.length) {
           const row: Skill = {
             ...def,
             id: crypto.randomUUID(),
@@ -377,29 +421,31 @@ export class SkillStore {
           await idbReq(this.store("readwrite").put(row));
           continue;
         }
-        const isSeed = (existing.tags ?? []).includes("seed");
-        const staleRevision = !(existing.tags ?? []).includes(SEED_REVISION);
         const defHints = def.toolHints ?? [];
         const hasPackHints = defHints.length > 0;
-        const existingHints = new Set(existing.toolHints ?? []);
-        const hintsMissing = defHints.some((h) => !existingHints.has(h));
-        // Refresh seed rows on revision bump; also rewrite same-named pack skills
-        // when unlock hints are incomplete (stale IDB after skill_save / old seed).
-        const needsRefresh =
-          (isSeed &&
-            staleRevision &&
-            (SEED_FORCE_REFRESH.has(def.name) || hasPackHints)) ||
-          (hasPackHints && hintsMissing);
-        if (!needsRefresh) continue;
-        const row: Skill = {
-          ...existing,
-          description: def.description,
-          body: def.body,
-          tags: def.tags ?? existing.tags,
-          toolHints: def.toolHints,
-          updatedAt: now,
-        };
-        await idbReq(this.store("readwrite").put(row));
+        // Refresh every same-named row — duplicate combo-rest IDs left stale
+        // unlocks when Map(name→skill) only updated the last getAll() hit.
+        for (const existing of existingList) {
+          const isSeed = (existing.tags ?? []).includes("seed");
+          const staleRevision = !(existing.tags ?? []).includes(SEED_REVISION);
+          const existingHints = new Set(existing.toolHints ?? []);
+          const hintsMissing = defHints.some((h) => !existingHints.has(h));
+          const needsRefresh =
+            (isSeed &&
+              staleRevision &&
+              (SEED_FORCE_REFRESH.has(def.name) || hasPackHints)) ||
+            (hasPackHints && hintsMissing);
+          if (!needsRefresh) continue;
+          const row: Skill = {
+            ...existing,
+            description: def.description,
+            body: def.body,
+            tags: def.tags ?? existing.tags,
+            toolHints: def.toolHints,
+            updatedAt: now,
+          };
+          await idbReq(this.store("readwrite").put(row));
+        }
       }
     }
     this.seeded = true;
@@ -457,7 +503,18 @@ export class SkillStore {
     const candidates = await this.list({ agentId: opts.agentId, limit: 500 });
     const matches = candidates.filter((s) => s.name === needle);
     if (!matches.length) return null;
-    return matches.find((s) => s.scope === "global") ?? matches[0] ?? null;
+    const globals = matches.filter((s) => s.scope === "global");
+    const pool = globals.length ? globals : matches;
+    // Prefer current seed revision / richest unlock hints when duplicates exist.
+    return pool.slice().sort((a, b) => {
+      const aRev = (a.tags ?? []).includes(SEED_REVISION) ? 1 : 0;
+      const bRev = (b.tags ?? []).includes(SEED_REVISION) ? 1 : 0;
+      if (bRev !== aRev) return bRev - aRev;
+      const aHints = a.toolHints?.length ?? 0;
+      const bHints = b.toolHints?.length ?? 0;
+      if (bHints !== aHints) return bHints - aHints;
+      return b.updatedAt.localeCompare(a.updatedAt);
+    })[0]!;
   }
 
   async delete(id: string): Promise<boolean> {

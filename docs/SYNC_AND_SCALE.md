@@ -1,9 +1,17 @@
-# Combo-X — Sync & Scale (plan, not implemented)
+# Combo-X — Sync & Scale
 
-Status: **plan only.** v0.2 ships local-first: vault secrets are AES-GCM ciphered; chat
-sessions, bookmarks, reminders and reports are local plaintext IndexedDB. This doc is the design
-for (a) an encrypted blob-sync backend across devices and (b) staying fast when a user has hundreds
-of conversations. No code here is wired into the extension yet.
+Status: **partially implemented (1.6.51).**
+
+| Scope | Status |
+|-------|--------|
+| `vault` pack | ✅ CloudClient push/pull + **history** (free≤5 / pro≤30) |
+| `setup` sealed pack | ✅ Connectors per vault (vault KEK) — push with vault |
+| `sessions_manifest` + `session:{id}` | ✅ Opt-in **Sync chats** / Combo Link (`sessionSync.ts`) — transport = base64(JSON) |
+| Combo Link portal snapshots | ✅ Plaintext relay for portal UI — see [`COMBO_LINK.md`](./COMBO_LINK.md) |
+| Link vault-admin commands | ✅ Desktop unlock applies patches; Cursor enqueue via sync token |
+| `artifacts` / agents | ❌ Not wired |
+
+Local: vault secrets are AES-GCM; chat sessions remain plaintext IndexedDB. Scale notes below still apply for hundreds of conversations.
 
 ## 0. What is encrypted today
 

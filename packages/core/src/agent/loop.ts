@@ -21,6 +21,7 @@ import {
   parseConnectorHeaders,
 } from "../connectors/ensureGithub.js";
 import { githubRestTemplate } from "../connectors/templates.js";
+import { dispatchCursorAgent } from "../cloud/dispatchCursor.js";
 import { buildMapHtml, fetchMapStyleJson } from "../maps/buildMapHtml.js";
 import { dataUrlToBytes, publishUpload } from "../uploads/publish.js";
 import {
@@ -35,6 +36,7 @@ import { formatOpenTasksBlock } from "../tasks/inject.js";
 import { providerFromModel, type UsageEvent, type UsageStore } from "../usage/store.js";
 import { TOOL_CATALOG } from "../tools/catalog.js";
 import {
+  effectiveToolHints,
   ensureForceAttachTools,
   initialActiveTools,
   isSkillGatedTool,
@@ -55,13 +57,14 @@ import type { Skill, SkillStore } from "../skills/store.js";
 import {
   BUDGET_SYSTEM_ADDON,
   leanHistoryMaxChars,
+  midLoopToolResultMaxChars,
   preferPageDigest,
   resolveMaxSteps,
   rewriteGetPageArgs,
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
-import { leanHistory } from "./leanHistory.js";
+import { leanHistory, truncateToolResultForLlm } from "./leanHistory.js";
 import type {
   ChatMessage,
   ChatResult,
@@ -376,6 +379,7 @@ UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) —
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 Rules:
 - Prefer page_digest over full get_page dumps.
+- Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
 - Prefer skill_read + tools / rag / memories over inventing facts.
 - After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
@@ -851,16 +855,22 @@ export class AgentLoop {
         tool_calls: result.toolCalls,
       });
 
-      for (const call of result.toolCalls) {
-        if (options.signal?.aborted) {
-          return finishRun({
-            finalText,
-            aborted: true,
-            hitStepLimit: false,
-            doneMessage: "aborted",
-          });
-        }
+      const toolCharCap = midLoopToolResultMaxChars(budgetMode);
+      const pushToolMessage = (call: ToolCall, toolResult: unknown) => {
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          name: call.function.name,
+          content: truncateToolResultForLlm(toolResult, toolCharCap),
+        });
+      };
 
+      type ToolRow =
+        | { call: ToolCall; aborted: true }
+        | { call: ToolCall; aborted: false; result: unknown };
+
+      const prepareAndRun = async (call: ToolCall): Promise<ToolRow> => {
+        if (options.signal?.aborted) return { call, aborted: true };
         const args = parseToolArguments(call.function.arguments);
         const modeNow = resolveApprovalMode();
         const sensitive = SENSITIVE_TOOLS.has(call.function.name);
@@ -897,15 +907,8 @@ export class AgentLoop {
             approvalMode: modeNow,
             approvalDecision: decision,
           });
-          messages.push({
-            role: "tool",
-            tool_call_id: call.id,
-            name: call.function.name,
-            content: JSON.stringify(denied),
-          });
-          continue;
+          return { call, aborted: false, result: denied };
         }
-
         const toolResult = await this.executeTool(
           call,
           args,
@@ -924,12 +927,56 @@ export class AgentLoop {
           runCtx,
           logUsage,
         );
-        messages.push({
-          role: "tool",
-          tool_call_id: call.id,
-          name: call.function.name,
-          content: typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
-        });
+        return { call, aborted: false, result: toolResult };
+      };
+
+      // Sensitive tools stay sequential; consecutive non-sensitive run in parallel.
+      // Push tool messages in original tool_call order after each batch.
+      let callIdx = 0;
+      while (callIdx < result.toolCalls.length) {
+        if (options.signal?.aborted) {
+          return finishRun({
+            finalText,
+            aborted: true,
+            hitStepLimit: false,
+            doneMessage: "aborted",
+          });
+        }
+        const head = result.toolCalls[callIdx]!;
+        if (SENSITIVE_TOOLS.has(head.function.name)) {
+          const row = await prepareAndRun(head);
+          if (row.aborted) {
+            return finishRun({
+              finalText,
+              aborted: true,
+              hitStepLimit: false,
+              doneMessage: "aborted",
+            });
+          }
+          pushToolMessage(row.call, row.result);
+          callIdx += 1;
+          continue;
+        }
+        const batch: ToolCall[] = [];
+        while (
+          callIdx < result.toolCalls.length &&
+          !SENSITIVE_TOOLS.has(result.toolCalls[callIdx]!.function.name)
+        ) {
+          batch.push(result.toolCalls[callIdx]!);
+          callIdx += 1;
+        }
+        const batchResults = await Promise.all(batch.map((c) => prepareAndRun(c)));
+        for (const row of batchResults) {
+          if (row.aborted) {
+            return finishRun({
+              finalText,
+              aborted: true,
+              hitStepLimit: false,
+              doneMessage: "aborted",
+            });
+          }
+          pushToolMessage(row.call, row.result);
+        }
       }
     }
 
@@ -1972,9 +2019,12 @@ export class AgentLoop {
           if (!skill) result = { ok: false, error: "skill not found" };
           else {
             const ceiling = new Set(runCtx.enabledToolNames);
+            // Live pack merge — do not trust stale IDB toolHints alone (combo-rest
+            // often kept pre-1.6.41 unlocks after temporary-addon reloads).
+            const hints = effectiveToolHints(skill.name, skill.toolHints);
             const { active, unlocked } = unlockFromHints(
               runCtx.activeToolNames,
-              skill.toolHints ?? [],
+              hints,
               ceiling,
             );
             runCtx.activeToolNames = active;
@@ -1992,7 +2042,7 @@ export class AgentLoop {
               description: skill.description,
               body: skill.body,
               tags: skill.tags,
-              toolHints: skill.toolHints ?? [],
+              toolHints: hints,
               unlockedTools: unlocked,
               activeToolCount: active.length,
             };
@@ -2430,6 +2480,8 @@ export class AgentLoop {
         result = await this.runSaveRestConnector(args, connectors);
       } else if (name === "ensure_github_connector") {
         result = await this.runEnsureGithubConnector(args, connectors);
+      } else if (name === "dispatch_cursor_agent") {
+        result = await this.runDispatchCursorAgent(args, connectors);
       } else if (name === "rest_request") {
         result = await this.runRestRequest(args, connectors);
       } else if (name === "mcp_list_tools") {
@@ -3876,6 +3928,26 @@ export class AgentLoop {
     };
   }
 
+  private async runDispatchCursorAgent(
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.getSecret) {
+      return { ok: false, error: "vault/connectors unavailable" };
+    }
+    return dispatchCursorAgent(
+      {
+        prompt: typeof args.prompt === "string" ? args.prompt : "",
+        repo: typeof args.repo === "string" ? args.repo : undefined,
+        model: typeof args.model === "string" ? args.model : undefined,
+        ref: typeof args.ref === "string" ? args.ref : undefined,
+        name: typeof args.name === "string" ? args.name : undefined,
+        branchName: typeof args.branchName === "string" ? args.branchName : undefined,
+      },
+      connectors.getSecret,
+    );
+  }
+
   private async runEnsureGithubConnector(
     args: Record<string, unknown>,
     connectors?: ConnectorRuntime,
@@ -3883,18 +3955,35 @@ export class AgentLoop {
     if (!connectors?.store || !connectors.getSecret) {
       return { ok: false, error: "no connectors configured" };
     }
-    const connectorId =
+    const primary =
       typeof args.connectorId === "string" && args.connectorId.trim()
         ? args.connectorId.trim()
-        : "github-rest";
-    if (connectors.allowedIds && !connectors.allowedIds.includes(connectorId)) {
-      return { ok: false, error: `connector not allowed for this agent: ${connectorId}` };
+        : "gh";
+    const aliases = [...new Set([primary, "gh", "github-rest"])];
+    for (const connectorId of aliases) {
+      if (connectors.allowedIds && !connectors.allowedIds.includes(connectorId)) {
+        continue;
+      }
+      const result = await ensureGithubRestConnector(
+        connectors.store,
+        connectors.getSecret,
+        {
+          connectorId,
+          preferredVaultLabel:
+            typeof args.vaultLabel === "string" ? args.vaultLabel : undefined,
+        },
+      );
+      if (!result.ok) return result;
     }
-    return ensureGithubRestConnector(connectors.store, connectors.getSecret, {
-      connectorId,
-      preferredVaultLabel:
-        typeof args.vaultLabel === "string" ? args.vaultLabel : undefined,
-    });
+    if (connectors.allowedIds && !connectors.allowedIds.includes(primary)) {
+      return { ok: false, error: `connector not allowed for this agent: ${primary}` };
+    }
+    return {
+      ok: true,
+      connectorId: primary,
+      aliases,
+      note: `GitHub REST ready as ${aliases.join(" + ")}. Call rest_request next (prefer connectorId \"gh\").`,
+    };
   }
 
   private async runRestRequest(
@@ -3906,11 +3995,19 @@ export class AgentLoop {
     if (connectors.allowedIds && !connectors.allowedIds.includes(id)) {
       return { ok: false, error: `connector not allowed for this agent: ${id}` };
     }
-    const conn = await connectors.store.get(id);
+    let conn = await connectors.store.get(id);
+    // gh ↔ github-rest alias (older seeds / Settings mirror)
+    if ((!conn || conn.kind !== "rest") && (id === "gh" || id === "github-rest")) {
+      const alt = id === "gh" ? "github-rest" : "gh";
+      if (!connectors.allowedIds || connectors.allowedIds.includes(alt)) {
+        const other = await connectors.store.get(alt);
+        if (other?.kind === "rest") conn = other;
+      }
+    }
     if (!conn || conn.kind !== "rest") {
       return {
         ok: false,
-        error: `REST connector not found: ${id}. Call ensure_github_connector or save_rest_connector first.`,
+        error: `REST connector not found: ${id}. Call ensure_github_connector (always-on) or save_rest_connector first.`,
       };
     }
     return restRequest(

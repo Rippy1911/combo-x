@@ -27,15 +27,16 @@ describe("parseConnectorHeaders", () => {
 });
 
 describe("ensureGithubRestConnector", () => {
-  it("creates github-rest from github_pat when github_token empty", async () => {
+  it("creates gh from github_pat when github_token empty", async () => {
     const store = new ConnectorStore(`gh-ensure-${crypto.randomUUID()}`);
     const secrets: Record<string, string> = { github_pat: "ghp_test_only" };
     const result = await ensureGithubRestConnector(store, async (l) => secrets[l] ?? null);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.created).toBe(true);
+    expect(result.connectorId).toBe("gh");
     expect(result.vaultLabel).toBe("github_pat");
-    const conn = await store.get("github-rest");
+    const conn = await store.get("gh");
     expect(conn?.kind).toBe("rest");
     if (conn?.kind === "rest") {
       expect(conn.headers.Authorization).toEqual({ vaultLabel: "github_pat" });
@@ -47,6 +48,7 @@ describe("ensureGithubRestConnector", () => {
     await store.put(githubRestTemplate({ vaultLabel: "github_token" }));
     const secrets: Record<string, string> = { github_pat: "ghp_test_only" };
     const result = await ensureGithubRestConnector(store, async (l) => secrets[l] ?? null, {
+      connectorId: "github-rest",
       preferredVaultLabel: "github_pat",
     });
     expect(result.ok).toBe(true);

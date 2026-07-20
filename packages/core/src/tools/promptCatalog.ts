@@ -10,6 +10,7 @@ import { catalogEntry } from "./catalog.js";
 import type { CustomTool } from "./customStore.js";
 import {
   TOOL_PACKS,
+  effectiveToolHints,
   packForTool,
   type ToolPackId,
 } from "./gating.js";
@@ -35,8 +36,9 @@ export function formatSkillIndexBlock(
   if (!rows.length) return "";
   const lines = rows.map((s, i) => {
     const scope = s.scope === "agent" ? "agent" : "global";
+    const hintsList = effectiveToolHints(s.name, s.toolHints);
     const hints =
-      s.toolHints?.length ? ` unlock:[${s.toolHints.slice(0, 8).join(", ")}]` : "";
+      hintsList.length ? ` unlock:[${hintsList.slice(0, 8).join(", ")}]` : "";
     return `${i + 1}. ${s.name} (${scope}) — ${s.description.slice(0, 220)}${hints}`;
   });
   return (
