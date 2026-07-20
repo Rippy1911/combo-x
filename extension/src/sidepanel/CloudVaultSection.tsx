@@ -239,11 +239,10 @@ export function CloudVaultSection({
       persistRegistry(state);
 
       let setupNote = "";
-      if (vault.isUnlocked()) {
-        const setupPull = await client.syncPull(
-          "setup",
-          version != null ? { version } : undefined,
-        );
+      // vault/setup scopes have independent version counters — never pass a vault
+      // history version into setup pull. History restore = vault only.
+      if (vault.isUnlocked() && version == null) {
+        const setupPull = await client.syncPull("setup");
         if (setupPull.ok && setupPull.ciphertext_b64) {
           try {
             const sealed = setupPackFromB64(setupPull.ciphertext_b64);
@@ -267,7 +266,11 @@ export function CloudVaultSection({
         }
       } else {
         saveCloudConfig({ ...cfg, packVersion: pull.version ?? cfg.packVersion });
-        setupNote = " (unlock to merge setup/connectors)";
+        if (version != null) {
+          setupNote = " (setup left unchanged — independent version scope)";
+        } else {
+          setupNote = " (unlock to merge setup/connectors)";
+        }
       }
 
       setMsg(

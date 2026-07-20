@@ -1368,8 +1368,14 @@ export function App() {
       });
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
-      const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
-      const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
+      const runModel = normalizeModelId(
+        activeProfile?.orchestratorModel ?? model,
+        llmProvider,
+      );
+      const runWorker = normalizeModelId(
+        activeProfile?.workerModel ?? workerModel,
+        llmProvider,
+      );
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runToolMode: AgentToolMode = activeProfile?.toolMode ?? "skill_gated";
       const runTools =
@@ -1490,9 +1496,11 @@ export function App() {
 
   const send = useCallback(
     async (overrideText?: string, queued?: QueuedSend): Promise<boolean> => {
-      const activeId = activeSessionIdRef.current ?? currentSession?.id ?? null;
-      if (activeId && runtimesRef.current.get(activeId)?.running) return false;
-      if (!activeId && runningRef.current) return false;
+      // Busy-check the *target* session (Link may send to a non-active chat).
+      const targetId =
+        queued?.sessionId ?? activeSessionIdRef.current ?? currentSession?.id ?? null;
+      if (targetId && runtimesRef.current.get(targetId)?.running) return false;
+      if (!targetId && runningRef.current) return false;
       let text = (overrideText ?? (queued ? queued.text : input)).trim();
       const pending = queued?.attachments ?? pendingAttachments;
       // Snapshot immediately — React state may clear before await points below.
@@ -1697,8 +1705,14 @@ export function App() {
       const omitComboWebSearch = shouldOmitComboWebSearch(llmProvider, webSearchEnabled);
       const agent = new AgentLoop(llm, bridge, memory, sessions, profiles);
       const activeProfile = activeAgentId ? await agentProfiles.get(activeAgentId) : null;
-      const runModel = normalizeModelId(activeProfile?.orchestratorModel ?? model);
-      const runWorker = normalizeModelId(activeProfile?.workerModel ?? workerModel);
+      const runModel = normalizeModelId(
+        activeProfile?.orchestratorModel ?? model,
+        llmProvider,
+      );
+      const runWorker = normalizeModelId(
+        activeProfile?.workerModel ?? workerModel,
+        llmProvider,
+      );
       const runBudget = activeProfile?.budgetMode ?? budgetMode;
       const runApproval = activeProfile?.approvalMode ?? approvalModeRef.current;
       // Prefer composer override; profile maxSteps only if explicitly stored (not resolve default 32).
@@ -2445,6 +2459,11 @@ export function App() {
         setRegistry(state);
         const cfg = loadCloudConfig();
         if (cfg) saveCloudConfig({ ...cfg, packVersion: version });
+        // Restored salt/ciphertext may not match the live KEK — force re-unlock.
+        if (vault.isUnlocked()) {
+          await vault.lock();
+          setLocked(true);
+        }
         return imported.length
           ? { ok: true }
           : { ok: false, error: "no vaults imported" };
