@@ -46,8 +46,8 @@ export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   createdAt: string;
-  /** Origin of this turn — e.g. Combo Link remote control */
-  source?: "local" | "link" | "mcp";
+  /** Origin of this turn — e.g. Combo Link remote control, or a Jarvis voice command */
+  source?: "local" | "link" | "mcp" | "voice";
   /** Operator starred this turn for later reference */
   bookmarked?: boolean;
   usage?: {
@@ -186,8 +186,8 @@ export interface ChatSession {
   bookmarked?: boolean;
   /** Pin DOM/navigate tools to this browser tab (no activate_tab). */
   boundTabId?: number;
-  /** How this session was created / driven (local UI vs Combo Link / MCP). */
-  source?: "local" | "link" | "mcp";
+  /** How this session was created / driven (local UI vs Combo Link / MCP / Jarvis voice). */
+  source?: "local" | "link" | "mcp" | "voice";
 }
 
 /** Strip megabase64 so exports stay small; keep attachment ids. */

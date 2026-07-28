@@ -42,6 +42,56 @@ function copyPdfWorkerPlugin(): Plugin {
   };
 }
 
+// wasm execution provider only — the jsep (WebGPU) binary is 27 MB and unused.
+const ORT_WASM_FILES = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
+
+const WAKE_MODEL_FILES = [
+  "melspectrogram.onnx",
+  "embedding_model.onnx",
+  "hey_jarvis_v0.1.onnx",
+];
+
+/**
+ * Jarvis wake-word assets. openWakeWord pretrained models are CC BY-NC-SA 4.0, so they
+ * only ship when JARVIS_DEV_BUILD=1 — a default build must contain no wake model.
+ */
+function copyJarvisAssetsPlugin(): Plugin {
+  const devBuild = process.env.JARVIS_DEV_BUILD === "1";
+  const copyInto = (root: string) => {
+    // onnxruntime-web does not export ./package.json — resolve the main entry, which lives
+    // in dist/ alongside the wasm binaries.
+    const ortDist = path.dirname(require.resolve("onnxruntime-web"));
+    const ortDest = path.join(root, "public/ort");
+    mkdirSync(ortDest, { recursive: true });
+    for (const file of ORT_WASM_FILES) {
+      const src = path.join(ortDist, file);
+      if (existsSync(src)) copyFileSync(src, path.join(ortDest, file));
+    }
+    if (!devBuild) return;
+    const modelSrc = path.resolve(__dirname, "public/openwakeword");
+    if (!existsSync(modelSrc)) {
+      throw new Error(
+        "JARVIS_DEV_BUILD=1 but extension/public/openwakeword is missing — run `node scripts/fetch-wake-models.mjs` first.",
+      );
+    }
+    const modelDest = path.join(root, "public/openwakeword");
+    mkdirSync(modelDest, { recursive: true });
+    for (const file of WAKE_MODEL_FILES) {
+      const src = path.join(modelSrc, file);
+      if (existsSync(src)) copyFileSync(src, path.join(modelDest, file));
+    }
+  };
+  return {
+    name: "copy-jarvis-assets",
+    buildStart() {
+      copyInto(__dirname);
+    },
+    closeBundle() {
+      copyInto(path.resolve(__dirname, "dist"));
+    },
+  };
+}
+
 /**
  * CRXJS emits hashed `content.ts-loader-<hash>.js`. Rename to a stable path and
  * rewrite dist/manifest.json so reinject survives watch rebuilds.
@@ -103,7 +153,13 @@ function stabilizeContentLoaderPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), crx({ manifest }), copyPdfWorkerPlugin(), stabilizeContentLoaderPlugin()],
+  plugins: [
+    react(),
+    crx({ manifest }),
+    copyPdfWorkerPlugin(),
+    copyJarvisAssetsPlugin(),
+    stabilizeContentLoaderPlugin(),
+  ],
   resolve: {
     alias: {
       "@combo-x/core": path.resolve(__dirname, "../packages/core/src/index.ts"),

@@ -67,6 +67,9 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "ensure_github_connector",
   /** Self-improve — Cursor Cloud Agent dispatch (vault cursor_api_key) */
   "dispatch_cursor_agent",
+  /** Portfolio knowledge (ns-rag) — cheap and always worth asking before guessing */
+  "portfolio_ask",
+  "portfolio_search",
 ];
 
 /**
@@ -133,6 +136,20 @@ export const TOOL_PACKS = {
     "screenshot_full",
     "start_recording",
     "stop_recording",
+  ],
+  /** Whole-Mac control via the jarvisd native host — inert without the daemon installed. */
+  jarvis: [
+    "mac_ui_tree",
+    "mac_screenshot",
+    "mac_click",
+    "mac_type",
+    "mac_key",
+    "mac_apps",
+    "mac_focus",
+    "mac_list_dir",
+    "mac_read_file",
+    "index_dir",
+    "ambient_recall",
   ],
 } as const;
 
@@ -219,6 +236,7 @@ const SKILL_NAME_PACK_HINTS: Record<string, readonly string[]> = {
   "combo-rag": TOOL_PACKS.rag,
   "combo-page-ext": TOOL_PACKS["page-ext"],
   "combo-media": TOOL_PACKS.media,
+  "combo-jarvis": TOOL_PACKS.jarvis,
   // Rest-pack aliases (same unlock set as combo-rest)
   "combo-repo-ops": TOOL_PACKS.rest,
   "combo-ns-food": TOOL_PACKS.rest,

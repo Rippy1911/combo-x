@@ -95,6 +95,8 @@ import {
   type SubagentEvent,
   type VisionSettings,
   slimRunContextForStorage,
+  JARVIS_VOICE_SYSTEM_ADDON,
+  toSpokenReply,
 } from "@combo-x/core";
 import { buildLlmClient, shouldOmitComboWebSearch } from "./llmClient";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -142,6 +144,8 @@ import {
   type SessionRuntimeMeta,
 } from "./sessionRuntime";
 import { useComboLink } from "./useComboLink";
+import { JarvisPanel } from "./JarvisPanel";
+import { useJarvis } from "./useJarvis";
 
 const APP_VERSION =
   typeof chrome !== "undefined" && chrome.runtime?.getManifest
@@ -214,8 +218,8 @@ type UiTurn = {
   content: string;
   createdAt?: string;
   bookmarked?: boolean;
-  /** Origin — Combo Link remote turns are badged in UI. */
-  source?: "local" | "link" | "mcp";
+  /** Origin — Combo Link / Jarvis voice turns are badged in UI. */
+  source?: "local" | "link" | "mcp" | "voice";
   attachments?: Array<{ id: string; name: string; kind: string }>;
   /** User-picked DOM elements attached to this turn. */
   picks?: PickedElementRef[];
@@ -308,7 +312,7 @@ function addUsage(a: LlmUsage, b: LlmUsage): LlmUsage {
 }
 
 /** Additive-only migrate — never wipe a custom allowlist on reload. */
-const TOOLS_MIGRATE_FLAG = "combo_x_tools_migrate_v168";
+const TOOLS_MIGRATE_FLAG = "combo_x_tools_migrate_v169";
 const TOOLS_MIGRATE_ADD = [
   "parse_data",
   "get_interactive",
@@ -332,6 +336,19 @@ const TOOLS_MIGRATE_ADD = [
   "update_task",
   "list_tasks",
   "reorder_tasks",
+  "portfolio_ask",
+  "portfolio_search",
+  "mac_ui_tree",
+  "mac_screenshot",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_apps",
+  "mac_focus",
+  "mac_list_dir",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
 ] as const;
 
 function loadEnabledTools(): Set<string> {
@@ -467,7 +484,8 @@ export function App() {
     secrets: PendingSecret[];
     picks: PickedElementRef[];
     activeTab?: ActiveTabContext;
-    source?: "local" | "link" | "mcp";
+    source?: "local" | "link" | "mcp" | "voice";
+    wakeToken?: string;
   };
   const [sendQueue, setSendQueue] = useState<QueuedSend[]>([]);
   const sendQueueRef = useRef<QueuedSend[]>([]);
@@ -509,6 +527,7 @@ export function App() {
     (overrideText?: string, queued?: QueuedSend) => Promise<boolean>
   >(async () => false);
   const loadSessionRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const jarvisSpeakRef = useRef<(text: string) => Promise<void>>(async () => {});
   const pendingApprovalBySessionRef = useRef<
     Map<
       string,
@@ -787,6 +806,29 @@ export function App() {
             next.add("rag_search");
             next.add("rag_read_file");
             next.add("rag_status");
+          }
+          if (
+            p.connectors!.includes("jarvis") ||
+            p.connectors!.includes("mac") ||
+            p.connectors!.includes("ns_rag")
+          ) {
+            for (const n of [
+              "portfolio_ask",
+              "portfolio_search",
+              "mac_ui_tree",
+              "mac_screenshot",
+              "mac_click",
+              "mac_type",
+              "mac_key",
+              "mac_apps",
+              "mac_focus",
+              "mac_list_dir",
+              "mac_read_file",
+              "index_dir",
+              "ambient_recall",
+            ]) {
+              next.add(n);
+            }
           }
           return next;
         });
@@ -2078,6 +2120,12 @@ export function App() {
 
       try {
         if (isBoundActive()) setPlanningTool(null);
+        const voiceRun = queued?.source === "voice";
+        const systemPrompt = voiceRun
+          ? [activeProfile?.systemPrompt, JARVIS_VOICE_SYSTEM_ADDON]
+              .filter(Boolean)
+              .join("\n\n")
+          : activeProfile?.systemPrompt;
         const result = await agent.run({
           model: runModel,
           workerModel: runWorker,
@@ -2085,7 +2133,7 @@ export function App() {
           history: historyAtStart,
           signal: controller.signal,
           maxSteps: runMaxSteps,
-          systemPrompt: activeProfile?.systemPrompt,
+          systemPrompt,
           enabledTools: runTools,
           toolMode: runToolMode,
           omitComboWebSearch,
@@ -2120,6 +2168,12 @@ export function App() {
           activeTab: tabSnap,
           vision: visionSettings,
           onEvent,
+          // Parent is extending AgentRunOptions with these for the wake gate.
+          source: queued?.source,
+          wakeToken: queued?.wakeToken,
+        } as Parameters<AgentLoop["run"]>[0] & {
+          source?: string;
+          wakeToken?: string;
         });
         const lean = leanHistory(
           stripImageParts(result.messages.filter((m) => m.role !== "system")),
@@ -2172,6 +2226,10 @@ export function App() {
             ? "Stopped"
             : "Done";
         publishStatus(doneStatus);
+        if (voiceRun && !result.aborted) {
+          const spoken = toSpokenReply(result.finalText || "");
+          if (spoken) await jarvisSpeakRef.current(spoken);
+        }
         if (!isBoundActive() && !result.aborted) {
           rt.unread = true;
           bump();
@@ -2325,9 +2383,38 @@ export function App() {
     vault,
   ]);
 
-  // Keep refs fresh for Combo Link command handlers
+  // Keep refs fresh for Combo Link / Jarvis command handlers
   sendRef.current = send;
   loadSessionRef.current = loadSession;
+
+  const jarvis = useJarvis({
+    getSecret: (label) => vault.getByLabel(label),
+    onCommand: async (command, wakeToken) => {
+      try {
+        let sid = activeSessionIdRef.current ?? currentSession?.id ?? null;
+        if (!sid) {
+          const created = await sessions.create(command.slice(0, 60) || "Voice", {
+            source: "voice" as "local",
+          });
+          sid = created.id;
+          await loadSessionRef.current(sid);
+        }
+        const ok = await sendRef.current(command, {
+          sessionId: sid,
+          text: command,
+          attachments: [],
+          secrets: [],
+          picks: [],
+          source: "voice",
+          wakeToken,
+        });
+        if (!ok) setStatus("Jarvis send rejected (busy or locked)");
+      } catch (e) {
+        setStatus(`Jarvis: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  });
+  jarvisSpeakRef.current = (text) => jarvis.speak(text);
 
   const comboLink = useComboLink(!locked && vault.isUnlocked(), sessions, {
     onLinkSend: async ({ sessionId, text, createNew }) => {
@@ -2612,6 +2699,7 @@ export function App() {
               refreshTick={tasksRefreshTick}
             />
             <div className="chat-thread">
+              <JarvisPanel jarvis={jarvis} />
               <div className="conv-bar">
                 <div className="conv-bar-main">
                   <button
@@ -3035,6 +3123,11 @@ export function App() {
                           {t.role === "user" && t.source === "link" ? (
                             <span className="delivery-pill stream" title="Sent via Combo Link (portal)">
                               link
+                            </span>
+                          ) : null}
+                          {t.role === "user" && t.source === "voice" ? (
+                            <span className="delivery-pill stream" title="Sent via Jarvis voice">
+                              voice
                             </span>
                           ) : null}
                           {t.role === "user" ? (

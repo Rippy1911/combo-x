@@ -1,4 +1,13 @@
 import type { CropRect } from "@combo-x/core";
+import { JarvisVoiceRuntime, type JarvisVoiceEvent } from "./jarvisVoice.js";
+
+type SpeechLocale = "pl-PL" | "en-US";
+type AzureSpeechConfig = {
+  key: string;
+  region: string;
+  locale: SpeechLocale;
+  voice?: string;
+};
 
 type OffscreenRequest =
   | { type: "START_RECORDING"; streamId: string }
@@ -10,7 +19,12 @@ type OffscreenRequest =
       tileCssHeights: number[];
       dpr?: number;
     }
-  | { type: "OFFSCREEN_PING" };
+  | { type: "OFFSCREEN_PING" }
+  | { type: "JARVIS_START"; locale: SpeechLocale; azure: AzureSpeechConfig }
+  | { type: "JARVIS_STOP" }
+  | { type: "JARVIS_SPEAK"; text: string }
+  | { type: "JARVIS_STATUS" }
+  | { type: "JARVIS_MIC_CHECK" };
 
 type OffscreenResponse = {
   ok: boolean;
@@ -18,11 +32,23 @@ type OffscreenResponse = {
   error?: string;
   note?: string;
   ready?: boolean;
+  status?: ReturnType<JarvisVoiceRuntime["status"]>;
+  granted?: boolean;
 };
 
 let mediaRecorder: MediaRecorder | null = null;
 let recordedChunks: Blob[] = [];
 let activeStream: MediaStream | null = null;
+
+const jarvis = new JarvisVoiceRuntime();
+
+jarvis.onEvent = (event: JarvisVoiceEvent) => {
+  try {
+    void chrome.runtime.sendMessage({ type: "jarvis_offscreen_event", event });
+  } catch {
+    /* SW may be asleep; next poll will catch up */
+  }
+};
 
 function chromeTabConstraints(streamId: string): MediaStreamConstraints {
   return {
@@ -187,29 +213,75 @@ async function stitchTiles(
   }
 }
 
+const OFFSCREEN_TYPES = new Set([
+  "OFFSCREEN_PING",
+  "START_RECORDING",
+  "STOP_RECORDING",
+  "CROP_IMAGE",
+  "STITCH_TILES",
+  "JARVIS_START",
+  "JARVIS_STOP",
+  "JARVIS_SPEAK",
+  "JARVIS_STATUS",
+  "JARVIS_MIC_CHECK",
+]);
+
 chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendResponse) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
+  if (!OFFSCREEN_TYPES.has(message.type)) return false;
 
   void (async () => {
     let res: OffscreenResponse;
-    switch (message.type) {
-      case "OFFSCREEN_PING":
-        res = { ok: true, ready: true };
-        break;
-      case "START_RECORDING":
-        res = await startRecording(message.streamId);
-        break;
-      case "STOP_RECORDING":
-        res = await stopRecording();
-        break;
-      case "CROP_IMAGE":
-        res = await cropImage(message.dataUrl, message.rect, message.dpr);
-        break;
-      case "STITCH_TILES":
-        res = await stitchTiles(message.tiles, message.tileCssHeights, message.dpr);
-        break;
-      default:
-        res = { ok: false, error: "unknown offscreen message" };
+    try {
+      switch (message.type) {
+        case "OFFSCREEN_PING":
+          res = { ok: true, ready: true };
+          break;
+        case "START_RECORDING":
+          res = await startRecording(message.streamId);
+          break;
+        case "STOP_RECORDING":
+          res = await stopRecording();
+          break;
+        case "CROP_IMAGE":
+          res = await cropImage(message.dataUrl, message.rect, message.dpr);
+          break;
+        case "STITCH_TILES":
+          res = await stitchTiles(message.tiles, message.tileCssHeights, message.dpr);
+          break;
+        case "JARVIS_START": {
+          const status = await jarvis.start(message.locale, message.azure);
+          res = {
+            ok: status.state !== "error",
+            status,
+            error: status.lastError ?? undefined,
+          };
+          break;
+        }
+        case "JARVIS_STOP": {
+          const status = await jarvis.stop();
+          res = { ok: true, status };
+          break;
+        }
+        case "JARVIS_SPEAK": {
+          const spoken = await jarvis.speak(message.text);
+          res = { ok: spoken.ok, error: spoken.error, status: jarvis.status() };
+          break;
+        }
+        case "JARVIS_STATUS":
+          res = { ok: true, status: jarvis.status() };
+          break;
+        case "JARVIS_MIC_CHECK": {
+          const granted = await jarvis.micCheck();
+          res = { ok: granted, granted, status: jarvis.status() };
+          break;
+        }
+        default:
+          res = { ok: false, error: "unknown offscreen message" };
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      res = { ok: false, error: msg, status: jarvis.status() };
     }
     sendResponse(res);
   })();

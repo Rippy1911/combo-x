@@ -408,6 +408,202 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "portfolio_ask",
+      description:
+        "Ask the portfolio knowledge base (ns-rag over _docs/ + _memory/) a question and get a synthesized answer with citations. Prefer this over guessing about the operator's repos, services, decisions or infrastructure.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          k: { type: "number", description: "Chunks to retrieve (default 8)" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "portfolio_search",
+      description:
+        "Semantic search of the portfolio knowledge base. Returns scored path + snippet hits without synthesis — use when you want raw sources rather than an answer.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          k: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_ui_tree",
+      description:
+        "List actionable UI elements of a macOS app via Accessibility, each with an index for mac_click / mac_type. This is the Mac equivalent of get_interactive. Requires the jarvisd daemon.",
+      parameters: {
+        type: "object",
+        properties: {
+          app: { type: "string", description: "App name; omit for the frontmost app" },
+          maxNodes: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_screenshot",
+      description:
+        "Capture a macOS display or app window as a PNG. Refused for password managers, terminals and banking apps.",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["display", "window"] },
+          app: { type: "string" },
+          displayId: { type: "number" },
+          maxWidth: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_click",
+      description:
+        "Click a macOS UI element by its mac_ui_tree index (preferred) or at screen coordinates.",
+      parameters: {
+        type: "object",
+        properties: {
+          index: { type: "number" },
+          point: {
+            type: "object",
+            properties: { x: { type: "number" }, y: { type: "number" } },
+            required: ["x", "y"],
+            additionalProperties: false,
+          },
+          button: { type: "string", enum: ["left", "right"] },
+          double: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_type",
+      description:
+        "Type text into a macOS app. Refused for secure/password fields and for terminals. Never type secrets.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          index: { type: "number", description: "mac_ui_tree index to focus first" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_key",
+      description: 'Send a macOS key combo, e.g. "cmd+s" or "cmd+shift+4".',
+      parameters: {
+        type: "object",
+        properties: { combo: { type: "string" } },
+        required: ["combo"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_apps",
+      description: "List running macOS apps with bundle id, pid and which one is frontmost.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_focus",
+      description: "Bring a macOS app to the front before reading its UI tree or clicking.",
+      parameters: {
+        type: "object",
+        properties: { app: { type: "string" } },
+        required: ["app"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_list_dir",
+      description:
+        "List a local directory. Confined to the configured allowlist roots (projects/Documents/Downloads/Desktop by default).",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, limit: { type: "number" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mac_read_file",
+      description: "Read a local text file from within the allowlisted roots.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, maxChars: { type: "number" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "index_dir",
+      description:
+        "Index a local directory into the portfolio knowledge base (ns-rag) so portfolio_ask can cite it afterwards.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, watch: { type: "boolean" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ambient_recall",
+      description:
+        "Recall the recent local ambient transcript (what was said near the Mac) when the user refers to something discussed out loud. Off unless the operator enabled ambient capture; never leaves the machine.",
+      parameters: {
+        type: "object",
+        properties: { minutes: { type: "number" } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_attachments",
       description:
         "List files the user uploaded in chat (PDF, CSV, XLSX, txt, images). Prefer read_attachment for full text.",

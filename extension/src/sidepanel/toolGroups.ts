@@ -1,4 +1,22 @@
 /** Tool allowlist groups for Settings / Tools tabs. */
+
+/** Jarvis / Mac / portfolio tools. */
+export const JARVIS_TOOLS = [
+  "portfolio_ask",
+  "portfolio_search",
+  "mac_ui_tree",
+  "mac_screenshot",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_apps",
+  "mac_focus",
+  "mac_list_dir",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
+] as const;
+
 export const TOOL_GROUPS = {
   Browser: [
     "page_digest",
@@ -100,7 +118,8 @@ export const TOOL_GROUPS = {
     "page_ext_data_clear",
     "list_page_extension_audit",
   ],
-} as const;
+  Jarvis: [...JARVIS_TOOLS],
+};
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
 
@@ -113,4 +132,5 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Agentic",
   "Meta",
   "PageExt",
+  "Jarvis",
 ];

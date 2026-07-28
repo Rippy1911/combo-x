@@ -13,7 +13,10 @@
     "test:llm-eval": "COMBO_X_LLM_EVAL=1 vitest run packages/core/src/agent/llm-eval",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "lint": "tsc --build --pretty false"
+    "lint": "tsc --build --pretty false",
+    "fetch:wake-models": "node scripts/fetch-wake-models.mjs",
+    "build:jarvis": "JARVIS_DEV_BUILD=1 pnpm build",
+    "verify:azure": "node scripts/verify-azure-speech.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1",

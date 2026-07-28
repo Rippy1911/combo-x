@@ -1,6 +1,6 @@
 {
   "name": "@combo-x/extension",
-  "version": "1.6.59",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@combo-x/core": "workspace:*",
+    "onnxruntime-web": "^1.27.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
