@@ -39,7 +39,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: E2E (headless)
-        env:
-          COMBO_X_HEADLESS: "1"
-        run: pnpm test:e2e
+      # MV3 service workers do not boot in headless Chromium, so every SW-dependent
+      # spec used to skip here. Run headed under a virtual display instead.
+      - name: E2E (xvfb, headed)
+        run: xvfb-run -a pnpm test:e2e
