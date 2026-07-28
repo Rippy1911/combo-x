@@ -201,6 +201,19 @@ describe("utterance routing through onJarvisEvent (manual)", () => {
     expect(useJarvis).toBeTypeOf("function");
   });
 
+  it("treats a locked vault as 'no key' instead of throwing", async () => {
+    const { readSecretSafely } = await import("./useJarvis");
+    class VaultLockedError extends Error {}
+    const locked = vi.fn(async () => {
+      throw new VaultLockedError("vault is locked");
+    });
+    await expect(readSecretSafely(locked, "azure_speech_key")).resolves.toBeNull();
+    expect(locked).toHaveBeenCalledWith("azure_speech_key");
+
+    const present = vi.fn(async () => "sk-real");
+    await expect(readSecretSafely(present, "azure_speech_key")).resolves.toBe("sk-real");
+  });
+
   it("drops muted and empty via the same decision helper the hook uses", () => {
     const onCommand = vi.fn();
     if (shouldRouteUtterance({ muted: true, command: "x" })) onCommand("x", "t");

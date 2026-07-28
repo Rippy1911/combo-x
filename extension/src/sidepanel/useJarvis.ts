@@ -91,6 +91,22 @@ export function utteranceCommand(utterance: JarvisUtterance): string {
   return (utterance.text ?? "").trim();
 }
 
+/**
+ * The vault throws `VaultLockedError` instead of returning null, and the panel probes
+ * for Jarvis keys before the operator has unlocked anything. Treat every read failure
+ * as "no key" so a locked vault cannot surface as an unhandled rejection.
+ */
+export async function readSecretSafely(
+  getSecret: (label: string) => Promise<string | null>,
+  label: string,
+): Promise<string | null> {
+  try {
+    return await getSecret(label);
+  } catch {
+    return null;
+  }
+}
+
 function defaultStatus(): JarvisStatus {
   return {
     state: "off",
@@ -116,16 +132,21 @@ export function useJarvis(opts: UseJarvisOptions): UseJarvisResult {
   const [keyStatus, setKeyStatus] = useState({ azure: false, nsRag: false });
   const enabledRef = useRef(false);
 
+  const readSecret = useCallback(
+    (label: string) => readSecretSafely(getSecretRef.current, label),
+    [],
+  );
+
   const refreshKeyStatus = useCallback(async () => {
     const [azure, nsRag] = await Promise.all([
-      getSecretRef.current(AZURE_SPEECH_KEY_LABEL),
-      getSecretRef.current(NS_RAG_API_KEY_LABEL),
+      readSecret(AZURE_SPEECH_KEY_LABEL),
+      readSecret(NS_RAG_API_KEY_LABEL),
     ]);
     setKeyStatus({
       azure: Boolean(azure?.trim()),
       nsRag: Boolean(nsRag?.trim()),
     });
-  }, []);
+  }, [readSecret]);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,7 +226,7 @@ export function useJarvis(opts: UseJarvisOptions): UseJarvisResult {
     setStatus((prev) => ({ ...prev, state: "loading", lastError: null, locale }));
     const res = await startJarvis({
       locale,
-      getSecret: (label) => getSecretRef.current(label),
+      getSecret: readSecret,
     });
     if (!res.ok) {
       setStatus((prev) => ({
@@ -222,7 +243,7 @@ export function useJarvis(opts: UseJarvisOptions): UseJarvisResult {
     const next = await getJarvisStatus();
     setStatus(next);
     void refreshKeyStatus();
-  }, [refreshKeyStatus]);
+  }, [refreshKeyStatus, readSecret]);
 
   const setLocale = useCallback(
     async (locale: SpeechLocale) => {
@@ -233,7 +254,7 @@ export function useJarvis(opts: UseJarvisOptions): UseJarvisResult {
       setStatus((prev) => ({ ...prev, state: "loading", lastError: null, locale }));
       const res = await startJarvis({
         locale,
-        getSecret: (label) => getSecretRef.current(label),
+        getSecret: readSecret,
       });
       if (!res.ok) {
         enabledRef.current = false;
@@ -249,7 +270,7 @@ export function useJarvis(opts: UseJarvisOptions): UseJarvisResult {
       const next = await getJarvisStatus();
       setStatus(next);
     },
-    [],
+    [readSecret],
   );
 
   const speak = useCallback(async (text: string) => {
