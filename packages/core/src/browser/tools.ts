@@ -61,7 +61,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "press_key",
       description:
-        "Dispatch a key on the active element (fallback body). Use Escape to dismiss stuck listboxes/menus/dialogs before get_interactive({scope:\"page\"}).",
+        "Dispatch a key (keydown+keyup) on the active element. Escape dismisses listboxes/menus/dialogs; Enter submits. Tab/arrows dispatch the event but do NOT move browser focus (untrusted events) — for menu navigation use click_index on the target option instead. Useful for apps with their own JS key handlers.",
       parameters: {
         type: "object",
         properties: {
