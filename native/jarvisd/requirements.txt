@@ -1,0 +1,4 @@
+# Runtime-only (macOS). Tests use the system python3 stdlib and must NOT install these.
+pyobjc-framework-Cocoa>=10.0,<12
+pyobjc-framework-Quartz>=10.0,<12
+pyobjc-framework-ApplicationServices>=10.0,<12

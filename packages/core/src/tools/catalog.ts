@@ -8,6 +8,7 @@ export type ToolGroup =
   | "memory"
   | "connectors"
   | "agentic"
+  | "jarvis"
   | "meta";
 
 export interface ToolCatalogEntry {
@@ -304,6 +305,11 @@ const GROUP_DEFAULTS: Record<ToolGroup, Omit<CatalogMeta, "group">> = {
     whenToUse: "Compound workflows (catalog scrape, batch PDPs, parse_data).",
     whenNotToUse: "Single cheap browser read suffices.",
   },
+  jarvis: {
+    useCases: ["See and control the whole Mac, not just a tab"],
+    whenToUse: "Target is a native macOS app, a local folder, or ambient context.",
+    whenNotToUse: "Everything needed is inside a browser tab — use browser tools.",
+  },
   meta: {
     useCases: ["Session utilities, reminders, reports, RAG status"],
     whenToUse: "Auxiliary local ops not tied to one page read.",
@@ -377,6 +383,19 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   start_recording: "media",
   stop_recording: "media",
   rag_status: "meta",
+  portfolio_ask: "memory",
+  portfolio_search: "memory",
+  mac_ui_tree: "jarvis",
+  mac_screenshot: "jarvis",
+  mac_click: "jarvis",
+  mac_type: "jarvis",
+  mac_key: "jarvis",
+  mac_apps: "jarvis",
+  mac_focus: "jarvis",
+  mac_list_dir: "jarvis",
+  mac_read_file: "jarvis",
+  index_dir: "jarvis",
+  ambient_recall: "jarvis",
   save_bookmark: "meta",
   set_reminder: "meta",
   create_report: "meta",
@@ -456,6 +475,7 @@ export function catalogForPrompt(entries: ToolCatalogEntry[]): string {
     "memory",
     "connectors",
     "media",
+    "jarvis",
     "meta",
   ];
   const lines: string[] = ["## Tool catalog", ""];

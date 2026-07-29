@@ -1,4 +1,25 @@
 /** Tool allowlist groups for Settings / Tools tabs. */
+
+/** Combo voice / Mac / portfolio tools. */
+export const COMBO_VOICE_TOOLS = [
+  "portfolio_ask",
+  "portfolio_search",
+  "mac_ui_tree",
+  "mac_screenshot",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_apps",
+  "mac_focus",
+  "mac_list_dir",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
+] as const;
+
+/** @deprecated use COMBO_VOICE_TOOLS */
+export const JARVIS_TOOLS = COMBO_VOICE_TOOLS;
+
 export const TOOL_GROUPS = {
   Browser: [
     "page_digest",
@@ -100,7 +121,8 @@ export const TOOL_GROUPS = {
     "page_ext_data_clear",
     "list_page_extension_audit",
   ],
-} as const;
+  "Combo voice": [...COMBO_VOICE_TOOLS],
+};
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
 
@@ -113,4 +135,5 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Agentic",
   "Meta",
   "PageExt",
+  "Combo voice",
 ];

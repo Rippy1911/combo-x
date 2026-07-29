@@ -128,9 +128,16 @@ export function isProviderReady(
   return Boolean(key?.trim());
 }
 
+/** Common mislabels operators use when pasting OpenRouter keys into the vault. */
+const OPENROUTER_KEY_ALIASES = [
+  "OPENROUTER_API_KEY",
+  "llm_api_key",
+  "or_api_key",
+] as const;
+
 /**
  * Resolve API key for a provider from vault-style getters.
- * OpenRouter: `openrouter_api_key` only.
+ * OpenRouter: `openrouter_api_key`, then a few alias labels.
  * Others: provider label, with no fallback to the OpenRouter key (avoids clobber confusion).
  */
 export async function resolveProviderApiKey(
@@ -138,7 +145,15 @@ export async function resolveProviderApiKey(
   getByLabel: (label: string) => Promise<string | null>,
 ): Promise<string> {
   const label = apiKeyVaultLabel(id);
-  return (await getByLabel(label))?.trim() || "";
+  const primary = (await getByLabel(label))?.trim();
+  if (primary) return primary;
+  if (resolveProvider(id).id === "openrouter") {
+    for (const alt of OPENROUTER_KEY_ALIASES) {
+      const v = (await getByLabel(alt))?.trim();
+      if (v) return v;
+    }
+  }
+  return "";
 }
 
 /**

@@ -24,6 +24,7 @@ export const PACK_SKILL_NAMES: Record<ToolPackId, string> = {
   rag: "combo-rag",
   "page-ext": "combo-page-ext",
   media: "combo-media",
+  jarvis: "combo-jarvis",
 };
 
 /** Skill name/description/hints only — bodies stay on-demand via skill_read. */

@@ -7,9 +7,11 @@ import { AgentProfileStore } from "../agents/profiles.js";
 import { SkillStore } from "../skills/store.js";
 import { UsageStore } from "../usage/store.js";
 import { AttachmentStore } from "../attachments/store.js";
+import { ConnectorStore } from "../connectors/store.js";
 import { AGENT_TOOLS } from "../browser/tools.js";
 import * as pickToolsMod from "../tools/pickTools.js";
 import { ALWAYS_ON_TOOL_NAMES } from "../tools/gating.js";
+import { mintWakeToken } from "../voice/wakeGate.js";
 import type { BrowserBridge, ProfileStore, SiteProfile } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -1531,6 +1533,313 @@ describe("AgentLoop", () => {
     expect(secondCallToolContent).toContain("truncated");
     expect(secondCallToolContent.length).toBeLessThan(5_000);
     expect(secondCallToolContent).not.toContain(fat);
+  });
+
+  describe("Combo voice gate", () => {
+    it("refuses a voice turn with no wake token before calling the model", async () => {
+      const llm = mockLlm([{ content: "should never run" }]);
+      const browser = stubBrowser();
+      const agent = new AgentLoop(
+        llm,
+        browser,
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const result = await agent.run({
+        model: "mock",
+        userMessage: "click Save",
+        source: "voice",
+      });
+      expect(result.steps).toBe(0);
+      expect(result.finalText).toMatch(/wake word/i);
+      expect(llm.chatStreaming).not.toHaveBeenCalled();
+      expect(browser.runContent).not.toHaveBeenCalled();
+    });
+
+    it("refuses an expired wake token", async () => {
+      const llm = mockLlm([{ content: "should never run" }]);
+      const agent = new AgentLoop(
+        llm,
+        stubBrowser(),
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const stale = mintWakeToken(() => Date.now() - 5 * 60_000);
+      const result = await agent.run({
+        model: "mock",
+        userMessage: "click Save",
+        source: "voice",
+        wakeToken: stale,
+      });
+      expect(result.steps).toBe(0);
+      expect(llm.chatStreaming).not.toHaveBeenCalled();
+    });
+
+    it("runs a wake-gated voice command through to a click", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [{ id: "1", name: "click_index", args: JSON.stringify({ index: 3 }) }],
+        },
+        { content: "Clicked Save." },
+      ]);
+      const browser = stubBrowser();
+      const agent = new AgentLoop(
+        llm,
+        browser,
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const result = await agent.run({
+        model: "mock",
+        userMessage: "click Save",
+        source: "voice",
+        wakeToken: mintWakeToken(),
+        onEvent: (e) => {
+          if (e.type === "tool_approval") e.resolve?.(true);
+        },
+      });
+      expect(result.finalText).toContain("Clicked Save.");
+      const ops = (browser.runContent as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+      expect(ops).toContainEqual(expect.objectContaining({ op: "click_index", index: 3 }));
+    });
+
+    it("blocks credential and remote-call tools by voice", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            {
+              id: "1",
+              name: "rest_request",
+              args: JSON.stringify({ connectorId: "gh", tool: "listRepos" }),
+            },
+          ],
+        },
+        { content: "Cannot do that by voice." },
+      ]);
+      const agent = new AgentLoop(
+        llm,
+        stubBrowser(),
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const results: unknown[] = [];
+      await agent.run({
+        model: "mock",
+        userMessage: "call the github api",
+        source: "voice",
+        wakeToken: mintWakeToken(),
+        approvalMode: "auto_all",
+        toolMode: "static",
+        onEvent: (e) => {
+          if (e.type === "tool_result" && e.tool === "rest_request") results.push(e.result);
+        },
+      });
+      expect(results[0]).toMatchObject({ ok: false, error: "voice_forbidden" });
+    });
+
+    it("blocks privileged URL schemes by voice", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            { id: "1", name: "navigate", args: JSON.stringify({ url: "chrome://settings" }) },
+          ],
+        },
+        { content: "Refused." },
+      ]);
+      const browser = stubBrowser();
+      const agent = new AgentLoop(
+        llm,
+        browser,
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const results: unknown[] = [];
+      await agent.run({
+        model: "mock",
+        userMessage: "open chrome settings",
+        source: "voice",
+        wakeToken: mintWakeToken(),
+        approvalMode: "auto_all",
+        onEvent: (e) => {
+          if (e.type === "tool_result" && e.tool === "navigate") results.push(e.result);
+        },
+      });
+      expect(results[0]).toMatchObject({ ok: false, error: "voice_forbidden" });
+      expect(browser.navigate).not.toHaveBeenCalled();
+    });
+
+    it("still asks for confirmation on a sensitive voice action under auto_all", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            { id: "1", name: "navigate", args: JSON.stringify({ url: "https://bank.example" }) },
+          ],
+        },
+        { content: "Skipped." },
+      ]);
+      const browser = stubBrowser();
+      const agent = new AgentLoop(
+        llm,
+        browser,
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      let approvals = 0;
+      await agent.run({
+        model: "mock",
+        userMessage: "open my bank",
+        source: "voice",
+        wakeToken: mintWakeToken(),
+        approvalMode: "auto_all",
+        onEvent: (e) => {
+          if (e.type === "tool_approval") {
+            approvals += 1;
+            e.resolve?.(false);
+          }
+        },
+      });
+      expect(approvals).toBe(1);
+      expect(browser.navigate).not.toHaveBeenCalled();
+    });
+
+    it("keeps auto_all for typed turns", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            { id: "1", name: "navigate", args: JSON.stringify({ url: "https://ok.example" }) },
+          ],
+        },
+        { content: "Done." },
+      ]);
+      const browser = stubBrowser();
+      const agent = new AgentLoop(
+        llm,
+        browser,
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      let approvals = 0;
+      await agent.run({
+        model: "mock",
+        userMessage: "go",
+        approvalMode: "auto_all",
+        onEvent: (e) => {
+          if (e.type === "tool_approval") approvals += 1;
+        },
+      });
+      expect(approvals).toBe(0);
+      expect(browser.navigate).toHaveBeenCalledWith("https://ok.example");
+    });
+  });
+
+  describe("portfolio (ns-rag) tools", () => {
+    it("portfolio_ask calls ns-rag with the vault key and returns citations", async () => {
+      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            answer: "ns-rag is the portfolio knowledge plane.",
+            sources: [{ source_path: "_memory/memories.md", section: "Decisions", score: 0.82 }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            {
+              id: "1",
+              name: "portfolio_ask",
+              args: JSON.stringify({ query: "what is ns-rag" }),
+            },
+          ],
+        },
+        { content: "It is the portfolio knowledge plane." },
+      ]);
+      const agent = new AgentLoop(
+        llm,
+        stubBrowser(),
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const results: unknown[] = [];
+      await agent.run({
+        model: "mock",
+        userMessage: "what is ns-rag?",
+        connectors: {
+          store: new ConnectorStore(`conn_${crypto.randomUUID()}`),
+          getSecret: async (label) => (label === "ns_rag_api_key" ? "secret-key" : null),
+        },
+        onEvent: (e) => {
+          if (e.type === "tool_result" && e.tool === "portfolio_ask") results.push(e.result);
+        },
+      });
+      expect(results[0]).toMatchObject({ ok: true });
+      const call = fetchMock.mock.calls[0]!;
+      expect(String(call[0])).toContain("/ask");
+      const headers = (call[1]?.headers ?? {}) as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer secret-key");
+      vi.unstubAllGlobals();
+    });
+
+    it("portfolio_ask reports a missing vault key instead of throwing", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [
+            { id: "1", name: "portfolio_ask", args: JSON.stringify({ query: "anything" }) },
+          ],
+        },
+        { content: "No key configured." },
+      ]);
+      const agent = new AgentLoop(
+        llm,
+        stubBrowser(),
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const results: Array<{ ok?: boolean; error?: string }> = [];
+      await agent.run({
+        model: "mock",
+        userMessage: "ask",
+        connectors: {
+          store: new ConnectorStore(`conn_${crypto.randomUUID()}`),
+          getSecret: async () => null,
+        },
+        onEvent: (e) => {
+          if (e.type === "tool_result" && e.tool === "portfolio_ask") {
+            results.push(e.result as { ok?: boolean; error?: string });
+          }
+        },
+      });
+      expect(results[0]?.ok).toBe(false);
+      expect(results[0]?.error).toMatch(/ns_rag_api_key/);
+    });
+
+    it("mac tools report a missing daemon instead of hanging", async () => {
+      const llm = mockLlm([
+        {
+          content: null,
+          toolCalls: [{ id: "1", name: "mac_apps", args: "{}" }],
+        },
+        { content: "Daemon not installed." },
+      ]);
+      const agent = new AgentLoop(
+        llm,
+        stubBrowser(),
+        new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+      );
+      const results: Array<{ ok?: boolean; error?: string }> = [];
+      await agent.run({
+        model: "mock",
+        userMessage: "what apps are open",
+        toolMode: "static",
+        onEvent: (e) => {
+          if (e.type === "tool_result" && e.tool === "mac_apps") {
+            results.push(e.result as { ok?: boolean; error?: string });
+          }
+        },
+      });
+      expect(results[0]?.ok).toBe(false);
+      expect(results[0]?.error).toMatch(/jarvisd/i);
+    });
   });
 
   it("runs consecutive non-sensitive tools in parallel", async () => {

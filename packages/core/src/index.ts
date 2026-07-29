@@ -12,7 +12,13 @@ export {
   stitchTilesVertically,
 } from "./media/capture.js";
 
-export { getProtocolVersion, PROTOCOL_VERSION, SENSITIVE_TOOLS } from "./protocol/messages.js";
+export {
+  getProtocolVersion,
+  PROTOCOL_VERSION,
+  SENSITIVE_TOOLS,
+  VOICE_FORBIDDEN_TOOLS,
+  VOICE_FORBIDDEN_URL_SCHEMES,
+} from "./protocol/messages.js";
 export type {
   BrowserToolName,
   ContentRequest,
@@ -258,11 +264,12 @@ export {
 } from "./browser/elementRef.js";
 export type { ActiveTabContext, PickedElementRef } from "./browser/elementRef.js";
 
-export { AgentLoop } from "./agent/loop.js";
+export { AgentLoop, DEFAULT_SYSTEM } from "./agent/loop.js";
 export type {
   AgentEvent,
   AgentRunOptions,
   AgentRunResult,
+  AgentRunSource,
   BrowserBridge,
   ApprovalMode,
   ConnectorBundle,
@@ -550,6 +557,10 @@ export {
   approvalDecisionFor,
 } from "./local/actionLog.js";
 export type { ActionLogEntry, ActionApprovalDecision } from "./local/actionLog.js";
+
+export * from "./voice/index.js";
+export * from "./nsrag/index.js";
+export * from "./mac/index.js";
 
 export { PageExtensionStore } from "./pageExtensions/store.js";
 export { urlMatches, patternToRegExp } from "./pageExtensions/match.js";

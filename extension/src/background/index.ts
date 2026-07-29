@@ -9,6 +9,7 @@ import {
   captureElement,
   captureFullPage,
   captureViewport,
+  ensureOffscreenDocument,
   startRecording,
   stopRecording,
 } from "../lib/media-bridge.js";
@@ -22,11 +23,114 @@ import {
   isStaleContentAsset,
   shouldAttemptContentRecovery,
 } from "./contentRecovery.js";
+import { createJarvisNativePortManager } from "./jarvisNative.js";
 import {
   isHistoryNavSettled,
   isNavigationSettled,
   urlsMatchTarget,
 } from "./navWait.js";
+
+const jarvisNative = createJarvisNativePortManager();
+
+/**
+ * Offscreen is created once with USER_MEDIA + BLOBS (see media-bridge).
+ * MV3 cannot add reasons to an existing offscreen document — if an older
+ * build created it without USER_MEDIA, mic capture fails until the document
+ * is closed and recreated. Prefer the union of reasons up front.
+ */
+async function ensureJarvisOffscreen(): Promise<void> {
+  await ensureOffscreenDocument();
+}
+
+async function sendJarvisOffscreen(message: Record<string, unknown>): Promise<{
+  ok: boolean;
+  error?: string;
+  status?: Record<string, unknown>;
+  granted?: boolean;
+}> {
+  await ensureJarvisOffscreen();
+  return (await chrome.runtime.sendMessage(message)) as {
+    ok: boolean;
+    error?: string;
+    status?: Record<string, unknown>;
+    granted?: boolean;
+  };
+}
+
+/** Sidepanel pages connect here so utterance delivery does not depend on sendMessage. */
+const jarvisEventPorts = new Set<chrome.runtime.Port>();
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "jarvis-events") return;
+  jarvisEventPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    jarvisEventPorts.delete(port);
+  });
+});
+
+function relayJarvisEvent(event: unknown): void {
+  const msg = { type: "jarvis_event", event };
+  for (const port of jarvisEventPorts) {
+    try {
+      port.postMessage(msg);
+    } catch {
+      jarvisEventPorts.delete(port);
+    }
+  }
+  try {
+    // Fallback for older listeners; never handle jarvis_event in this SW switch.
+    void chrome.runtime.sendMessage(msg).catch(() => {
+      /* side panel closed — "Receiving end does not exist" */
+    });
+  } catch {
+    /* swallow */
+  }
+}
+
+/**
+ * Two processes must never open the microphone at once. When jarvisd is installed and
+ * configured with micOwner "daemon" it keeps the mic (and keeps working with Chrome closed);
+ * the offscreen document is the fallback tier when there is no daemon.
+ */
+let micOwnerCache: { owner: "offscreen" | "daemon"; at: number } | null = null;
+const MIC_OWNER_TTL_MS = 30_000;
+
+async function resolveMicOwner(force = false): Promise<"offscreen" | "daemon"> {
+  const fresh = micOwnerCache && Date.now() - micOwnerCache.at < MIC_OWNER_TTL_MS;
+  if (fresh && !force) return micOwnerCache!.owner;
+  try {
+    const { owner } = await jarvisNative.micOwner();
+    micOwnerCache = { owner, at: Date.now() };
+    return owner;
+  } catch {
+    micOwnerCache = { owner: "offscreen", at: Date.now() };
+    return "offscreen";
+  }
+}
+
+// Utterances the daemon captured while it owned the mic arrive unsolicited on the port.
+jarvisNative.onEvent((ev) => {
+  if (ev.event === "utterance") {
+    relayJarvisEvent({ type: "utterance", utterance: ev.data });
+    return;
+  }
+  if (ev.event === "state") {
+    relayJarvisEvent({ type: "status", status: ev.data });
+  }
+});
+
+function isJarvisRuntimeMessage(message: unknown): message is { type: string } {
+  if (!message || typeof message !== "object" || !("type" in message)) return false;
+  const t = (message as { type: unknown }).type;
+  // Only lowercase jarvis_* (sidepanel → SW). Uppercase JARVIS_* is SW → offscreen.
+  // Never claim jarvis_event — that is a broadcast TO the sidepanel; handling it here
+  // made relays look like "unknown jarvis message" and raced delivery.
+  return (
+    typeof t === "string" &&
+    t.startsWith("jarvis_") &&
+    t !== "jarvis_event"
+  );
+}
 
 type SidebarActionApi = {
   open: () => Promise<void>;
@@ -385,6 +489,101 @@ async function runContent(request: ContentRequest, tabId?: number): Promise<Cont
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Jarvis messages are outside RuntimeMessageSchema (strict discriminated union).
+  if (isJarvisRuntimeMessage(message)) {
+    void (async () => {
+      try {
+        switch (message.type) {
+          case "jarvis_offscreen_event": {
+            const ev = (message as { event?: unknown }).event;
+            if (ev) relayJarvisEvent(ev);
+            sendResponse({ ok: true });
+            break;
+          }
+          case "jarvis_start": {
+            const m = message as {
+              locale?: string;
+              azure?: { key?: string; region?: string; locale?: string; voice?: string };
+            };
+            if ((await resolveMicOwner(true)) === "daemon") {
+              sendResponse({
+                ok: true,
+                status: {
+                  state: "listening",
+                  micGranted: true,
+                  micOwner: "daemon",
+                  daemonConnected: jarvisNative.connected,
+                  locale: m.locale,
+                  lastTranscript: null,
+                  lastError: null,
+                },
+              });
+              break;
+            }
+            const res = await sendJarvisOffscreen({
+              type: "JARVIS_START",
+              locale: m.locale,
+              azure: m.azure,
+            });
+            sendResponse(res);
+            break;
+          }
+          case "jarvis_stop": {
+            sendResponse(await sendJarvisOffscreen({ type: "JARVIS_STOP" }));
+            break;
+          }
+          case "jarvis_speak": {
+            const text = String((message as { text?: unknown }).text ?? "");
+            sendResponse(await sendJarvisOffscreen({ type: "JARVIS_SPEAK", text }));
+            break;
+          }
+          case "jarvis_status": {
+            const res = await sendJarvisOffscreen({ type: "JARVIS_STATUS" });
+            const status = {
+              ...(res.status ?? {}),
+              micOwner: await resolveMicOwner(),
+              daemonConnected: jarvisNative.connected,
+            };
+            sendResponse({ ok: true, status });
+            break;
+          }
+          case "jarvis_mic_check": {
+            sendResponse(await sendJarvisOffscreen({ type: "JARVIS_MIC_CHECK" }));
+            break;
+          }
+          case "jarvis_set_debug": {
+            const enabled = Boolean((message as { enabled?: unknown }).enabled);
+            sendResponse(
+              await sendJarvisOffscreen({ type: "JARVIS_SET_DEBUG", enabled }),
+            );
+            break;
+          }
+          case "jarvis_drain_utterances": {
+            sendResponse(
+              await sendJarvisOffscreen({ type: "JARVIS_DRAIN_UTTERANCES" }),
+            );
+            break;
+          }
+          case "jarvis_native": {
+            const m = message as { op?: string; args?: Record<string, unknown> };
+            const op = String(m.op ?? "");
+            const nativeRes = await jarvisNative.send(op, m.args ?? {});
+            sendResponse({ ...nativeRes, connected: jarvisNative.connected });
+            break;
+          }
+          default:
+            sendResponse({ ok: false, error: "unknown jarvis message" });
+        }
+      } catch (e) {
+        sendResponse({
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })();
+    return true;
+  }
+
   const parsed = RuntimeMessageSchema.safeParse(message);
   if (!parsed.success) {
     sendResponse({ ok: false, error: "invalid runtime message" });

@@ -76,7 +76,14 @@ import type {
 import type { MemoryStore } from "../memory/store.js";
 import { DEFAULT_WORKER_MODEL } from "../models.js";
 import { approvalDecisionFor } from "../local/actionLog.js";
-import { SENSITIVE_TOOLS } from "../protocol/messages.js";
+import {
+  SENSITIVE_TOOLS,
+  VOICE_FORBIDDEN_TOOLS,
+  VOICE_FORBIDDEN_URL_SCHEMES,
+} from "../protocol/messages.js";
+import { isActuationAllowed } from "../voice/wakeGate.js";
+import { portfolioAsk, portfolioSearch } from "../nsrag/client.js";
+import { isMacToolName, runMacTool, type ComboNativePort } from "../mac/bridge.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
 import {
@@ -352,7 +359,17 @@ export interface AgentRunOptions {
   /** Pin DOM/navigate tools to this tab id (no activate_tab required). */
   boundTabId?: number;
   onSubagent?: (e: SubagentEvent) => void;
+  /** Where this turn came from. "voice" activates the Combo wake gate. */
+  source?: AgentRunSource;
+  /** Wake token minted when the wake word fired; required for source "voice". */
+  wakeToken?: string | null;
+  /** Native-messaging port to the jarvisd Mac daemon (mac_* / index_dir / ambient_recall). */
+  jarvisPort?: ComboNativePort | null;
+  /** Allowlisted filesystem roots for the Mac file tools. */
+  macRoots?: readonly string[];
 }
+
+export type AgentRunSource = "user" | "voice" | "link" | "subagent";
 
 export interface AgentRunResult {
   messages: ChatMessage[];
@@ -363,7 +380,7 @@ export interface AgentRunResult {
   hitStepLimit: boolean;
 }
 
-const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
+export const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets).
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
@@ -377,6 +394,9 @@ SKILLS vs MEMORY:
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
 UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) — do not answer from get_page alone. It captures, shows a chat screenshot artifact, and vision-attaches for the next turn. Then annotate_screenshot({ attachmentId, markers }) and/or open_preview with attachmentId / beforeAttachmentId / afterAttachmentId. Optional live CSS: page_css_preview → ux_critique again → compare → page_css_clear. Raw screenshot_* need combo-media. Never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
+Combo voice / Azure Speech:
+- Vault labels azure_speech_key and azure_speech_region belong to the Combo voice pill (Start / Test Speech) — NOT to save_rest_connector or rest_request.
+- Never create Azure Speech STT/TTS REST connectors. Tell the user to use Combo Test Speech (any browser) or Combo Start (Chrome/Edge; mic/wake needs offscreen).
 Rules:
 - Prefer page_digest over full get_page dumps.
 - Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
@@ -388,6 +408,30 @@ Rules:
 const PARSE_SYSTEM = `You extract structured data from untrusted page text.
 Reply with ONLY valid JSON: {"rows":[...],"notes":"optional short note"}.
 rows must match the user's intent / schema_hint. No markdown fences.`;
+
+/** Refusal payload when a spoken command reaches a tool/URL voice may never use. */
+function voiceRefusalFor(
+  name: string,
+  args: Record<string, unknown>,
+): { ok: false; error: "voice_forbidden"; hint: string } | null {
+  const forbiddenScheme =
+    name === "navigate" || name === "open_tab"
+      ? VOICE_FORBIDDEN_URL_SCHEMES.find((scheme) =>
+          String(args.url ?? "")
+            .trim()
+            .toLowerCase()
+            .startsWith(scheme),
+        )
+      : undefined;
+  if (!VOICE_FORBIDDEN_TOOLS.has(name) && !forbiddenScheme) return null;
+  return {
+    ok: false,
+    error: "voice_forbidden",
+    hint: forbiddenScheme
+      ? `Voice cannot open ${forbiddenScheme} URLs — ask the user to do it in the side panel.`
+      : `${name} is not available by voice (credentials, remote calls, or injected code). Ask the user to run it from the side panel.`,
+  };
+}
 
 function sumUsage(a: LlmUsage, b: LlmUsage): LlmUsage {
   return {
@@ -491,6 +535,9 @@ interface RunContext {
   approvalPolicies?: ApprovalPolicyStore;
   changeLog?: ChangeLogStore;
   approvalMode?: ApprovalMode;
+  source?: AgentRunSource;
+  jarvisPort?: ComboNativePort | null;
+  macRoots?: readonly string[];
   getApprovalMode?: () => ApprovalMode;
   approvalModel?: string;
   systemPrompt?: string;
@@ -549,6 +596,22 @@ export class AgentLoop {
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
     const nestingDepth = options.nestingDepth ?? 0;
     const runId = options.runId ?? crypto.randomUUID();
+    const isVoice = options.source === "voice";
+    // Ambient speech must never actuate: a voice turn without a live wake token stops here,
+    // before any tool is attached or any model is called.
+    if (!isActuationAllowed({ source: options.source, wakeToken: options.wakeToken })) {
+      const refusal =
+        "Ignored: no active wake word. Say \u201cHey Combo\u201d before a command.";
+      options.onEvent?.({ type: "done", message: refusal, usage: ZERO });
+      return {
+        messages: [],
+        finalText: refusal,
+        steps: 0,
+        usage: ZERO,
+        aborted: false,
+        hitStepLimit: false,
+      };
+    }
     let resolvedProfile: ResolvedAgentProfile | null = null;
     if (options.agentId && options.agents) {
       const profile = await options.agents.get(options.agentId);
@@ -722,6 +785,9 @@ export class AgentLoop {
       connectors: options.connectors,
       attachments: options.attachments,
       views: options.views,
+      source: options.source,
+      jarvisPort: options.jarvisPort,
+      macRoots: options.macRoots,
       approvalPolicies: options.approvalPolicies,
       changeLog: options.changeLog,
       approvalMode: options.approvalMode ?? resolvedProfile?.approvalMode,
@@ -872,8 +938,25 @@ export class AgentLoop {
       const prepareAndRun = async (call: ToolCall): Promise<ToolRow> => {
         if (options.signal?.aborted) return { call, aborted: true };
         const args = parseToolArguments(call.function.arguments);
-        const modeNow = resolveApprovalMode();
+        // Refuse before the approval prompt — never ask the operator to confirm something
+        // voice is not allowed to do anyway.
+        const voiceBlock = isVoice ? voiceRefusalFor(call.function.name, args) : null;
+        if (voiceBlock) {
+          emit({
+            type: "tool_result",
+            tool: call.function.name,
+            args,
+            result: voiceBlock,
+            toolCallId: call.id,
+            approvalDecision: "denied",
+          });
+          return { call, aborted: false, result: voiceBlock };
+        }
         const sensitive = SENSITIVE_TOOLS.has(call.function.name);
+        // A spoken command never inherits Auto-approve for a sensitive action — the operator
+        // confirms out loud, even when the UI is set to auto_all for typed chats.
+        const modeNow =
+          isVoice && sensitive ? "ask" : resolveApprovalMode();
         const allowed = await this.approve(
           call,
           args,
@@ -1737,6 +1820,22 @@ export class AgentLoop {
     try {
       let result: unknown;
 
+      // Hard gate: a voice turn may not touch credentials, arbitrary HTTP/MCP, injected JS
+      // or cloud dispatch, and may not navigate to privileged schemes. Also enforced in
+      // prepareAndRun so the operator is never prompted for a refused action.
+      const voiceBlock = runCtx?.source === "voice" ? voiceRefusalFor(name, args) : null;
+      if (voiceBlock) {
+        emit({
+          type: "tool_result",
+          tool: name,
+          result: voiceBlock,
+          toolCallId: call.id,
+          approvalMode: approvalMeta?.approvalMode,
+          approvalDecision: "denied",
+        });
+        return voiceBlock;
+      }
+
       // Hard gate: skill-gated tools must be unlocked (or toolMode static).
       if (
         runCtx &&
@@ -1900,6 +1999,13 @@ export class AgentLoop {
             ? { ok: true, ...file }
             : { ok: false, error: `path not in index: ${path}` };
         }
+      } else if (name === "portfolio_ask" || name === "portfolio_search") {
+        result = await this.runPortfolioTool(name, args, connectors);
+      } else if (isMacToolName(name)) {
+        result = await runMacTool(name, args, {
+          port: runCtx?.jarvisPort ?? null,
+          roots: runCtx?.macRoots,
+        });
       } else if (name === "list_attachments") {
         if (!attachments) result = { ok: false, error: "attachment store unavailable" };
         else {
@@ -3926,6 +4032,23 @@ export class AgentLoop {
       created: !existing,
       note: `Saved REST connector ${id}. Call rest_request next. Secrets stay as vault refs only.`,
     };
+  }
+
+  private async runPortfolioTool(
+    name: "portfolio_ask" | "portfolio_search",
+    args: Record<string, unknown>,
+    connectors?: ConnectorRuntime,
+  ): Promise<unknown> {
+    if (!connectors?.getSecret) {
+      return { ok: false, error: "vault unavailable — unlock the vault to reach ns-rag" };
+    }
+    const query = String(args.query ?? "").trim();
+    if (!query) return { ok: false, error: "query required" };
+    const opts = typeof args.k === "number" ? { k: args.k } : undefined;
+    const deps = { getSecret: connectors.getSecret };
+    return name === "portfolio_ask"
+      ? portfolioAsk(query, deps, opts)
+      : portfolioSearch(query, deps, opts);
   }
 
   private async runDispatchCursorAgent(

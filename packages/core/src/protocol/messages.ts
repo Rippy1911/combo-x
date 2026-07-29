@@ -25,6 +25,19 @@ export const BrowserToolNameSchema = z.enum([
   "rag_search",
   "rag_read_file",
   "rag_status",
+  "portfolio_ask",
+  "portfolio_search",
+  "mac_ui_tree",
+  "mac_screenshot",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_apps",
+  "mac_focus",
+  "mac_list_dir",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
   "list_attachments",
   "read_attachment",
   "remember",
@@ -300,4 +313,37 @@ export const SENSITIVE_TOOLS = new Set([
   "inject_page_extension",
   "set_page_extension_bridge",
   "page_ext_data_clear",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_focus",
+  "mac_screenshot",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
 ]);
+
+/**
+ * Never reachable from a spoken command: credential use, arbitrary HTTP/MCP with vault
+ * placeholders, page-extension injection, and cloud dispatch. A misheard sentence must not
+ * be able to spend money, exfiltrate a secret, or run injected JS.
+ */
+export const VOICE_FORBIDDEN_TOOLS = new Set([
+  "login",
+  "rest_request",
+  "mcp_call",
+  "save_rest_connector",
+  "ensure_github_connector",
+  "dispatch_cursor_agent",
+  "publish_upload",
+  "spawn_subagent",
+  "create_page_extension",
+  "update_page_extension",
+  "approve_page_extension",
+  "revoke_page_extension",
+  "inject_page_extension",
+  "set_page_extension_bridge",
+]);
+
+/** Schemes a voice-initiated navigation may never target. */
+export const VOICE_FORBIDDEN_URL_SCHEMES = ["chrome:", "chrome-extension:", "file:", "about:", "devtools:"];

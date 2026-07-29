@@ -44,6 +44,19 @@ const TOOL_NAMES = [
   "get_session",
   "remember",
   "recall",
+  "portfolio_ask",
+  "portfolio_search",
+  "mac_ui_tree",
+  "mac_screenshot",
+  "mac_click",
+  "mac_type",
+  "mac_key",
+  "mac_apps",
+  "mac_focus",
+  "mac_list_dir",
+  "mac_read_file",
+  "index_dir",
+  "ambient_recall",
 ];
 
 const FOODWELL_PRESET = new Set([
@@ -99,6 +112,19 @@ const TOOL_BLURB: Record<string, string> = {
   memory_list: "List durable local memories.",
   parse_data: "Cheap worker LLM structured extract.",
   get_interactive: "Indexed clickable/inputs snapshot.",
+  portfolio_ask: "Ask the portfolio agent (IdeaForge / business_copilot bridge).",
+  portfolio_search: "Search portfolio knowledge / memories via the hub bridge.",
+  mac_ui_tree: "Accessibility UI tree for the focused Mac app (jarvisd).",
+  mac_screenshot: "Capture a Mac screen / window via jarvisd.",
+  mac_click: "Click a Mac UI element by AX path or coordinates.",
+  mac_type: "Type text into the focused Mac field.",
+  mac_key: "Send a Mac key combo (e.g. cmd+c).",
+  mac_apps: "List running Mac applications.",
+  mac_focus: "Focus a Mac app by name or bundle id.",
+  mac_list_dir: "List a directory under allowed Mac roots.",
+  mac_read_file: "Read a text file under allowed Mac roots.",
+  index_dir: "Index a local folder for ambient / RAG recall.",
+  ambient_recall: "Recall recent ambient / indexed local context.",
 };
 
 type SetupPayload = {
@@ -182,6 +208,42 @@ function render() {
   });
 
   document.getElementById("close")!.addEventListener("click", () => window.close());
+
+  wireComboMic();
+}
+
+function setMicStatus(text: string): void {
+  const el = document.getElementById("combo-mic-status");
+  if (el) el.textContent = text;
+}
+
+async function refreshMicPermission(): Promise<void> {
+  try {
+    const status = await navigator.permissions.query({
+      name: "microphone" as PermissionName,
+    });
+    setMicStatus(`Permission: ${status.state}`);
+    status.onchange = () => setMicStatus(`Permission: ${status.state}`);
+  } catch {
+    setMicStatus("Permission: (query unsupported — use Grant)");
+  }
+}
+
+function wireComboMic(): void {
+  void refreshMicPermission();
+  document.getElementById("combo-mic")?.addEventListener("click", async () => {
+    const msg = document.getElementById("msg");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const t of stream.getTracks()) t.stop();
+      setMicStatus("Permission: granted");
+      if (msg) msg.textContent = "Microphone granted — Combo voice offscreen can inherit this grant.";
+    } catch (e) {
+      setMicStatus("Permission: denied");
+      if (msg) msg.textContent = `Mic error: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    void refreshMicPermission();
+  });
 }
 
 render();
