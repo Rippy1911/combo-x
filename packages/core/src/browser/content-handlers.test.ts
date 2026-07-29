@@ -326,6 +326,59 @@ describe("handleContentRequest", () => {
     );
   });
 
+  it("get_interactive keeps numeric pickers that lack a pagination label (Bugbot fix)", () => {
+    // A quantity picker with all-numeric options but no "rows per page" label
+    // must NOT be hidden — it is a real control the agent may need to act on.
+    document.body.innerHTML = `
+      <main>
+        <label>Quantity
+          <div role="listbox" aria-label="Quantity">
+            <div role="option">1</div>
+            <div role="option">2</div>
+            <div role="option">3</div>
+            <div role="option">5</div>
+          </div>
+        </label>
+        <button type="button" id="add">Add to cart</button>
+      </main>
+    `;
+    const snap = handleContentRequest({ op: "get_interactive", limit: 80 }, document);
+    expect(snap.ok).toBe(true);
+    const data = snap.data as { items: Array<{ text: string }>; scope: string };
+    expect(data.scope).toBe("page");
+    // Numeric options are visible because there is no pagination label.
+    expect(data.items.some((x) => x.text === "1" || x.text === "5")).toBe(true);
+    expect(data.items.some((x) => x.text === "Add to cart")).toBe(true);
+  });
+
+  it("get_interactive scope=dialog fails when only overlay is pagination (Bugbot fix)", () => {
+    // A rows-per-page listbox is ephemeral UI chrome, not a real dialog.
+    // scope=dialog should fail at the gate (not return an empty list) so the
+    // user knows to use scope=page instead.
+    document.body.innerHTML = `
+      <main><button type="button" id="behind">Behind</button></main>
+      <div role="listbox" aria-label="Rows per page">
+        <div role="option">10</div>
+        <div role="option">25</div>
+      </div>
+    `;
+    const res = handleContentRequest(
+      { op: "get_interactive", scope: "dialog", limit: 20 },
+      document,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/no open dialog/i);
+    // scope=page still works and shows the page controls (pagination options hidden).
+    const page = handleContentRequest(
+      { op: "get_interactive", scope: "page", limit: 20 },
+      document,
+    );
+    expect(page.ok).toBe(true);
+    const data = page.data as { items: Array<{ text: string }>; scope: string };
+    expect(data.scope).toBe("page");
+    expect(data.items.some((x) => x.text === "Behind")).toBe(true);
+  });
+
   it("get_interactive scope=page ignores open dialog", () => {
     document.body.innerHTML = `
       <main><button type="button" id="behind">Behind</button></main>

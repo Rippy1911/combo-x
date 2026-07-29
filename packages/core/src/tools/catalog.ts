@@ -41,11 +41,11 @@ const CURATED: Record<string, CatalogMeta> = {
     group: "browser",
     useCases: [
       "Dismiss stuck listbox/menu with Escape",
-      "Confirm with Enter after typing",
-      "Arrow through Radix/GSC menus",
+      "Submit a form with Enter",
+      "Trigger app JS key handlers (games, custom widgets)",
     ],
-    whenToUse: "Overlay traps get_interactive or a native key dismisses UI faster than clicking.",
-    whenNotToUse: "A clear button index exists — prefer click_index.",
+    whenToUse: "Escape to close an overlay, or Enter to submit. App has its own keydown handler.",
+    whenNotToUse: "Need to move focus (Tab/arrows don't move focus in untrusted events) — use click_index.",
   },
   scrape_pdps: {
     group: "agentic",

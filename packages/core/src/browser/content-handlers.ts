@@ -604,11 +604,13 @@ function isEphemeralPaginationOverlay(el: HTMLElement): boolean {
     .filter((t) => t.length > 0)
     .slice(0, 24);
   if (texts.length < 2) return false;
-  if (texts.every((t) => /^\d+$/.test(t))) return true;
-  // Parent near a pagination control often has no aria-label on the listbox itself.
+  // All-numeric options alone are NOT enough — quantity/year/rating/floor pickers
+  // are also all-numeric. Require a pagination label on the host or its parent.
+  const allNumeric = texts.every((t) => /^\d+$/.test(t));
   const near = el.parentElement?.textContent?.slice(0, 200) ?? "";
-  const numericCount = texts.filter((t) => /^\d+$/.test(t)).length;
-  return PAGINATION_LABEL_RE.test(near) && numericCount >= 2;
+  if (allNumeric && PAGINATION_LABEL_RE.test(label)) return true;
+  if (allNumeric && PAGINATION_LABEL_RE.test(near)) return true;
+  return false;
 }
 
 function pickTopVisible(candidates: HTMLElement[]): HTMLElement | null {
@@ -675,6 +677,8 @@ function findTopStackedOverlay(doc: Document): HTMLElement | null {
   const consider = (el: HTMLElement) => {
     if (!isVisible(el)) return;
     if (el.getAttribute("aria-hidden") === "true") return;
+    // Skip pagination portals — they are tier-below real dialogs (Bugbot fix).
+    if (isEphemeralPaginationOverlay(el)) return;
     const style = view.getComputedStyle(el);
     // Prefer computed; fall back to inline (jsdom / React style props).
     const pos = style.position !== "static" ? style.position : el.style.position || style.position;
@@ -720,6 +724,9 @@ function collectFromRoot(
   root: ParentNode,
   limit: number,
   skipOccluded: boolean,
+  /** When true (scope=dialog), keep the dialog's own children even if it is a
+   * pagination overlay — the caller explicitly asked for this overlay. */
+  keepPaginationChildren = false,
 ): HTMLElement[] {
   const raw = Array.from(root.querySelectorAll(INTERACTIVE_SEL)) as HTMLElement[];
   const out: HTMLElement[] = [];
@@ -727,8 +734,9 @@ function collectFromRoot(
     if (out.length >= limit) break;
     if (!isVisible(el)) continue;
     if (skipOccluded && isOccluded(el)) continue;
-    // Even on scope=page, hide rows-per-page options so they don't crowd the index.
-    if (isInsideEphemeralPagination(el)) continue;
+    // On scope=page/auto, hide rows-per-page options so they don't crowd the index.
+    // On scope=dialog, the user explicitly asked for this overlay's contents.
+    if (!keepPaginationChildren && isInsideEphemeralPagination(el)) continue;
     out.push(el);
   }
   return out;
@@ -757,7 +765,9 @@ function collectInteractive(
   const modal = findTopModal(doc);
   if (scopeMode === "dialog") {
     // Caller already verified modal exists when scope=dialog.
-    const out = collectFromRoot(doc, modal ?? doc, limit, false);
+    // keepPaginationChildren=true: the user explicitly asked for this overlay,
+    // so even if it is a rows-per-page listbox, return its options (Bugbot fix).
+    const out = collectFromRoot(doc, modal ?? doc, limit, false, true);
     return {
       els: out,
       scope: "dialog",
