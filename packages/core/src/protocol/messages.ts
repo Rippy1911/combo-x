@@ -15,6 +15,7 @@ export const BrowserToolNameSchema = z.enum([
   "wait",
   "find_text",
   "get_interactive",
+  "press_key",
   "click_index",
   "type_index",
   "query_all",
@@ -154,6 +155,11 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("get_interactive"),
     limit: z.number().int().positive().max(120).optional(),
+    scope: z.enum(["auto", "page", "dialog"]).optional(),
+  }),
+  z.object({
+    op: z.literal("press_key"),
+    key: z.enum(["Escape", "Enter", "Tab", "ArrowDown", "ArrowUp"]),
   }),
   z.object({
     op: z.literal("click_index"),
@@ -289,6 +295,7 @@ export const SENSITIVE_TOOLS = new Set([
   "type_text",
   "click_index",
   "type_index",
+  "press_key",
   "open_tab",
   "activate_tab",
   "navigate",

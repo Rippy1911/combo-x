@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../llm/openrouter.js";
 import {
+  compressHistory,
+  historyChars,
   historyFromUiTurns,
   leanHistory,
   scrubDataUrls,
@@ -162,5 +164,103 @@ describe("leanHistory (T-LEAN-1)", () => {
     const lean = leanHistory(history);
     const joined = lean.map((m) => String(m.content)).join("\n");
     expect(joined).not.toContain(b64);
+  });
+});
+
+describe("compressHistory (context limit)", () => {
+  function bigTurns(n: number, chars: number): ChatMessage[] {
+    const out: ChatMessage[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push({ role: "user", content: `u${i} ${"y".repeat(chars)}` });
+      out.push({
+        role: "assistant",
+        content: `a${i} ${"z".repeat(chars)}`,
+      });
+    }
+    return out;
+  }
+
+  it("historyChars sums message lengths", () => {
+    const h: ChatMessage[] = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "world" },
+    ];
+    expect(historyChars(h)).toBe(5 + 16 + 5 + 16);
+  });
+
+  it("returns history unchanged when under limit", () => {
+    const h = bigTurns(2, 100);
+    const r = compressHistory(h, 10_000);
+    expect(r.compressed).toBe(false);
+    expect(r.history).toBe(h);
+    expect(r.droppedTurns).toBe(0);
+  });
+
+  it("returns history unchanged when contextLimit is 0 (disabled)", () => {
+    const h = bigTurns(50, 500);
+    const r = compressHistory(h, 0);
+    expect(r.compressed).toBe(false);
+    expect(r.history).toBe(h);
+  });
+
+  it("compresses older turns into a summary when over limit", () => {
+    const h = bigTurns(20, 800);
+    const limit = 8_000;
+    const r = compressHistory(h, limit);
+    expect(r.compressed).toBe(true);
+    expect(r.droppedTurns).toBeGreaterThan(0);
+    expect(r.afterChars).toBeLessThan(r.beforeChars);
+    expect(r.afterChars).toBeLessThanOrEqual(limit + 200);
+    // First message is the summary marker
+    const first = r.history[0]!;
+    expect(first.role).toBe("user");
+    expect(String(first.content)).toMatch(/CONTEXT AUTO-COMPRESSED/i);
+    expect(String(first.content)).toMatch(/USER GOALS/i);
+    // Newest turn is preserved verbatim
+    const last = r.history[r.history.length - 1]!;
+    expect(String(last.content)).toMatch(/^a19/);
+  });
+
+  it("summary preserves user goals from dropped turns", () => {
+    const h: ChatMessage[] = [
+      { role: "user", content: "scrape the catalog" },
+      { role: "assistant", content: "done" },
+      { role: "user", content: "now export csv" },
+      { role: "assistant", content: "x".repeat(9000) },
+    ];
+    const r = compressHistory(h, 4_000);
+    expect(r.compressed).toBe(true);
+    const summary = String(r.history[0]?.content);
+    expect(summary).toContain("scrape the catalog");
+    expect(summary).toContain("now export csv");
+  });
+
+  it("summary mentions list_tasks resume instruction", () => {
+    const h = bigTurns(20, 800);
+    const r = compressHistory(h, 8_000);
+    expect(String(r.history[0]?.content)).toMatch(/list_tasks/i);
+  });
+
+  it("tool crumbs are preserved in summary", () => {
+    const h: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "1",
+            type: "function",
+            function: { name: "navigate", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "assistant", content: "x".repeat(9000) },
+    ];
+    const r = compressHistory(h, 4_000);
+    if (r.compressed) {
+      const summary = String(r.history[0]?.content);
+      expect(summary).toMatch(/tools:\s*navigate/i);
+    }
   });
 });

@@ -1740,6 +1740,27 @@ input.mono {
   background: color-mix(in srgb, var(--accent, #3d8bfd) 14%, var(--bg));
 }
 
+.context-limit-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  margin-left: 2px;
+}
+
+.context-limit-toggle:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent, #3d8bfd) 55%, var(--border));
+}
+
 .budget-info-pop {
   position: absolute;
   right: 0;

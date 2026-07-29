@@ -24,6 +24,7 @@ export const ALWAYS_ON_TOOL_NAMES: readonly string[] = [
   "get_page",
   "get_links",
   "get_interactive",
+  "press_key",
   "click_index",
   "type_index",
   "click",

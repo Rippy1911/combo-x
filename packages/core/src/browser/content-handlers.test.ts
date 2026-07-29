@@ -295,4 +295,117 @@ describe("handleContentRequest", () => {
     expect(handleContentRequest({ op: "clear_css" }, document).ok).toBe(true);
     expect(document.getElementById("combo-x-css-preview")).toBeNull();
   });
+
+  it("get_interactive ignores GSC-like pagination listbox and keeps page controls", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Mapy witryn</h1>
+        <input type="text" placeholder="Wprowadź adres URL mapy witryny" id="sitemap" />
+        <button type="button" id="submit">Prześlij</button>
+      </main>
+      <div role="listbox" aria-label="Rows per page">
+        <div role="option">5</div>
+        <div role="option">10</div>
+        <div role="option">25</div>
+        <div role="option">50</div>
+        <div role="option">100</div>
+        <div role="option">250</div>
+        <div role="option">500</div>
+      </div>
+    `;
+    const snap = handleContentRequest({ op: "get_interactive", limit: 80 }, document);
+    expect(snap.ok).toBe(true);
+    const data = snap.data as {
+      items: Array<{ text: string; placeholder?: string }>;
+      scope: string;
+    };
+    expect(data.scope).toBe("page");
+    expect(data.items.some((x) => x.text === "5" || x.text === "500")).toBe(false);
+    expect(data.items.some((x) => x.placeholder?.includes("mapy") || x.text === "Prześlij")).toBe(
+      true,
+    );
+  });
+
+  it("get_interactive scope=page ignores open dialog", () => {
+    document.body.innerHTML = `
+      <main><button type="button" id="behind">Behind</button></main>
+      <div role="dialog" aria-modal="true">
+        <button type="button" id="save">Save</button>
+      </div>
+    `;
+    const auto = handleContentRequest({ op: "get_interactive", limit: 20 }, document);
+    expect((auto.data as { scope: string }).scope).toBe("dialog");
+    expect(
+      ((auto.data as { items: Array<{ text: string }> }).items.some((x) => x.text === "Save")),
+    ).toBe(true);
+
+    const page = handleContentRequest(
+      { op: "get_interactive", limit: 20, scope: "page" },
+      document,
+    );
+    expect(page.ok).toBe(true);
+    const data = page.data as { items: Array<{ text: string }>; scope: string };
+    expect(data.scope).toBe("page");
+    expect(data.items.some((x) => x.text === "Behind")).toBe(true);
+  });
+
+  it("get_interactive scope=dialog fails when none open", () => {
+    document.body.innerHTML = `<button type="button">Only</button>`;
+    const res = handleContentRequest(
+      { op: "get_interactive", scope: "dialog" },
+      document,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/no open dialog/i);
+  });
+
+  it("press_key Escape dispatches on activeElement", () => {
+    document.body.innerHTML = `<button type="button" id="btn">Focus me</button>`;
+    const btn = document.getElementById("btn")!;
+    btn.focus();
+    let saw = false;
+    btn.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") saw = true;
+    });
+    const res = handleContentRequest({ op: "press_key", key: "Escape" }, document);
+    expect(res.ok).toBe(true);
+    expect(saw).toBe(true);
+    expect((res.data as { key: string }).key).toBe("Escape");
+  });
+
+  it("page_digest.seo includes meta canonical robots and jsonLdTypes", () => {
+    document.documentElement.lang = "en";
+    document.head.innerHTML = `
+      <title>AIron.Coach</title>
+      <meta name="description" content="AI fitness coach" />
+      <meta name="robots" content="index,follow" />
+      <meta property="og:title" content="AIron OG" />
+      <meta property="og:description" content="OG desc" />
+      <meta property="og:image" content="https://airon.coach/og.png" />
+      <link rel="canonical" href="https://airon.coach/" />
+      <script type="application/ld+json">{"@type":"WebSite","name":"AIron"}</script>
+    `;
+    document.body.innerHTML = `<h1>BreakThrough</h1><main>Hello</main>`;
+    const res = handleContentRequest({ op: "page_digest" }, document);
+    expect(res.ok).toBe(true);
+    const data = res.data as {
+      title: string;
+      seo: {
+        metaDescription?: string;
+        robots?: string;
+        canonical?: string;
+        ogTitle?: string;
+        h1Count: number;
+        jsonLdTypes: string[];
+        lang?: string;
+      };
+    };
+    expect(data.seo.metaDescription).toBe("AI fitness coach");
+    expect(data.seo.robots).toBe("index,follow");
+    expect(data.seo.canonical).toMatch(/airon\.coach/);
+    expect(data.seo.ogTitle).toBe("AIron OG");
+    expect(data.seo.h1Count).toBe(1);
+    expect(data.seo.jsonLdTypes).toContain("WebSite");
+    expect(data.seo.lang).toBe("en");
+  });
 });

@@ -24,7 +24,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "page_digest",
       description:
-        "Cheap page map: title, url, headings, EAN/catalog label hits, short main sample — NOT full nav chrome. Prefer this over get_page for PDPs/invoices.",
+        "Cheap page map: title, url, headings, EAN/catalog label hits, short main sample, plus seo.{metaDescription,robots,canonical,og*,lang,h1Count,jsonLdTypes}. Prefer this over get_page for PDPs/invoices/SEO checks.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -45,10 +45,32 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index. When a dialog/modal OR high-z floating portal is open, the list is SCOPED to that layer only (scope=dialog) — re-call after opening a modal so Save/Plan title appear. Check item.type before type_index (never free-text into type=time).",
+        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index. Default scope=auto: scopes to topmost dialog/menu/high-z portal (not ephemeral pagination listboxes). scope=page forces full document; scope=dialog requires an open dialog. Stuck in a rows-per-page menu? press_key Escape then get_interactive({scope:\"page\"}). Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
-        properties: { limit: { type: "number" } },
+        properties: {
+          limit: { type: "number" },
+          scope: { type: "string", enum: ["auto", "page", "dialog"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "press_key",
+      description:
+        "Dispatch a key on the active element (fallback body). Use Escape to dismiss stuck listboxes/menus/dialogs before get_interactive({scope:\"page\"}).",
+      parameters: {
+        type: "object",
+        properties: {
+          key: {
+            type: "string",
+            enum: ["Escape", "Enter", "Tab", "ArrowDown", "ArrowUp"],
+          },
+        },
+        required: ["key"],
         additionalProperties: false,
       },
     },
@@ -2113,7 +2135,24 @@ export function toolArgsToContentRequest(
       return {
         op: "get_interactive",
         limit: typeof args.limit === "number" ? args.limit : 80,
+        scope:
+          args.scope === "page" || args.scope === "dialog" || args.scope === "auto"
+            ? args.scope
+            : undefined,
       };
+    case "press_key": {
+      const key = args.key;
+      if (
+        key !== "Escape" &&
+        key !== "Enter" &&
+        key !== "Tab" &&
+        key !== "ArrowDown" &&
+        key !== "ArrowUp"
+      ) {
+        return null;
+      }
+      return { op: "press_key", key };
+    }
     case "click_index":
       if (typeof args.index !== "number") return null;
       return { op: "click_index", index: Math.floor(args.index) };

@@ -285,6 +285,8 @@ export {
   redactToolResultSnippet,
   scrubDataUrls,
   truncateToolResultForLlm,
+  compressHistory,
+  historyChars,
 } from "./agent/leanHistory.js";
 export type { UiHistoryTurn } from "./agent/leanHistory.js";
 
