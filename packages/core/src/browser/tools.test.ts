@@ -45,6 +45,7 @@ describe("tool helpers", () => {
       "type_text",
       "click_index",
       "type_index",
+      "press_key",
       "navigate",
       "open_tab",
       "go_back",
@@ -73,6 +74,16 @@ describe("tool helpers", () => {
       maxChars: 1000,
     });
     expect(toolArgsToContentRequest("page_digest", {})).toEqual({ op: "page_digest" });
+    expect(toolArgsToContentRequest("get_interactive", { scope: "page", limit: 40 })).toEqual({
+      op: "get_interactive",
+      limit: 40,
+      scope: "page",
+    });
+    expect(toolArgsToContentRequest("press_key", { key: "Escape" })).toEqual({
+      op: "press_key",
+      key: "Escape",
+    });
+    expect(toolArgsToContentRequest("press_key", { key: "Space" })).toBeNull();
     expect(toolArgsToContentRequest("click", { selector: "#x" })).toEqual({
       op: "click",
       selector: "#x",

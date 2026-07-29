@@ -75,6 +75,8 @@ export type SettingsPanelProps = {
   approvalPolicies: ApprovalPolicyStore;
   budgetMode: AgentBudgetMode;
   setBudgetMode: (v: AgentBudgetMode) => void;
+  contextLimit: number;
+  setContextLimit: (v: number) => void;
   enabledTools: Set<string>;
   setEnabledTools: (fn: (prev: Set<string>) => Set<string>) => void;
   activeAgentId: string | null;
@@ -128,6 +130,8 @@ export function SettingsPanel({
   approvalPolicies,
   budgetMode,
   setBudgetMode,
+  contextLimit,
+  setContextLimit,
   enabledTools,
   setEnabledTools,
   activeAgentId,
@@ -1251,6 +1255,23 @@ export function SettingsPanel({
       <p className="hint wrap">
         Same control as the Budget toggle next to STOP in Chat. Does not truncate the tool catalog —
         saves tokens via page-read caps, step limits, and history packing.
+      </p>
+      <label className="hint">Context limit (auto-compress)</label>
+      <select
+        value={String(contextLimit)}
+        onChange={(e) => setContextLimit(Number.parseInt(e.target.value, 10))}
+      >
+        <option value="0">Off — no auto-compress (full lean history)</option>
+        <option value="32000">32k chars</option>
+        <option value="64000">64k chars (default)</option>
+        <option value="96000">96k chars</option>
+        <option value="128000">128k chars</option>
+      </select>
+      <p className="hint wrap">
+        When prior-turn history exceeds this, older turns collapse into a single summary
+        (user goals + tool crumbs) so the run keeps going past the model's window. The open
+        task list is re-injected each turn and survives compression — use create_task for
+        multi-step work so goals are not lost.
       </p>
     </div>
   );

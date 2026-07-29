@@ -12,6 +12,67 @@ const interactiveMaps = new WeakMap<Document, HTMLElement[]>();
 
 const EAN_RE = /\b(\d{8}|\d{13}|\d{14})\b/g;
 
+function metaContent(doc: Document, nameOrProp: string): string | undefined {
+  for (const meta of Array.from(doc.querySelectorAll("meta"))) {
+    const name = meta.getAttribute("name") ?? "";
+    const prop = meta.getAttribute("property") ?? "";
+    if (
+      name.toLowerCase() === nameOrProp.toLowerCase() ||
+      prop.toLowerCase() === nameOrProp.toLowerCase()
+    ) {
+      const content = meta.getAttribute("content")?.trim();
+      if (content) return content;
+    }
+  }
+  return undefined;
+}
+
+function collectJsonLdTypes(doc: Document): string[] {
+  const out: string[] = [];
+  const pushType = (t: unknown) => {
+    if (typeof t === "string" && t.trim()) out.push(t.trim());
+    else if (Array.isArray(t)) for (const x of t) pushType(x);
+  };
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    if ("@type" in obj) pushType(obj["@type"]);
+    if (Array.isArray(obj["@graph"])) walk(obj["@graph"]);
+  };
+  for (const script of Array.from(
+    doc.querySelectorAll('script[type="application/ld+json"]'),
+  ).slice(0, 12)) {
+    const raw = (script.textContent ?? "").trim();
+    if (!raw) continue;
+    try {
+      walk(JSON.parse(raw));
+    } catch {
+      /* ignore broken JSON-LD */
+    }
+  }
+  return [...new Set(out)].slice(0, 20);
+}
+
+function pageDigestSeo(doc: Document): Record<string, unknown> {
+  const canonicalEl = doc.querySelector('link[rel="canonical"]') as HTMLLinkElement | null;
+  return {
+    metaDescription: metaContent(doc, "description"),
+    robots: metaContent(doc, "robots"),
+    googlebot: metaContent(doc, "googlebot"),
+    canonical: canonicalEl?.href || undefined,
+    ogTitle: metaContent(doc, "og:title"),
+    ogDescription: metaContent(doc, "og:description"),
+    ogImage: metaContent(doc, "og:image"),
+    lang: doc.documentElement?.lang?.trim() || undefined,
+    h1Count: doc.querySelectorAll("h1").length,
+    jsonLdTypes: collectJsonLdTypes(doc),
+  };
+}
+
 function pageDigest(doc: Document): Record<string, unknown> {
   const url = doc.location?.href ?? "";
   const title = doc.title;
@@ -53,7 +114,8 @@ function pageDigest(doc: Document): Record<string, unknown> {
     labelHits,
     eans,
     mainSample,
-    hint: "Use extract/query_all for precise fields; avoid get_page full.",
+    seo: pageDigestSeo(doc),
+    hint: "Use extract/query_all for precise fields; avoid get_page full. seo.* = meta/canonical/JSON-LD.",
   };
 }
 
@@ -162,7 +224,14 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
       }
       case "get_interactive": {
         const limit = request.limit ?? 80;
-        const collected = collectInteractive(doc, limit);
+        const scopeMode = request.scope ?? "auto";
+        if (scopeMode === "dialog" && !findTopModal(doc)) {
+          return {
+            ok: false,
+            error: "no open dialog/menu to scope to; use scope=auto or scope=page",
+          };
+        }
+        const collected = collectInteractive(doc, limit, scopeMode);
         interactiveMaps.set(doc, collected.els);
         const items = collected.els.map((el, index) => ({
           i: index,
@@ -189,9 +258,36 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             hint:
               collected.hint ??
               (items.length === 0
-                ? "No interactive elements found. Close overlays, hard-refresh the tab, or reload the extension."
+                ? "No interactive elements found. Close overlays (press_key Escape), hard-refresh the tab, or reload the extension."
                 : undefined),
           },
+        };
+      }
+      case "press_key": {
+        const key = request.key;
+        const target =
+          (doc.activeElement instanceof HTMLElement ? doc.activeElement : null) ??
+          (doc.body as HTMLElement | null) ??
+          (doc.documentElement as HTMLElement | null);
+        if (!target) return { ok: false, error: "no element to receive key event" };
+        const code =
+          key === "Escape"
+            ? "Escape"
+            : key === "Enter"
+              ? "Enter"
+              : key === "Tab"
+                ? "Tab"
+                : key === "ArrowDown"
+                  ? "ArrowDown"
+                  : key === "ArrowUp"
+                    ? "ArrowUp"
+                    : key;
+        const opts: KeyboardEventInit = { key, code, bubbles: true, cancelable: true };
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        return {
+          ok: true,
+          data: { key, target: target.tagName.toLowerCase() },
         };
       }
       case "click_index": {
@@ -484,25 +580,87 @@ function doScroll(
 export const INTERACTIVE_SEL =
   'a[href], button, input:not([type="hidden"]), textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"]';
 
-/**
- * Topmost open dialog/modal/menu.
- * 1) ARIA: [aria-modal], role=dialog, dialog[open]
- * 2) Open menus/listboxes (Radix DropdownMenu etc.)
- * 3) Heuristic: high-z fixed/absolute portals on document.body
- */
-function findTopModal(doc: Document): HTMLElement | null {
-  const candidates = Array.from(
-    doc.querySelectorAll(
-      '[aria-modal="true"], dialog[open], [role="dialog"], [role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-dropdown-menu-content], [data-state="open"][role="menu"]',
-    ),
+const PAGINATION_LABEL_RE =
+  /rows?\s*per\s*page|na\s*stron[eę]|wierszy|liczba\s*wierszy|items?\s*per\s*page|per\s*page/i;
+
+/** GSC / data-grid "5,10,25,50…" listboxes must not steal get_interactive scope. */
+function isEphemeralPaginationOverlay(el: HTMLElement): boolean {
+  const label = [
+    el.getAttribute("aria-label") ?? "",
+    el.getAttribute("aria-labelledby")
+      ? (el.ownerDocument.getElementById(el.getAttribute("aria-labelledby")!)?.textContent ?? "")
+      : "",
+    el.getAttribute("title") ?? "",
+  ]
+    .join(" ")
+    .trim();
+  if (label && PAGINATION_LABEL_RE.test(label)) return true;
+
+  const options = Array.from(
+    el.querySelectorAll('[role="option"], [role="menuitem"], button, li'),
   ) as HTMLElement[];
+  const texts = options
+    .map((o) => (o.innerText || o.textContent || "").trim().replace(/\s+/g, " "))
+    .filter((t) => t.length > 0)
+    .slice(0, 24);
+  if (texts.length < 2) return false;
+  if (texts.every((t) => /^\d+$/.test(t))) return true;
+  // Parent near a pagination control often has no aria-label on the listbox itself.
+  const near = el.parentElement?.textContent?.slice(0, 200) ?? "";
+  const numericCount = texts.filter((t) => /^\d+$/.test(t)).length;
+  return PAGINATION_LABEL_RE.test(near) && numericCount >= 2;
+}
+
+function pickTopVisible(candidates: HTMLElement[]): HTMLElement | null {
   for (let i = candidates.length - 1; i >= 0; i--) {
     const el = candidates[i]!;
     if (!isVisible(el)) continue;
     if (el.getAttribute("aria-hidden") === "true") continue;
     return el;
   }
+  return null;
+}
+
+/**
+ * Topmost open dialog/modal/menu (tiered).
+ * 1) ARIA dialog / aria-modal
+ * 2) Menus (Radix) — skip pagination-like
+ * 3) Listboxes — skip pagination-like (GSC rows-per-page)
+ * 4) Heuristic: high-z fixed/absolute portals on document.body
+ */
+function findTopModal(doc: Document): HTMLElement | null {
+  const dialogs = Array.from(
+    doc.querySelectorAll('[aria-modal="true"], dialog[open], [role="dialog"]'),
+  ) as HTMLElement[];
+  const dialog = pickTopVisible(dialogs);
+  if (dialog) return dialog;
+
+  const menus = (
+    Array.from(
+      doc.querySelectorAll(
+        '[role="menu"], [data-radix-menu-content], [data-radix-dropdown-menu-content], [data-state="open"][role="menu"]',
+      ),
+    ) as HTMLElement[]
+  ).filter((el) => !isEphemeralPaginationOverlay(el));
+  const menu = pickTopVisible(menus);
+  if (menu) return menu;
+
+  const listboxes = (
+    Array.from(doc.querySelectorAll('[role="listbox"]')) as HTMLElement[]
+  ).filter((el) => !isEphemeralPaginationOverlay(el));
+  const listbox = pickTopVisible(listboxes);
+  if (listbox) return listbox;
+
   return findTopStackedOverlay(doc);
+}
+
+function optionTextsLookLikePagination(els: HTMLElement[]): boolean {
+  if (!els.length) return false;
+  const texts = els
+    .map((el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " "))
+    .filter((t) => t.length > 0);
+  if (texts.length < 2) return false;
+  return texts.every((t) => /^\d+$/.test(t));
 }
 
 /** Body-level fixed/absolute portals with high z-index + interactive children. */
@@ -551,46 +709,98 @@ function findTopStackedOverlay(doc: Document): HTMLElement | null {
   return hits[0]!.el;
 }
 
-function collectInteractive(
-  doc: Document,
+function isInsideEphemeralPagination(el: HTMLElement): boolean {
+  const host = el.closest('[role="listbox"], [role="menu"]') as HTMLElement | null;
+  if (!host) return false;
+  return isEphemeralPaginationOverlay(host);
+}
+
+function collectFromRoot(
+  _doc: Document,
+  root: ParentNode,
   limit: number,
-): { els: HTMLElement[]; scope: "dialog" | "page"; hint?: string } {
-  const modal = findTopModal(doc);
-  const root: ParentNode = modal ?? doc;
+  skipOccluded: boolean,
+): HTMLElement[] {
   const raw = Array.from(root.querySelectorAll(INTERACTIVE_SEL)) as HTMLElement[];
   const out: HTMLElement[] = [];
   for (const el of raw) {
     if (out.length >= limit) break;
     if (!isVisible(el)) continue;
-    // When scoped to dialog/menu, keep everything visible inside it.
-    // On full page, skip nodes under aria-hidden / inert ancestors.
-    if (!modal && isOccluded(el)) continue;
+    if (skipOccluded && isOccluded(el)) continue;
+    // Even on scope=page, hide rows-per-page options so they don't crowd the index.
+    if (isInsideEphemeralPagination(el)) continue;
     out.push(el);
   }
-  // Radix/shadcn often set aria-hidden on #root while a portal menu is open.
-  // If that hides every control and we didn't detect the portal, fall back.
-  if (!out.length && !modal && raw.length) {
-    const relaxed: HTMLElement[] = [];
-    for (const el of raw) {
-      if (relaxed.length >= limit) break;
-      if (!isVisible(el)) continue;
-      relaxed.push(el);
+  return out;
+}
+
+function collectInteractive(
+  doc: Document,
+  limit: number,
+  scopeMode: "auto" | "page" | "dialog" = "auto",
+): { els: HTMLElement[]; scope: "dialog" | "page"; hint?: string } {
+  if (scopeMode === "page") {
+    const out = collectFromRoot(doc, doc, limit, true);
+    if (!out.length) {
+      const relaxed = collectFromRoot(doc, doc, limit, false);
+      if (relaxed.length) {
+        return {
+          els: relaxed,
+          scope: "page",
+          hint: "scope=page; controls were under aria-hidden — showing them anyway.",
+        };
+      }
     }
-    if (relaxed.length) {
+    return { els: out, scope: "page", hint: "scope=page — full document (overlays ignored)." };
+  }
+
+  const modal = findTopModal(doc);
+  if (scopeMode === "dialog") {
+    // Caller already verified modal exists when scope=dialog.
+    const out = collectFromRoot(doc, modal ?? doc, limit, false);
+    return {
+      els: out,
+      scope: "dialog",
+      hint: "Scoped to topmost dialog/menu/overlay — indices are only inside that layer.",
+    };
+  }
+
+  // auto
+  if (modal) {
+    const scoped = collectFromRoot(doc, modal, limit, false);
+    if (scoped.length && !optionTextsLookLikePagination(scoped)) {
       return {
-        els: relaxed,
-        scope: "page",
-        hint: "Page controls were under aria-hidden (open overlay?). Showing them anyway — prefer get_interactive again after closing menus.",
+        els: scoped,
+        scope: "dialog",
+        hint: "Scoped to topmost dialog/menu/overlay — indices are only inside that layer. Stuck? press_key Escape then get_interactive({scope:\"page\"}).",
       };
     }
+    // Ephemeral pagination slipped through, or empty — fall through to page.
+    const pageEls = collectFromRoot(doc, doc, limit, true);
+    return {
+      els: pageEls.length ? pageEls : collectFromRoot(doc, doc, limit, false),
+      scope: "page",
+      hint: "Ignored ephemeral listbox/menu; use press_key Escape if UI still open. Or get_interactive({scope:\"page\"}).",
+    };
   }
-  return {
-    els: out,
-    scope: modal ? "dialog" : "page",
-    hint: modal
-      ? "Scoped to topmost dialog/menu/overlay — indices are only inside that layer."
-      : undefined,
-  };
+
+  const out = collectFromRoot(doc, doc, limit, true);
+  // Radix/shadcn often set aria-hidden on #root while a portal menu is open.
+  // If that hides every control and we didn't detect the portal, fall back.
+  if (!out.length) {
+    const raw = Array.from(doc.querySelectorAll(INTERACTIVE_SEL)) as HTMLElement[];
+    if (raw.length) {
+      const relaxed = collectFromRoot(doc, doc, limit, false);
+      if (relaxed.length) {
+        return {
+          els: relaxed,
+          scope: "page",
+          hint: "Page controls were under aria-hidden (open overlay?). Showing them anyway — prefer get_interactive again after closing menus (press_key Escape).",
+        };
+      }
+    }
+  }
+  return { els: out, scope: "page" };
 }
 
 /** Deepest useful pick target under the cursor (not the whole page/nav). */

@@ -73,7 +73,7 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /** Bump when a seed body/toolHints must refresh existing IDB rows. */
-export const SEED_REVISION = "v1.6.52";
+export const SEED_REVISION = "v1.7.9";
 
 /**
  * Playbook-only seeds (empty toolHints) rewritten when revision advances.
@@ -87,6 +87,7 @@ const SEED_FORCE_REFRESH = new Set([
   "combo-vault-setup",
   "combo-self-improve",
   "combo-repo-ops",
+  "combo-seo-check",
 ]);
 
 export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "updatedAt">[] {
@@ -236,6 +237,28 @@ NEVER answer a visual UX audit from get_page / get_links alone.
 4) Lock vault when done; secrets stay AES-GCM encrypted locally
 5) Do not echo secret values in tool args or replies`,
       tags: [...nowTag, "vault", "onboarding"],
+      scope: "global",
+      toolHints: [],
+    },
+    {
+      name: "combo-seo-check",
+      description:
+        "On-page SEO + free SERP/GSC checks (page_digest.seo; no paid SerpAPI)",
+      body: `SEO CHECK PLAYBOOK (always-on browser tools — skill_read for this playbook)
+
+1) Target page: navigate → page_digest. Read seo.{metaDescription,robots,canonical,og*,lang,h1Count,jsonLdTypes} + headings. Note missing description/canonical/H1.
+2) robots/sitemap: navigate https://<host>/robots.txt; follow Sitemap: URL; page_digest or get_page snippet. Confirm allow rules.
+3) Free SERP (no paid API):
+   - Google: navigate https://www.google.com/search?q=site%3A<host> (and 2–3 target keywords)
+   - Bing: https://www.bing.com/search?q=site%3A<host>
+   - DuckDuckGo: https://duckduckgo.com/?q=site%3A<host>
+   For each: page_digest + query_all on result titles/links. CAPTCHA / consent interstitial / logged-out empty = Blocked (say so; do not invent ranks).
+4) Google Search Console (if user has tab open):
+   - If get_interactive only shows 5/10/25/50… → press_key Escape → get_interactive({scope:"page"})
+   - Submit sitemap path from robots (often full https URL or path relative to property)
+   - Prefer scope=page after any listbox/menu opens
+5) Report: indexed? (site: hits), on-page gaps, sitemap status, Blocked reasons. Do NOT claim SerpAPI/Ahrefs data.`,
+      tags: [...nowTag, "seo", "gsc", "serp"],
       scope: "global",
       toolHints: [],
     },

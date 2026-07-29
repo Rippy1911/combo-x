@@ -191,3 +191,124 @@ export function historyFromUiTurns(turns: UiHistoryTurn[]): ChatMessage[] {
   }
   return out;
 }
+
+/** Approx char length of a ChatMessage (content + 16 bytes overhead). */
+function messageChars(m: ChatMessage): number {
+  return messageContentAsText(m.content).length + 16;
+}
+
+/** Total chars across an array of ChatMessages. */
+export function historyChars(history: ChatMessage[]): number {
+  return history.reduce((n, m) => n + messageChars(m), 0);
+}
+
+/**
+ * Compress prior turns into a single summary when total chars exceed `contextLimit`.
+ * Keeps the newest turns verbatim (up to ~50% of the limit); older turns collapse
+ * into one system-style message that preserves user goals, tool names, and short
+ * result snippets so the agent can resume without losing the plot.
+ *
+ * Returns the original history when under the limit (no compression needed).
+ *
+ * The returned array always starts with a single `user`-role summary message
+ * (when compression fired) followed by the kept newest turns. Callers can
+ * detect compression via the second return value (`compressed: boolean`).
+ */
+export function compressHistory(
+  history: ChatMessage[],
+  contextLimit: number,
+): { history: ChatMessage[]; compressed: boolean; droppedTurns: number; beforeChars: number; afterChars: number } {
+  if (!contextLimit || contextLimit <= 0) {
+    return { history, compressed: false, droppedTurns: 0, beforeChars: 0, afterChars: 0 };
+  }
+  const beforeChars = historyChars(history);
+  if (beforeChars <= contextLimit) {
+    return { history, compressed: false, droppedTurns: 0, beforeChars, afterChars: beforeChars };
+  }
+
+  // Walk from the newest end, keeping turns until we hit ~50% of the limit.
+  const keepBudget = Math.floor(contextLimit * 0.5);
+  const kept: ChatMessage[] = [];
+  let keptChars = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    const len = messageChars(m);
+    if (kept.length > 0 && keptChars + len > keepBudget) break;
+    kept.unshift(m);
+    keptChars += len;
+  }
+
+  const dropped = history.slice(0, history.length - kept.length);
+  if (!dropped.length) {
+    return { history, compressed: false, droppedTurns: 0, beforeChars, afterChars: beforeChars };
+  }
+
+  const summary = summarizeDroppedTurns(dropped);
+  const afterChars = messageChars(summary) + keptChars;
+  return {
+    history: [summary, ...kept],
+    compressed: true,
+    droppedTurns: dropped.length,
+    beforeChars,
+    afterChars,
+  };
+}
+
+/**
+ * Build a single `user`-role summary message from dropped turns.
+ * Preserves: user goals (verbatim, capped), assistant tool names, short result snippets.
+ * Never includes raw tool JSON or sensitive values (already redacted by redactToolResultSnippet).
+ */
+function summarizeDroppedTurns(dropped: ChatMessage[]): ChatMessage {
+  const userGoals: string[] = [];
+  const assistantNotes: string[] = [];
+  let toolTurnCount = 0;
+
+  for (const m of dropped) {
+    if (m.role === "user") {
+      const text = messageContentAsText(m.content).trim();
+      if (text) userGoals.push(text.slice(0, 280));
+    } else if (m.role === "assistant") {
+      const text = messageContentAsText(m.content).trim();
+      if (m.tool_calls?.length) {
+        toolTurnCount += 1;
+        const names = m.tool_calls.map((c) => c.function.name).slice(0, 6);
+        const more = m.tool_calls.length > 6 ? ` +${m.tool_calls.length - 6}` : "";
+        const resultsLine = /Results:/.test(text) ? `\n${text.split(/Results:/)[1]!.slice(0, 400)}` : "";
+        assistantNotes.push(
+          `[tools: ${names.join(", ")}${more}]${resultsLine}`,
+        );
+      } else if (text) {
+        assistantNotes.push(text.slice(0, 200));
+      }
+    }
+  }
+
+  const goalsBlock = userGoals.length
+    ? userGoals
+        .slice(-6)
+        .map((g, i) => `${i + 1}. ${g}`)
+        .join("\n")
+    : "(none recorded)";
+
+  const notesBlock = assistantNotes.length
+    ? assistantNotes
+        .slice(-10)
+        .map((n) => `- ${n}`)
+        .join("\n")
+    : "(none)";
+
+  const content = `[CONTEXT AUTO-COMPRESSED — ${dropped.length} prior turns summarized to save tokens]
+
+USER GOALS FROM COMPRESSED TURNS (most recent last):
+${goalsBlock}
+
+ASSISTANT ACTIONS / TOOL CRUMBS FROM COMPRESSED TURNS:
+${notesBlock}
+
+Tool-calling turns in compressed range: ${toolTurnCount}.
+
+Resume instructions: re-read open tasks via list_tasks before continuing. Do not claim work is done that was only started in the compressed range — verify with tools first.`;
+
+  return { role: "user", content };
+}

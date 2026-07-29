@@ -163,6 +163,7 @@ const TOOLS_STORAGE_KEY = "combo_x_enabled_tools";
 const DETECT_SECRETS_KEY = "combo_x_detect_secrets";
 const APPROVAL_KEY = "combo_x_approval_mode";
 const BUDGET_KEY = "combo_x_budget_mode";
+const CONTEXT_LIMIT_KEY = "combo_x_context_limit";
 const RAG_EXCLUDE_KEY = "combo_x_rag_exclude";
 const LAST_SESSION_KEY = "combo_x_last_session_id";
 const SHOW_ACTIONS_KEY = "combo_x_show_actions";
@@ -170,6 +171,8 @@ const MAX_STEPS_KEY = "combo_x_max_steps";
 const SESSIONS_PINNED_KEY = "combo_x_sessions_pinned";
 const WEB_SEARCH_KEY = "combo_x_web_search";
 const STEPS_PRESETS = [8, 12, 16, 24, 32, 48] as const;
+const CONTEXT_LIMIT_PRESETS = [0, 32_000, 64_000, 96_000, 128_000] as const;
+const CONTEXT_LIMIT_DEFAULT = 64_000;
 
 type TabId =
   | "chat"
@@ -459,6 +462,10 @@ export function App() {
     const v = localStorage.getItem(BUDGET_KEY);
     return v === "normal" ? "normal" : "budget";
   });
+  const [contextLimit, setContextLimit] = useState<number>(() => {
+    const v = Number.parseInt(localStorage.getItem(CONTEXT_LIMIT_KEY) ?? "", 10);
+    return Number.isFinite(v) && v >= 0 ? v : CONTEXT_LIMIT_DEFAULT;
+  });
   const [ragExclude, setRagExclude] = useState(
     () => localStorage.getItem(RAG_EXCLUDE_KEY) ?? DEFAULT_SKIP_DIRS.join(", "),
   );
@@ -639,6 +646,10 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(BUDGET_KEY, budgetMode);
   }, [budgetMode]);
+
+  useEffect(() => {
+    localStorage.setItem(CONTEXT_LIMIT_KEY, String(contextLimit));
+  }, [contextLimit]);
 
   useEffect(() => {
     localStorage.setItem(RAG_EXCLUDE_KEY, ragExclude);
@@ -2189,6 +2200,9 @@ export function App() {
           flushAssistant({ artifacts: [...turnArtifacts] });
         }
         if (event.type === "error" && event.message) publishStatus(event.message);
+        if (event.type === "context_compressed" && event.message) {
+          publishStatus(event.message);
+        }
         if (event.type === "done") {
           if (isBoundActive()) setPlanningTool(null);
           publishStreaming(null);
@@ -2220,6 +2234,7 @@ export function App() {
           getApprovalMode: () => activeProfile?.approvalMode ?? approvalModeRef.current,
           approvalModel: runWorker,
           budgetMode: runBudget,
+          contextLimit,
           usageLog: usageStore,
           tasks: taskStore,
           pageExtensions,
@@ -2372,6 +2387,8 @@ export function App() {
       actionLog,
       attachments,
       budgetMode,
+      contextLimit,
+      setContextLimit,
       connectorStore,
       views,
       bridge,
@@ -3789,6 +3806,27 @@ export function App() {
                   </div>
                 ) : null}
               </div>
+              <button
+                type="button"
+                className="context-limit-toggle"
+                title={
+                  contextLimit > 0
+                    ? `Context limit: ${Math.round(contextLimit / 1000)}k chars — auto-compresses older turns to keep the task going`
+                    : "Context limit: Off — no auto-compress (full lean history)"
+                }
+                onClick={() => {
+                  const idx = CONTEXT_LIMIT_PRESETS.indexOf(
+                    contextLimit as (typeof CONTEXT_LIMIT_PRESETS)[number],
+                  );
+                  const next =
+                    idx >= 0 && idx < CONTEXT_LIMIT_PRESETS.length - 1
+                      ? CONTEXT_LIMIT_PRESETS[idx + 1]!
+                      : CONTEXT_LIMIT_PRESETS[0]!;
+                  setContextLimit(next);
+                }}
+              >
+                {contextLimit > 0 ? `Ctx ${Math.round(contextLimit / 1000)}k` : "Ctx Off"}
+              </button>
             </div>
             <div className="usage-footer">
               <span
@@ -3960,6 +3998,8 @@ export function App() {
           approvalPolicies={approvalPolicies}
           budgetMode={budgetMode}
           setBudgetMode={setBudgetMode}
+          contextLimit={contextLimit}
+          setContextLimit={setContextLimit}
           enabledTools={enabledTools}
           setEnabledTools={updateEnabledTools}
           activeAgentId={activeAgentId}

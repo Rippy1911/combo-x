@@ -48,10 +48,11 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 
 | Tool | Use when |
 |------|----------|
-| `page_digest` | Cheap page map (title, headings, EAN/label hits) — **default in budget mode** |
+| `page_digest` | Cheap page map (title, headings, EAN/label hits, `seo.*`) — **default in budget mode** |
 | `get_page` | Read tab text (`snippet` / `structure` / `full`; budget caps/rejects `full`) |
 | `get_links` | List links (text + href) |
-| `get_interactive` | Indexed clickable/inputs — prefer over guessing CSS |
+| `get_interactive` | Indexed clickable/inputs — prefer over guessing CSS; `scope` auto\|page\|dialog |
+| `press_key` | Escape/Enter/Tab/arrows on active element (dismiss stuck listboxes) |
 | `click_index` / `type_index` | Act on index from `get_interactive` |
 | `click` / `type_text` | CSS selector interaction |
 | `extract` | Single selector text/attribute |
@@ -70,7 +71,11 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 | `get_scrape_table` | Read current scrape progress |
 | `scrape_pdps` | Batch PDP scrape: navigate → digest → upsert (one tool turn) |
 
-**Sensitive** (approval-gated): `click`, `type_text`, `click_index`, `type_index`, `open_tab`, `activate_tab`, `navigate`, `go_back`, `close_tab`, `login`, `scrape_catalog`, `scrape_pdps` — see `SENSITIVE_TOOLS` in `packages/core/src/protocol/messages.ts`.
+**Sensitive** (approval-gated): `click`, `type_text`, `click_index`, `type_index`, `press_key`, `open_tab`, `activate_tab`, `navigate`, `go_back`, `close_tab`, `login`, `scrape_catalog`, `scrape_pdps` — see `SENSITIVE_TOOLS` in `packages/core/src/protocol/messages.ts`.
+
+### Context limit (auto-compress)
+
+Next to Budget mode in the chat header (and in Settings → Global token budget), the `Ctx` toggle sets a soft char limit on prior-turn history. When the lean history exceeds it, older turns collapse into a single summary message (user goals + tool crumbs) so the run keeps going past the model's window. The open task list is re-injected each turn and survives compression — use `create_task` for multi-step work so goals are not lost. Off by default in code; UI default 64k.
 
 ### Element picker (user → agent)
 

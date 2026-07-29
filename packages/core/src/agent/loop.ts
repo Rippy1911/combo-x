@@ -64,7 +64,7 @@ import {
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
-import { leanHistory, truncateToolResultForLlm } from "./leanHistory.js";
+import { leanHistory, truncateToolResultForLlm, compressHistory } from "./leanHistory.js";
 import type {
   ChatMessage,
   ChatResult,
@@ -241,7 +241,8 @@ export interface AgentEvent {
     | "usage"
     | "run_context"
     | "tools_unlocked"
-    | "preview";
+    | "preview"
+    | "context_compressed";
   message?: string;
   tool?: string;
   args?: Record<string, unknown>;
@@ -263,6 +264,10 @@ export interface AgentEvent {
   activeTools?: string[];
   /** open_preview / auto screenshot surface */
   preview?: ChatPreviewPayload;
+  /** Present on context_compressed events */
+  compressedTurns?: number;
+  beforeChars?: number;
+  afterChars?: number;
 }
 
 /** Runtime for dynamic REST/MCP connectors (no hardcoded hosts). */
@@ -343,6 +348,13 @@ export interface AgentRunOptions {
   changeLog?: ChangeLogStore;
   /** Minimize steps/tokens — prefer page_digest + worker parse */
   budgetMode?: AgentBudgetMode;
+  /**
+   * Soft context limit (chars) for prior-turn history. When the lean history
+   * exceeds this, older turns are auto-compressed into a single summary message
+   * (user goals + tool crumbs) so the run can keep going past the model's window.
+   * 0 / undefined = disabled (use lean history cap only). Default 60000 when UI sets it.
+   */
+  contextLimit?: number;
   /** Sub-agent nesting depth (0 = root orchestrator). */
   nestingDepth?: number;
   /** Agent profile store for create/list/update/spawn. */
@@ -382,7 +394,7 @@ export interface AgentRunResult {
 
 export const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
-For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets).
+For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Ephemeral pagination listboxes (rows-per-page 5/10/25…) are ignored; if still stuck, press_key Escape then get_interactive({scope:"page"}). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets). page_digest includes seo.* (meta/canonical/robots/JSON-LD) for indexing checks; skill_read combo-seo-check for SERP/GSC playbook.
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
 For current facts / news use web_search (or OpenRouter built-in web search when enabled); use web_fetch or navigate for full pages. Prefer web_search over inventing URLs.
 SKILLS vs MEMORY:
@@ -394,6 +406,11 @@ SKILLS vs MEMORY:
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
 UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) — do not answer from get_page alone. It captures, shows a chat screenshot artifact, and vision-attaches for the next turn. Then annotate_screenshot({ attachmentId, markers }) and/or open_preview with attachmentId / beforeAttachmentId / afterAttachmentId. Optional live CSS: page_css_preview → ux_critique again → compare → page_css_clear. Raw screenshot_* need combo-media. Never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
+TASK TRACKING (mandatory for multi-step work):
+- For any task with 3+ steps or that spans multiple tool turns: create_task at the start (defaults to this session). One task per discrete deliverable; short titles.
+- Set status=doing on the active item; update_task status=done ONLY when verifiably finished — never invent completion.
+- list_tasks at the start of a turn when resuming, and any time you see a "CONTEXT AUTO-COMPRESSED" notice — the open task list is re-injected each turn and survives compression, so it is your source of truth for goals.
+- When context is auto-compressed, do NOT claim prior work is done — verify with tools first, then update tasks.
 Combo voice / Azure Speech:
 - Vault labels azure_speech_key and azure_speech_region belong to the Combo voice pill (Start / Test Speech) — NOT to save_rest_connector or rest_request.
 - Never create Azure Speech STT/TTS REST connectors. Tell the user to use Combo Test Speech (any browser) or Combo Start (Chrome/Edge; mic/wake needs offscreen).
@@ -724,7 +741,11 @@ export class AgentLoop {
     ].filter(Boolean);
     const messages: ChatMessage[] = [
       { role: "system", content: systemParts.join("\n\n") },
-      ...leanHistory(options.history ?? [], leanHistoryMaxChars(budgetMode)),
+      ...this.applyContextLimit(
+        leanHistory(options.history ?? [], leanHistoryMaxChars(budgetMode)),
+        options.contextLimit,
+        emit,
+      ),
       { role: "user", content: userContent },
     ];
 
@@ -1256,6 +1277,30 @@ export class AgentLoop {
     } catch {
       return "";
     }
+  }
+
+  /**
+   * Apply soft context limit: when lean history still exceeds `contextLimit`,
+   * compress older turns into a single summary message and emit a
+   * `context_compressed` event so the UI/agent know goals were preserved.
+   * No-op when contextLimit is 0/undefined or history is already under the limit.
+   */
+  private applyContextLimit(
+    lean: ChatMessage[],
+    contextLimit: number | undefined,
+    emit: (e: AgentEvent) => void,
+  ): ChatMessage[] {
+    if (!contextLimit || contextLimit <= 0) return lean;
+    const result = compressHistory(lean, contextLimit);
+    if (!result.compressed) return lean;
+    emit({
+      type: "context_compressed",
+      message: `Context auto-compressed: ${result.droppedTurns} prior turns → 1 summary (${result.beforeChars} → ${result.afterChars} chars). Review list_tasks to resume goals.`,
+      compressedTurns: result.droppedTurns,
+      beforeChars: result.beforeChars,
+      afterChars: result.afterChars,
+    });
+    return result.history;
   }
 
   /** Skill name/description index (bodies via skill_read). */
