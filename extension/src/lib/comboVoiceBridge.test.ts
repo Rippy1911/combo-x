@@ -9,18 +9,18 @@ vi.mock("@combo-x/core", () => ({
 import {
   checkMicPermission,
   createNativePort,
-  getJarvisStatus,
-  JARVIS_LOCALE_KEY,
-  loadJarvisLocale,
-  onJarvisEvent,
+  getComboStatus,
+  COMBO_LOCALE_KEY,
+  loadComboLocale,
+  onComboEvent,
   openSetupPageForMic,
-  saveJarvisLocale,
-  speakJarvis,
-  startJarvis,
-  stopJarvis,
-} from "./jarvis-bridge.js";
+  saveComboLocale,
+  speakCombo,
+  startCombo,
+  stopCombo,
+} from "./comboVoiceBridge.js";
 
-describe("jarvis-bridge", () => {
+describe("comboVoiceBridge", () => {
   const sendMessage = vi.fn();
   const addListener = vi.fn();
   const removeListener = vi.fn();
@@ -49,7 +49,7 @@ describe("jarvis-bridge", () => {
     vi.restoreAllMocks();
   });
 
-  it("startJarvis posts jarvis_start with resolved azure", async () => {
+  it("startCombo posts jarvis_start with resolved azure", async () => {
     resolveAzureSpeechConfig.mockResolvedValue({
       key: "k",
       region: "northeurope",
@@ -58,7 +58,7 @@ describe("jarvis-bridge", () => {
     });
     sendMessage.mockResolvedValue({ ok: true });
 
-    const res = await startJarvis({
+    const res = await startCombo({
       locale: "en-US",
       getSecret: async () => "k",
     });
@@ -76,9 +76,9 @@ describe("jarvis-bridge", () => {
     });
   });
 
-  it("startJarvis returns clear error when vault lacks azure key", async () => {
+  it("startCombo returns clear error when vault lacks azure key", async () => {
     resolveAzureSpeechConfig.mockResolvedValue(null);
-    const res = await startJarvis({
+    const res = await startCombo({
       locale: "pl-PL",
       getSecret: async () => null,
     });
@@ -88,11 +88,11 @@ describe("jarvis-bridge", () => {
 
   it("stop/speak/status send expected message shapes", async () => {
     sendMessage.mockResolvedValue({ ok: true });
-    await stopJarvis();
+    await stopCombo();
     expect(sendMessage).toHaveBeenCalledWith({ type: "jarvis_stop" });
 
     sendMessage.mockResolvedValue({ ok: true });
-    await speakJarvis("cześć");
+    await speakCombo("cześć");
     expect(sendMessage).toHaveBeenCalledWith({ type: "jarvis_speak", text: "cześć" });
 
     sendMessage.mockResolvedValue({
@@ -107,20 +107,37 @@ describe("jarvis-bridge", () => {
         daemonConnected: false,
       },
     });
-    const status = await getJarvisStatus();
+    const status = await getComboStatus();
     expect(sendMessage).toHaveBeenCalledWith({ type: "jarvis_status" });
     expect(status.state).toBe("listening");
   });
 
-  it("checkMicPermission posts jarvis_mic_check", async () => {
+  it("checkMicPermission trusts sidepanel Permissions API when granted", async () => {
+    Object.defineProperty(globalThis.navigator, "permissions", {
+      configurable: true,
+      value: {
+        query: vi.fn().mockResolvedValue({ state: "granted" }),
+      },
+    });
+    await expect(checkMicPermission()).resolves.toBe(true);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("checkMicPermission falls back to jarvis_mic_check when prompt", async () => {
+    Object.defineProperty(globalThis.navigator, "permissions", {
+      configurable: true,
+      value: {
+        query: vi.fn().mockResolvedValue({ state: "prompt" }),
+      },
+    });
     sendMessage.mockResolvedValue({ ok: true, granted: true });
     await expect(checkMicPermission()).resolves.toBe(true);
     expect(sendMessage).toHaveBeenCalledWith({ type: "jarvis_mic_check" });
   });
 
-  it("onJarvisEvent filters only jarvis_event and unsubscribes", () => {
+  it("onComboEvent filters only jarvis_event and unsubscribes", () => {
     const cb = vi.fn();
-    const unsub = onJarvisEvent(cb);
+    const unsub = onComboEvent(cb);
     expect(addListener).toHaveBeenCalledTimes(1);
     const listener = addListener.mock.calls[0]![0] as (msg: unknown) => void;
 
@@ -134,10 +151,10 @@ describe("jarvis-bridge", () => {
   });
 
   it("locale load/save defaults to pl-PL", () => {
-    expect(loadJarvisLocale()).toBe("pl-PL");
-    saveJarvisLocale("en-US");
-    expect(localStorage.getItem(JARVIS_LOCALE_KEY)).toBe("en-US");
-    expect(loadJarvisLocale()).toBe("en-US");
+    expect(loadComboLocale()).toBe("pl-PL");
+    saveComboLocale("en-US");
+    expect(localStorage.getItem(COMBO_LOCALE_KEY)).toBe("en-US");
+    expect(loadComboLocale()).toBe("en-US");
   });
 
   it("createNativePort posts jarvis_native and reflects connected", async () => {

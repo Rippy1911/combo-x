@@ -27,6 +27,13 @@ describe("parseWakeUtterance", () => {
     expect(r.matchedPhrase?.toLowerCase()).toContain("jarvis");
   });
 
+  it("strips Combo brand phrases from STT", () => {
+    const r = parseWakeUtterance("Hey Combo, go to Google");
+    expect(r.armed).toBe(true);
+    expect(r.command).toBe("go to Google");
+    expect(r.matchedPhrase?.toLowerCase()).toContain("combo");
+  });
+
   it("arms bare wake word with empty command", () => {
     const r = parseWakeUtterance("  jarvis  ");
     expect(r).toEqual({ armed: true, command: "", matchedPhrase: "jarvis" });

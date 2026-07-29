@@ -10,6 +10,7 @@ export {
 export type { MacAppRef, PathCheck } from "./safety.js";
 
 export {
+  COMBO_NATIVE_HOST,
   JARVIS_NATIVE_HOST,
   MAC_NAMED_KEYS,
   MAC_TOOL_NAMES,
@@ -20,6 +21,9 @@ export {
   runMacTool,
 } from "./bridge.js";
 export type {
+  ComboNativePort,
+  ComboNativeRequest,
+  ComboNativeResponse,
   JarvisNativePort,
   JarvisNativeRequest,
   JarvisNativeResponse,

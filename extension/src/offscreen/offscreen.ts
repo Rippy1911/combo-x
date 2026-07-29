@@ -1,5 +1,5 @@
 import type { CropRect } from "@combo-x/core";
-import { JarvisVoiceRuntime, type JarvisVoiceEvent } from "./jarvisVoice.js";
+import { ComboVoiceRuntime, type ComboVoiceEvent } from "./comboVoice.js";
 
 type SpeechLocale = "pl-PL" | "en-US";
 type AzureSpeechConfig = {
@@ -24,7 +24,9 @@ type OffscreenRequest =
   | { type: "JARVIS_STOP" }
   | { type: "JARVIS_SPEAK"; text: string }
   | { type: "JARVIS_STATUS" }
-  | { type: "JARVIS_MIC_CHECK" };
+  | { type: "JARVIS_MIC_CHECK" }
+  | { type: "JARVIS_SET_DEBUG"; enabled: boolean }
+  | { type: "JARVIS_DRAIN_UTTERANCES" };
 
 type OffscreenResponse = {
   ok: boolean;
@@ -32,17 +34,18 @@ type OffscreenResponse = {
   error?: string;
   note?: string;
   ready?: boolean;
-  status?: ReturnType<JarvisVoiceRuntime["status"]>;
+  status?: ReturnType<ComboVoiceRuntime["status"]>;
   granted?: boolean;
+  utterances?: Array<{ text: string; wakeToken: string; at: number }>;
 };
 
 let mediaRecorder: MediaRecorder | null = null;
 let recordedChunks: Blob[] = [];
 let activeStream: MediaStream | null = null;
 
-const jarvis = new JarvisVoiceRuntime();
+const comboVoice = new ComboVoiceRuntime();
 
-jarvis.onEvent = (event: JarvisVoiceEvent) => {
+comboVoice.onEvent = (event: ComboVoiceEvent) => {
   try {
     void chrome.runtime.sendMessage({ type: "jarvis_offscreen_event", event });
   } catch {
@@ -213,6 +216,24 @@ async function stitchTiles(
   }
 }
 
+
+/** COMBO_VOICE_* aliases map to the same handlers as JARVIS_* (MV3 offscreen protocol). */
+const COMBO_VOICE_TYPE_ALIASES: Record<string, OffscreenRequest["type"]> = {
+  COMBO_VOICE_START: "JARVIS_START",
+  COMBO_VOICE_STOP: "JARVIS_STOP",
+  COMBO_VOICE_SPEAK: "JARVIS_SPEAK",
+  COMBO_VOICE_STATUS: "JARVIS_STATUS",
+  COMBO_VOICE_MIC_CHECK: "JARVIS_MIC_CHECK",
+  COMBO_VOICE_SET_DEBUG: "JARVIS_SET_DEBUG",
+  COMBO_VOICE_DRAIN_UTTERANCES: "JARVIS_DRAIN_UTTERANCES",
+};
+
+function resolveOffscreenVoiceType(type: string): OffscreenRequest["type"] | undefined {
+  const mapped = COMBO_VOICE_TYPE_ALIASES[type];
+  if (mapped) return mapped;
+  return OFFSCREEN_TYPES.has(type) ? (type as OffscreenRequest["type"]) : undefined;
+}
+
 const OFFSCREEN_TYPES = new Set([
   "OFFSCREEN_PING",
   "START_RECORDING",
@@ -224,11 +245,16 @@ const OFFSCREEN_TYPES = new Set([
   "JARVIS_SPEAK",
   "JARVIS_STATUS",
   "JARVIS_MIC_CHECK",
+  "JARVIS_SET_DEBUG",
+  "JARVIS_DRAIN_UTTERANCES",
 ]);
 
-chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendResponse) => {
-  if (!message || typeof message !== "object" || !("type" in message)) return false;
-  if (!OFFSCREEN_TYPES.has(message.type)) return false;
+chrome.runtime.onMessage.addListener((raw: OffscreenRequest, _sender, sendResponse) => {
+  if (!raw || typeof raw !== "object" || !("type" in raw)) return false;
+  const resolvedType = resolveOffscreenVoiceType(String(raw.type));
+  if (!resolvedType) return false;
+  const message =
+    resolvedType === raw.type ? raw : ({ ...raw, type: resolvedType } as OffscreenRequest);
 
   void (async () => {
     let res: OffscreenResponse;
@@ -250,7 +276,7 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
           res = await stitchTiles(message.tiles, message.tileCssHeights, message.dpr);
           break;
         case "JARVIS_START": {
-          const status = await jarvis.start(message.locale, message.azure);
+          const status = await comboVoice.start(message.locale, message.azure);
           res = {
             ok: status.state !== "error",
             status,
@@ -259,21 +285,36 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
           break;
         }
         case "JARVIS_STOP": {
-          const status = await jarvis.stop();
+          const status = await comboVoice.stop();
           res = { ok: true, status };
           break;
         }
         case "JARVIS_SPEAK": {
-          const spoken = await jarvis.speak(message.text);
-          res = { ok: spoken.ok, error: spoken.error, status: jarvis.status() };
+          const spoken = await comboVoice.speak(message.text);
+          res = { ok: spoken.ok, error: spoken.error, status: comboVoice.status() };
           break;
         }
         case "JARVIS_STATUS":
-          res = { ok: true, status: jarvis.status() };
+          res = { ok: true, status: comboVoice.status() };
           break;
         case "JARVIS_MIC_CHECK": {
-          const granted = await jarvis.micCheck();
-          res = { ok: granted, granted, status: jarvis.status() };
+          const granted = await comboVoice.micCheck();
+          const status = comboVoice.status();
+          res = {
+            ok: granted,
+            granted,
+            error: granted ? undefined : status.lastError ?? "Microphone not granted",
+            status,
+          };
+          break;
+        }
+        case "JARVIS_SET_DEBUG": {
+          comboVoice.setDebug(Boolean(message.enabled));
+          res = { ok: true, status: comboVoice.status() };
+          break;
+        }
+        case "JARVIS_DRAIN_UTTERANCES": {
+          res = { ok: true, utterances: comboVoice.drainUtterances(), status: comboVoice.status() };
           break;
         }
         default:
@@ -281,7 +322,7 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      res = { ok: false, error: msg, status: jarvis.status() };
+      res = { ok: false, error: msg, status: comboVoice.status() };
     }
     sendResponse(res);
   })();

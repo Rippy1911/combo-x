@@ -983,12 +983,41 @@ export function SettingsPanel({
         <code>ollama pull qwen2.5:32b</code>
       </p>
       <label className="hint">API key {providerPreset.keyOptional ? "(optional)" : ""}</label>
-      <input
-        type="password"
-        value={apiKey}
-        onChange={(e) => setApiKey(e.target.value)}
-        placeholder={providerPreset.keyPlaceholder}
-      />
+      <div className="row wrap" style={{ gap: 6, alignItems: "center" }}>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder={providerPreset.keyPlaceholder}
+          style={{ flex: 1, minWidth: 160 }}
+        />
+        <button
+          type="button"
+          className="msg-action"
+          title="Read the clipboard and fill this field (then click Save keys)"
+          onClick={() =>
+            void (async () => {
+              try {
+                const text = (await navigator.clipboard.readText()).trim();
+                if (!text) {
+                  setMsg("Clipboard empty — copy your API key first");
+                  return;
+                }
+                setApiKey(text);
+                setMsg("Pasted from clipboard — click Save keys");
+              } catch (e) {
+                setMsg(
+                  e instanceof Error
+                    ? `Clipboard read failed: ${e.message}`
+                    : "Clipboard read failed",
+                );
+              }
+            })()
+          }
+        >
+          Paste
+        </button>
+      </div>
       <label className="row hint">
         <input
           type="checkbox"

@@ -83,7 +83,7 @@ import {
 } from "../protocol/messages.js";
 import { isActuationAllowed } from "../voice/wakeGate.js";
 import { portfolioAsk, portfolioSearch } from "../nsrag/client.js";
-import { isMacToolName, runMacTool, type JarvisNativePort } from "../mac/bridge.js";
+import { isMacToolName, runMacTool, type ComboNativePort } from "../mac/bridge.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
 import {
@@ -359,12 +359,12 @@ export interface AgentRunOptions {
   /** Pin DOM/navigate tools to this tab id (no activate_tab required). */
   boundTabId?: number;
   onSubagent?: (e: SubagentEvent) => void;
-  /** Where this turn came from. "voice" activates the Jarvis wake gate. */
+  /** Where this turn came from. "voice" activates the Combo wake gate. */
   source?: AgentRunSource;
   /** Wake token minted when the wake word fired; required for source "voice". */
   wakeToken?: string | null;
   /** Native-messaging port to the jarvisd Mac daemon (mac_* / index_dir / ambient_recall). */
-  jarvisPort?: JarvisNativePort | null;
+  jarvisPort?: ComboNativePort | null;
   /** Allowlisted filesystem roots for the Mac file tools. */
   macRoots?: readonly string[];
 }
@@ -380,7 +380,7 @@ export interface AgentRunResult {
   hitStepLimit: boolean;
 }
 
-const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
+export const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orchestrator).
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets).
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
@@ -394,6 +394,9 @@ SKILLS vs MEMORY:
 Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
 UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) — do not answer from get_page alone. It captures, shows a chat screenshot artifact, and vision-attaches for the next turn. Then annotate_screenshot({ attachmentId, markers }) and/or open_preview with attachmentId / beforeAttachmentId / afterAttachmentId. Optional live CSS: page_css_preview → ux_critique again → compare → page_css_clear. Raw screenshot_* need combo-media. Never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
+Combo voice / Azure Speech:
+- Vault labels azure_speech_key and azure_speech_region belong to the Combo voice pill (Start / Test Speech) — NOT to save_rest_connector or rest_request.
+- Never create Azure Speech STT/TTS REST connectors. Tell the user to use Combo Test Speech (any browser) or Combo Start (Chrome/Edge; mic/wake needs offscreen).
 Rules:
 - Prefer page_digest over full get_page dumps.
 - Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
@@ -533,7 +536,7 @@ interface RunContext {
   changeLog?: ChangeLogStore;
   approvalMode?: ApprovalMode;
   source?: AgentRunSource;
-  jarvisPort?: JarvisNativePort | null;
+  jarvisPort?: ComboNativePort | null;
   macRoots?: readonly string[];
   getApprovalMode?: () => ApprovalMode;
   approvalModel?: string;
@@ -598,7 +601,7 @@ export class AgentLoop {
     // before any tool is attached or any model is called.
     if (!isActuationAllowed({ source: options.source, wakeToken: options.wakeToken })) {
       const refusal =
-        "Ignored: no active wake word. Say \u201cHey Jarvis\u201d before a command.";
+        "Ignored: no active wake word. Say \u201cHey Combo\u201d before a command.";
       options.onEvent?.({ type: "done", message: refusal, usage: ZERO });
       return {
         messages: [],

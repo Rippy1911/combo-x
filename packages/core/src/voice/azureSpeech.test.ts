@@ -4,6 +4,7 @@ import {
   AZURE_SPEECH_REGION_LABEL,
   buildSsml,
   DEFAULT_AZURE_REGION,
+  normalizeAzureRegion,
   resolveAzureSpeechConfig,
   sttEndpoint,
   synthesizeSpeech,
@@ -26,6 +27,19 @@ describe("azureSpeech helpers", () => {
     expect(sttEndpoint("northeurope", "pl-PL")).toContain("language=pl-PL");
     expect(ttsEndpoint("westeurope")).toBe(
       "https://westeurope.tts.speech.microsoft.com/cognitiveservices/v1",
+    );
+  });
+
+  it("normalizes Cognitive endpoint URLs to a bare region id", () => {
+    expect(normalizeAzureRegion("northeurope")).toBe("northeurope");
+    expect(
+      normalizeAzureRegion("https://northeurope.api.cognitive.microsoft.com/"),
+    ).toBe("northeurope");
+    expect(
+      normalizeAzureRegion("https://westeurope.tts.speech.microsoft.com"),
+    ).toBe("westeurope");
+    expect(ttsEndpoint("https://northeurope.api.cognitive.microsoft.com/")).toBe(
+      "https://northeurope.tts.speech.microsoft.com/cognitiveservices/v1",
     );
   });
 

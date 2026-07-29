@@ -1,6 +1,8 @@
-# Jarvis — voice-driven control via Combo-X
+# Combo voice — wake-driven control via Combo-X
 
-Wake-word voice assistant. Say **"Hey Jarvis"**, then a command; Combo-X's existing agent
+> **Brand:** Combo voice · wake phrase **"Hey Combo"**. Technical wake assets still use the openWakeWord `hey_jarvis` model (no `hey_combo` ONNX yet). See also [`COMBO.md`](./COMBO.md).
+
+Wake-word voice assistant. Say **"Hey Combo"** (or the acoustic alias **"Hey Jarvis"** via the wake model), then a command; Combo-X's existing agent
 loop plans and acts. Slice 1 acts inside browser tabs. Slice 2 adds whole-Mac vision and
 input through a native-messaging daemon (`jarvisd`).
 
@@ -36,6 +38,15 @@ receptionist workflow, the Art. 50 disclosure gate and `MAX_CONCURRENT_SESSIONS=
 personal assistant.
 
 Vault labels: `azure_speech_key`, `azure_speech_region` (default `northeurope`).
+Add them under **Vault → Add secret** (or Chat → Add secret… → Send). Saving also writes a
+**sealed** `chrome.storage.local` backup (same passphrase) so Chrome reloads restore the
+labels if IndexedDB is empty. Prefer Chrome unpacked for Combo voice (stable extension id);
+Firefox temporary add-ons wipe storage on Remove — use **Reload** or Vault → disk pack.
+
+**Test** on the Combo voice pill synthesizes a short TTS phrase in the side panel (no mic).
+Wake + STT (**Start**) needs Chromium `chrome.offscreen` — use Chrome/Edge; rebuild with
+`pnpm build:combo` (alias `pnpm build:jarvis`). Mic capture uses ScriptProcessor (not AudioWorklet): MV3
+`script-src 'self'` forbids `blob:` and Chromium rewrites worklet modules through blob URLs.
 
 ## 3. Wake model licence — read before packaging
 
@@ -106,6 +117,12 @@ the mic, and the daemon is expected to push `utterance` frames. The daemon's own
 pipeline is **not implemented yet** — today it answers `"offscreen"` by default and the
 in-browser tier does wake detection. See `native/jarvisd/README.md`.
 
+**Mic grant (Chrome).** Offscreen cannot show the permission prompt — use the setup tab
+(“Grant microphone”) once. The service worker must only handle lowercase `jarvis_*`
+commands; uppercase `JARVIS_*` is SW→offscreen only (handling both races the mic-check
+reply and surfaces a false “Microphone not granted”). Side panel trusts the extension-origin
+Permissions API when already `granted`.
+
 Error codes are prefixed and stable: `denied:sensitive_app`, `denied:path`,
 `denied:secure_field`, `denied:typing_target`, `unavailable:accessibility`,
 `unavailable:screen_recording`, `unavailable:whisper`, `bad_request:<detail>`.
@@ -118,7 +135,7 @@ assume otherwise:
 - **`index_dir { watch: true }` does not watch.** It records the path in
   `pending_paths()` and runs a one-shot ingest; FSEvents wiring is a follow-up.
 - **The daemon has no wake pipeline** and never pushes `utterance` / `state`. Wake
-  detection is offscreen-only today, so Jarvis needs Chrome open.
+  detection is offscreen-only today, so Combo voice needs Chrome open.
 - **Ambient capture is off by default** and reports `unavailable:whisper` until a
   `whisperBin` is configured.
 
@@ -149,8 +166,8 @@ System Settings → Privacy & Security. Mic is granted once from the extension S
 | Spine (integration) | `packages/core/src/index.ts`, `protocol/messages.ts`, `browser/tools.ts`, `tools/{catalog,gating}.ts`, `agent/loop.ts`, `extension/manifest.json`, `extension/vite.config.ts`, `scripts/fetch-wake-models.mjs` |
 | Voice core | `packages/core/src/voice/**` |
 | Remote clients | `packages/core/src/nsrag/**`, `packages/core/src/mac/**` |
-| Extension plumbing | `extension/src/offscreen/**`, `extension/src/lib/jarvis-bridge.ts`, `extension/src/background/index.ts`, `extension/setup/**` |
-| Side panel UI | `extension/src/sidepanel/JarvisPanel.tsx`, `App.tsx`, `toolGroups.ts` |
+| Extension plumbing | `extension/src/offscreen/**`, `extension/src/lib/comboVoiceBridge.ts`, `extension/src/background/index.ts`, `extension/setup/**` |
+| Side panel UI | `extension/src/sidepanel/ComboVoicePanel.tsx`, `App.tsx`, `toolGroups.ts` |
 | Mac daemon | `native/jarvisd/**` |
 
 ## Azure verification

@@ -57,9 +57,29 @@ async function sendJarvisOffscreen(message: Record<string, unknown>): Promise<{
   };
 }
 
+/** Sidepanel pages connect here so utterance delivery does not depend on sendMessage. */
+const jarvisEventPorts = new Set<chrome.runtime.Port>();
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "jarvis-events") return;
+  jarvisEventPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    jarvisEventPorts.delete(port);
+  });
+});
+
 function relayJarvisEvent(event: unknown): void {
+  const msg = { type: "jarvis_event", event };
+  for (const port of jarvisEventPorts) {
+    try {
+      port.postMessage(msg);
+    } catch {
+      jarvisEventPorts.delete(port);
+    }
+  }
   try {
-    void chrome.runtime.sendMessage({ type: "jarvis_event", event }).catch(() => {
+    // Fallback for older listeners; never handle jarvis_event in this SW switch.
+    void chrome.runtime.sendMessage(msg).catch(() => {
       /* side panel closed — "Receiving end does not exist" */
     });
   } catch {
@@ -102,9 +122,13 @@ jarvisNative.onEvent((ev) => {
 function isJarvisRuntimeMessage(message: unknown): message is { type: string } {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
   const t = (message as { type: unknown }).type;
+  // Only lowercase jarvis_* (sidepanel → SW). Uppercase JARVIS_* is SW → offscreen.
+  // Never claim jarvis_event — that is a broadcast TO the sidepanel; handling it here
+  // made relays look like "unknown jarvis message" and raced delivery.
   return (
     typeof t === "string" &&
-    (t.startsWith("jarvis_") || t.startsWith("JARVIS_"))
+    t.startsWith("jarvis_") &&
+    t !== "jarvis_event"
   );
 }
 
@@ -525,6 +549,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           case "jarvis_mic_check": {
             sendResponse(await sendJarvisOffscreen({ type: "JARVIS_MIC_CHECK" }));
+            break;
+          }
+          case "jarvis_set_debug": {
+            const enabled = Boolean((message as { enabled?: unknown }).enabled);
+            sendResponse(
+              await sendJarvisOffscreen({ type: "JARVIS_SET_DEBUG", enabled }),
+            );
+            break;
+          }
+          case "jarvis_drain_utterances": {
+            sendResponse(
+              await sendJarvisOffscreen({ type: "JARVIS_DRAIN_UTTERANCES" }),
+            );
             break;
           }
           case "jarvis_native": {

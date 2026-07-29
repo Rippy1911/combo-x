@@ -209,11 +209,11 @@ function render() {
 
   document.getElementById("close")!.addEventListener("click", () => window.close());
 
-  wireJarvisMic();
+  wireComboMic();
 }
 
 function setMicStatus(text: string): void {
-  const el = document.getElementById("jarvis-mic-status");
+  const el = document.getElementById("combo-mic-status");
   if (el) el.textContent = text;
 }
 
@@ -229,15 +229,15 @@ async function refreshMicPermission(): Promise<void> {
   }
 }
 
-function wireJarvisMic(): void {
+function wireComboMic(): void {
   void refreshMicPermission();
-  document.getElementById("jarvis-mic")?.addEventListener("click", async () => {
+  document.getElementById("combo-mic")?.addEventListener("click", async () => {
     const msg = document.getElementById("msg");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       for (const t of stream.getTracks()) t.stop();
       setMicStatus("Permission: granted");
-      if (msg) msg.textContent = "Microphone granted — Jarvis offscreen can inherit this grant.";
+      if (msg) msg.textContent = "Microphone granted — Combo voice offscreen can inherit this grant.";
     } catch (e) {
       setMicStatus("Permission: denied");
       if (msg) msg.textContent = `Mic error: ${e instanceof Error ? e.message : String(e)}`;

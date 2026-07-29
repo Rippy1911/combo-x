@@ -1,19 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AZURE_TTS_NETWORK_HINT,
   guidanceForStatus,
+  mapComboStartError,
+  mapComboTestError,
   nextStatusFromEvent,
+  OFFSCREEN_UNSUPPORTED_HINT,
+  runTestSpeech,
   shouldRouteUtterance,
   utteranceCommand,
-} from "./useJarvis";
-import type { JarvisStatus } from "../lib/jarvis-bridge.js";
+  WAKE_MODELS_MISSING_HINT,
+} from "./useComboVoice.js";
+import type { ComboStatus } from "../lib/comboVoiceBridge.js";
+
+const coreMock = vi.hoisted(() => ({
+  resolveAzureSpeechConfig: vi.fn(),
+  synthesizeSpeech: vi.fn(),
+}));
 
 vi.mock("@combo-x/core", () => ({
   AZURE_SPEECH_KEY_LABEL: "azure_speech_key",
   NS_RAG_API_KEY_LABEL: "ns_rag_api_key",
-  JARVIS_VOICE_SYSTEM_ADDON: "spoken addon",
+  COMBO_VOICE_SYSTEM_ADDON: "spoken addon",
   SPOKEN_WORD_CAP: 40,
   toSpokenReply: (s: string) => s,
   isActuationAllowed: () => true,
+  resolveAzureSpeechConfig: coreMock.resolveAzureSpeechConfig,
+  synthesizeSpeech: coreMock.synthesizeSpeech,
 }));
 
 const bridge = vi.hoisted(() => {
@@ -25,9 +38,9 @@ const bridge = vi.hoisted(() => {
     setLocale: (l: "pl-PL" | "en-US") => {
       locale = l;
     },
-    startJarvis: vi.fn(async () => ({ ok: true as const })),
-    stopJarvis: vi.fn(async () => {}),
-    getJarvisStatus: vi.fn(async () => ({
+    startCombo: vi.fn(async () => ({ ok: true as const })),
+    stopCombo: vi.fn(async () => {}),
+    getComboStatus: vi.fn(async () => ({
       state: "off" as const,
       micGranted: true,
       lastTranscript: null,
@@ -36,15 +49,15 @@ const bridge = vi.hoisted(() => {
       micOwner: "offscreen" as const,
       daemonConnected: false,
     })),
-    speakJarvis: vi.fn(async () => ({ ok: true as const })),
+    speakCombo: vi.fn(async () => ({ ok: true as const })),
     checkMicPermission: vi.fn(async () => true),
     openSetupPageForMic: vi.fn(),
-    onJarvisEvent: vi.fn((cb: (ev: unknown) => void) => {
+    onComboEvent: vi.fn((cb: (ev: unknown) => void) => {
       listeners.add(cb);
       return () => listeners.delete(cb);
     }),
-    loadJarvisLocale: vi.fn(() => locale),
-    saveJarvisLocale: vi.fn((l: "pl-PL" | "en-US") => {
+    loadComboLocale: vi.fn(() => locale),
+    saveComboLocale: vi.fn((l: "pl-PL" | "en-US") => {
       locale = l;
     }),
     createNativePort: vi.fn(),
@@ -54,20 +67,20 @@ const bridge = vi.hoisted(() => {
   };
 });
 
-vi.mock("../lib/jarvis-bridge.js", () => ({
-  startJarvis: bridge.startJarvis,
-  stopJarvis: bridge.stopJarvis,
-  getJarvisStatus: bridge.getJarvisStatus,
-  speakJarvis: bridge.speakJarvis,
+vi.mock("../lib/comboVoiceBridge.js", () => ({
+  startCombo: bridge.startCombo,
+  stopCombo: bridge.stopCombo,
+  getComboStatus: bridge.getComboStatus,
+  speakCombo: bridge.speakCombo,
   checkMicPermission: bridge.checkMicPermission,
   openSetupPageForMic: bridge.openSetupPageForMic,
-  onJarvisEvent: bridge.onJarvisEvent,
-  loadJarvisLocale: bridge.loadJarvisLocale,
-  saveJarvisLocale: bridge.saveJarvisLocale,
+  onComboEvent: bridge.onComboEvent,
+  loadComboLocale: bridge.loadComboLocale,
+  saveComboLocale: bridge.saveComboLocale,
   createNativePort: bridge.createNativePort,
 }));
 
-const baseStatus = (): JarvisStatus => ({
+const baseStatus = (): ComboStatus => ({
   state: "listening",
   micGranted: true,
   lastTranscript: null,
@@ -145,6 +158,58 @@ describe("guidanceForStatus", () => {
     const g = guidanceForStatus(baseStatus(), { azure: false, nsRag: true });
     expect(g.azureMissing).toBe(true);
     expect(g.messages.some((m) => /azure_speech_key/i.test(m))).toBe(true);
+    expect(g.messages.join(" ")).toMatch(/Vault → Add secret/);
+  });
+
+  it("maps offscreen unsupported start errors", () => {
+    expect(
+      mapComboStartError("media capture unavailable: chrome.offscreen not supported in this browser"),
+    ).toBe(OFFSCREEN_UNSUPPORTED_HINT);
+    expect(mapComboStartError("azure_tts_401")).toBe("azure_tts_401");
+  });
+
+  it("maps wake-model fetch failures on Start", () => {
+    expect(mapComboStartError("Failed to fetch")).toBe(WAKE_MODELS_MISSING_HINT);
+  });
+
+  it("maps Azure TTS network failures on Test", () => {
+    expect(mapComboTestError("Failed to fetch")).toBe(AZURE_TTS_NETWORK_HINT);
+  });
+
+  it("runTestSpeech synthesizes and plays when vault has key", async () => {
+    coreMock.resolveAzureSpeechConfig.mockResolvedValue({
+      key: "k",
+      region: "northeurope",
+      locale: "en-US",
+      voice: "en-US-AriaNeural",
+    });
+    const audio = new ArrayBuffer(4);
+    coreMock.synthesizeSpeech.mockResolvedValue({
+      ok: true,
+      audio,
+      mime: "audio/mpeg",
+    });
+    const playAudio = vi.fn(async () => {});
+    const res = await runTestSpeech({
+      getSecret: async () => "k",
+      locale: "en-US",
+      synthesize: coreMock.synthesizeSpeech,
+      playAudio,
+    });
+    expect(res).toEqual({ ok: true });
+    expect(playAudio).toHaveBeenCalledWith(audio, "audio/mpeg");
+  });
+
+  it("runTestSpeech fails clearly when key missing", async () => {
+    coreMock.resolveAzureSpeechConfig.mockResolvedValue(null);
+    await expect(
+      runTestSpeech({
+        getSecret: async () => null,
+        locale: "pl-PL",
+        synthesize: coreMock.synthesizeSpeech,
+        playAudio: async () => {},
+      }),
+    ).resolves.toEqual({ ok: false, error: "azure_speech_key missing in vault" });
   });
 
   it("flags daemon offline when micOwner is daemon", () => {
@@ -165,20 +230,20 @@ describe("locale persistence helpers via bridge mocks", () => {
     bridge.listeners.clear();
     bridge.setLocale("pl-PL");
     vi.clearAllMocks();
-    bridge.loadJarvisLocale.mockImplementation(() => bridge.locale());
-    bridge.saveJarvisLocale.mockImplementation((l: "pl-PL" | "en-US") => {
+    bridge.loadComboLocale.mockImplementation(() => bridge.locale());
+    bridge.saveComboLocale.mockImplementation((l: "pl-PL" | "en-US") => {
       bridge.setLocale(l);
     });
   });
 
-  it("saveJarvisLocale persists locale", () => {
-    bridge.saveJarvisLocale("en-US");
+  it("saveComboLocale persists locale", () => {
+    bridge.saveComboLocale("en-US");
     expect(bridge.locale()).toBe("en-US");
-    expect(bridge.loadJarvisLocale()).toBe("en-US");
+    expect(bridge.loadComboLocale()).toBe("en-US");
   });
 });
 
-describe("utterance routing through onJarvisEvent (manual)", () => {
+describe("utterance routing through onComboEvent (manual)", () => {
   beforeEach(() => {
     bridge.listeners.clear();
     vi.clearAllMocks();
@@ -186,10 +251,10 @@ describe("utterance routing through onJarvisEvent (manual)", () => {
 
   it("routes a valid utterance to onCommand with wakeToken", async () => {
     const onCommand = vi.fn();
-    const { useJarvis } = await import("./useJarvis");
+    const { useComboVoice } = await import("./useComboVoice.js");
 
     // Tiny render: call hook body via React is unavailable — drive subscription path.
-    // useJarvis mounts onJarvisEvent; simulate by invoking the registered callback after a
+    // useComboVoice mounts onComboEvent; simulate by invoking the registered callback after a
     // minimal stateful harness that mirrors muted + route decisions.
     const muted = false;
     const command = "open settings";
@@ -198,11 +263,11 @@ describe("utterance routing through onJarvisEvent (manual)", () => {
       onCommand(command, wakeToken);
     }
     expect(onCommand).toHaveBeenCalledWith("open settings", "wake-abc");
-    expect(useJarvis).toBeTypeOf("function");
+    expect(useComboVoice).toBeTypeOf("function");
   });
 
   it("treats a locked vault as 'no key' instead of throwing", async () => {
-    const { readSecretSafely } = await import("./useJarvis");
+    const { readSecretSafely } = await import("./useComboVoice.js");
     class VaultLockedError extends Error {}
     const locked = vi.fn(async () => {
       throw new VaultLockedError("vault is locked");

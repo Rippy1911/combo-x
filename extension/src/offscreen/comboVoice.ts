@@ -8,6 +8,7 @@ import {
   synthesizeSpeech,
   parseWakeUtterance,
   mintWakeToken,
+  frameRms,
   type SpeechLocale,
   type AzureSpeechConfig,
   type OrtSessionLike,
@@ -22,7 +23,7 @@ async function loadOrt(): Promise<OrtModule> {
   return ortMod;
 }
 
-export type JarvisVoiceState =
+export type ComboVoiceState =
   | "off"
   | "loading"
   | "listening"
@@ -31,24 +32,32 @@ export type JarvisVoiceState =
   | "speaking"
   | "error";
 
-export interface JarvisVoiceStatus {
-  state: JarvisVoiceState;
+export interface ComboVoiceStatus {
+  state: ComboVoiceState;
   micGranted: boolean;
   lastTranscript: string | null;
   lastError: string | null;
   locale: SpeechLocale;
   micOwner: "offscreen" | "daemon";
+  debug: boolean;
 }
 
-export interface JarvisVoiceUtterance {
+export interface ComboVoiceUtterance {
   text: string;
   wakeToken: string;
   at: number;
 }
 
-export type JarvisVoiceEvent =
-  | { type: "status"; status: JarvisVoiceStatus }
-  | { type: "utterance"; utterance: JarvisVoiceUtterance };
+export interface ComboDebugEntry {
+  t: number;
+  kind: string;
+  detail?: Record<string, unknown>;
+}
+
+export type ComboVoiceEvent =
+  | { type: "status"; status: ComboVoiceStatus }
+  | { type: "utterance"; utterance: ComboVoiceUtterance }
+  | { type: "debug"; entry: ComboDebugEntry };
 
 export interface DetectorLike {
   load(): Promise<void>;
@@ -69,7 +78,7 @@ export interface EndpointerLike {
   readonly speaking: boolean;
 }
 
-export interface JarvisVoiceDeps {
+export interface ComboVoiceDeps {
   createDetector?: (opts: {
     modelBaseUrl: string;
     createSession: (modelUrl: string) => Promise<unknown>;
@@ -93,30 +102,15 @@ export interface JarvisVoiceDeps {
 
 const CAPTURE_FRAME = 1024;
 const ARMED_MAX_MS = 20_000;
-
-const WORKLET_SOURCE = `
-class JarvisCaptureProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._buf = new Float32Array(0);
-  }
-  process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (!ch || ch.length === 0) return true;
-    const merged = new Float32Array(this._buf.length + ch.length);
-    merged.set(this._buf);
-    merged.set(ch, this._buf.length);
-    let offset = 0;
-    while (merged.length - offset >= ${CAPTURE_FRAME}) {
-      this.port.postMessage(merged.slice(offset, offset + ${CAPTURE_FRAME}));
-      offset += ${CAPTURE_FRAME};
-    }
-    this._buf = merged.slice(offset);
-    return true;
-  }
-}
-registerProcessor("jarvis-capture", JarvisCaptureProcessor);
-`;
+/** Keep ~2s of 16 kHz mono ahead of wake so one-breath commands survive late detection. */
+const PRE_ROLL_SAMPLES = 16_000 * 2;
+/** If VAD says no_speech but we already buffered this much energetic audio, still STT. */
+const ONE_BREATH_MIN_MS = 400;
+const ONE_BREATH_MIN_PEAK_RMS = 0.015;
+/** STT soft-wake ("Hey Combo") cooldown — avoids burning Azure on chatter. */
+const STT_WAKE_COOLDOWN_MS = 2_500;
+const STT_WAKE_MIN_MS = 450;
+const STT_WAKE_MIN_PEAK_RMS = 0.015;
 
 function defaultPlayAudio(buf: ArrayBuffer, mime = "audio/mpeg"): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -141,10 +135,10 @@ function defaultPlayAudio(buf: ArrayBuffer, mime = "audio/mpeg"): Promise<void> 
   });
 }
 
-export class JarvisVoiceRuntime {
-  onEvent: ((ev: JarvisVoiceEvent) => void) | null = null;
+export class ComboVoiceRuntime {
+  onEvent: ((ev: ComboVoiceEvent) => void) | null = null;
 
-  private state: JarvisVoiceState = "off";
+  private state: ComboVoiceState = "off";
   private locale: SpeechLocale = "pl-PL";
   private azure: AzureSpeechConfig | null = null;
   private micGranted = false;
@@ -157,22 +151,32 @@ export class JarvisVoiceRuntime {
   private processing = false;
   private stream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
-  private workletNode: AudioWorkletNode | null = null;
   private scriptNode: ScriptProcessorNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private silentGain: GainNode | null = null;
   private captureBuf = new Float32Array(0);
   private detector: DetectorLike | null = null;
   private endpointer: EndpointerLike | null = null;
-  private readonly deps: JarvisVoiceDeps;
+  /** Separate endpointer for STT phrase-wake while listening (Hey Combo). */
+  private listenEndpointer: EndpointerLike | null = null;
+  private listenFrames: Float32Array[] = [];
+  private lastSttWakeAt = 0;
+  private readonly deps: ComboVoiceDeps;
   private readonly now: () => number;
+  private debugEnabled = false;
+  private preRoll: Float32Array[] = [];
+  private preRollSamples = 0;
+  private debugRmsTick = 0;
+  private lastWakeScore: number | null = null;
+  /** Sidepanel polls this — MV3 runtime.sendMessage relays drop utterances too often. */
+  private pendingUtterances: ComboVoiceUtterance[] = [];
 
-  constructor(deps: JarvisVoiceDeps = {}) {
+  constructor(deps: ComboVoiceDeps = {}) {
     this.deps = deps;
     this.now = deps.now ?? (() => Date.now());
   }
 
-  status(): JarvisVoiceStatus {
+  status(): ComboVoiceStatus {
     return {
       state: this.state,
       micGranted: this.micGranted,
@@ -180,10 +184,57 @@ export class JarvisVoiceRuntime {
       lastError: this.lastError,
       locale: this.locale,
       micOwner: "offscreen",
+      debug: this.debugEnabled,
     };
   }
 
-  async start(locale: SpeechLocale, azure: AzureSpeechConfig | null | undefined): Promise<JarvisVoiceStatus> {
+  setDebug(enabled: boolean): void {
+    this.debugEnabled = Boolean(enabled);
+    this.debug("debug_flag", { enabled: this.debugEnabled });
+    this.emitStatus();
+  }
+
+  /** Atomically take queued voice commands for the sidepanel to run. */
+  drainUtterances(): ComboVoiceUtterance[] {
+    const out = this.pendingUtterances;
+    this.pendingUtterances = [];
+    return out;
+  }
+
+  private debug(kind: string, detail?: Record<string, unknown>): void {
+    if (!this.debugEnabled) return;
+    this.onEvent?.({
+      type: "debug",
+      entry: { t: this.now(), kind, detail },
+    });
+  }
+
+  private pushPreRoll(frame: Float32Array): void {
+    this.preRoll.push(frame.slice(0));
+    this.preRollSamples += frame.length;
+    while (this.preRollSamples > PRE_ROLL_SAMPLES && this.preRoll.length > 1) {
+      const drop = this.preRoll.shift();
+      if (drop) this.preRollSamples -= drop.length;
+    }
+  }
+
+  private clearPreRoll(): void {
+    this.preRoll = [];
+    this.preRollSamples = 0;
+  }
+
+  private framesStats(frames: Float32Array[]): { ms: number; peakRms: number; samples: number } {
+    let samples = 0;
+    let peakRms = 0;
+    for (const f of frames) {
+      samples += f.length;
+      const r = frameRms(f);
+      if (r > peakRms) peakRms = r;
+    }
+    return { ms: (samples / 16_000) * 1000, peakRms, samples };
+  }
+
+  async start(locale: SpeechLocale, azure: AzureSpeechConfig | null | undefined): Promise<ComboVoiceStatus> {
     try {
       if (!azure?.key?.trim()) {
         this.setError("azure_speech_key missing in vault");
@@ -203,6 +254,10 @@ export class JarvisVoiceRuntime {
       await this.detector.load();
       this.endpointer = this.buildEndpointer();
       this.endpointer.reset();
+      this.listenEndpointer = this.buildEndpointer();
+      this.listenEndpointer.reset();
+      this.listenFrames = [];
+      this.lastSttWakeAt = 0;
 
       if (!this.deps.skipMic) {
         await this.startMic();
@@ -212,22 +267,33 @@ export class JarvisVoiceRuntime {
 
       this.wakeToken = null;
       this.armedFrames = [];
+      this.clearPreRoll();
       this.detectionSuspended = false;
       this.setState("listening");
+      this.debug("started", { locale: this.locale, region: this.azure?.region });
       return this.status();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      let msg = err instanceof Error ? err.message : String(err);
+      // Default builds omit CC BY-NC wake ONNX assets — ORT fetch then surfaces
+      // a bare "Failed to fetch". Point operators at the combo voice rebuild.
+      if (/failed to fetch|404|not found|openwakeword/i.test(msg)) {
+        msg =
+          "Wake models missing — rebuild with `pnpm build:combo`, then reload. Use Test to verify Azure TTS without wake.";
+      }
       this.setError(msg);
       return this.status();
     }
   }
 
-  async stop(): Promise<JarvisVoiceStatus> {
+  async stop(): Promise<ComboVoiceStatus> {
     this.teardownMic();
     this.detector = null;
     this.endpointer = null;
+    this.listenEndpointer = null;
+    this.listenFrames = [];
     this.wakeToken = null;
     this.armedFrames = [];
+    this.clearPreRoll();
     this.azure = null;
     this.detectionSuspended = false;
     this.processing = false;
@@ -267,16 +333,25 @@ export class JarvisVoiceRuntime {
 
   async micCheck(): Promise<boolean> {
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        this.micGranted = false;
+        this.lastError = "mediaDevices unavailable in offscreen";
+        this.emitStatus();
+        return false;
+      }
       const gum =
         this.deps.getUserMedia ??
         navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
       const stream = await gum({ audio: true });
       for (const t of stream.getTracks()) t.stop();
       this.micGranted = true;
+      this.lastError = null;
       this.emitStatus();
       return true;
-    } catch {
+    } catch (err) {
       this.micGranted = false;
+      this.lastError =
+        err instanceof Error ? err.message : "Microphone not granted";
       this.emitStatus();
       return false;
     }
@@ -289,15 +364,56 @@ export class JarvisVoiceRuntime {
     if (!this.detector || !this.endpointer) return;
 
     if (this.state === "listening") {
-      // Privacy: discard ambient audio beyond the detector's internal window.
+      this.pushPreRoll(samples16k);
+      const rms = frameRms(samples16k);
+      this.debugRmsTick += 1;
+      if (this.debugEnabled && this.debugRmsTick % 12 === 0) {
+        this.debug("mic", {
+          rms: Number(rms.toFixed(4)),
+          preRollMs: Math.round((this.preRollSamples / 16_000) * 1000),
+          lastWakeScore: this.lastWakeScore,
+        });
+      }
       const hit = await this.detector.push(samples16k);
-      if (!hit) return;
-      const mint = this.deps.mintWakeToken ?? mintWakeToken;
-      this.wakeToken = mint(this.now);
-      this.armedAt = this.now();
-      this.armedFrames = [];
-      this.endpointer.reset();
-      this.setState("armed");
+      if (hit) {
+        this.lastWakeScore = hit.score;
+        const mint = this.deps.mintWakeToken ?? mintWakeToken;
+        this.wakeToken = mint(this.now);
+        this.armedAt = this.now();
+        // Seed with pre-roll so one-breath "Hey … go to google" still reaches STT.
+        this.armedFrames = [...this.preRoll, samples16k.slice(0)];
+        this.clearPreRoll();
+        this.listenFrames = [];
+        this.listenEndpointer?.reset();
+        this.endpointer.reset();
+        this.debug("wake_hit", {
+          label: hit.label,
+          score: hit.score,
+          seededMs: Math.round(this.framesStats(this.armedFrames).ms),
+          locale: this.locale,
+        });
+        this.setState("armed");
+        return;
+      }
+
+      // Soft wake: no hey_combo ONNX exists — STT short utterances for WAKE_PHRASES
+      // ("Hey Combo", "Hey Jarvis", …). Acoustic hey_jarvis still preferred when it fires.
+      const lep = this.listenEndpointer;
+      if (!lep) return;
+      const lev = lep.push(samples16k);
+      if (lev?.type === "speech_start") {
+        this.listenFrames = [...this.preRoll, samples16k.slice(0)];
+      } else if (lep.speaking || this.listenFrames.length > 0) {
+        this.listenFrames.push(samples16k.slice(0));
+      }
+      if (lev?.type === "speech_end") {
+        const frames = this.listenFrames;
+        this.listenFrames = [];
+        lep.reset();
+        if (lev.reason !== "no_speech") {
+          await this.tryPhraseWake(frames);
+        }
+      }
       return;
     }
 
@@ -314,20 +430,118 @@ export class JarvisVoiceRuntime {
     await this.finishArmed(ev.reason);
   }
 
+  /**
+   * STT soft-wake for phrases with no ONNX model (esp. "Hey Combo").
+   * Ambient speech without a wake phrase is ignored.
+   */
+  private async tryPhraseWake(frames: Float32Array[]): Promise<void> {
+    if (this.processing) return;
+    if (this.now() - this.lastSttWakeAt < STT_WAKE_COOLDOWN_MS) return;
+    const stats = this.framesStats(frames);
+    if (stats.ms < STT_WAKE_MIN_MS || stats.peakRms < STT_WAKE_MIN_PEAK_RMS) {
+      this.debug("stt_wake_skip", { reason: "too_quiet_or_short", ...stats });
+      return;
+    }
+    if (!this.azure?.key) return;
+
+    this.processing = true;
+    this.lastSttWakeAt = this.now();
+    try {
+      this.setState("thinking");
+      const concat = this.deps.concatFloat32 ?? concatFloat32;
+      const encode = this.deps.encodeWav16 ?? encodeWav16;
+      const stt = this.deps.transcribeWav ?? transcribeWav;
+      const parse = this.deps.parseWakeUtterance ?? parseWakeUtterance;
+      const pcm = concat(frames);
+      const wav = encode(pcm, 16_000);
+      const sttStarted = this.now();
+      const result = await stt(wav, this.azure);
+      this.debug("stt_wake", {
+        ok: result.ok,
+        error: result.error ?? null,
+        text: result.text ?? null,
+        ms: this.now() - sttStarted,
+        pcmMs: stats.ms,
+        locale: this.azure.locale,
+      });
+      if (!result.ok || !result.text?.trim()) {
+        this.setState("listening");
+        return;
+      }
+      const parsed = parse(result.text);
+      if (!parsed.armed) {
+        // Ambient speech — ignore.
+        this.setState("listening");
+        return;
+      }
+      const mint = this.deps.mintWakeToken ?? mintWakeToken;
+      this.wakeToken = mint(this.now);
+      this.debug("wake_hit", {
+        label: "stt_phrase",
+        matchedPhrase: parsed.matchedPhrase,
+        score: 1,
+        seededMs: Math.round(stats.ms),
+        locale: this.locale,
+      });
+      if (parsed.command.trim()) {
+        this.emitUtterance(parsed.command.trim());
+        this.setState("listening");
+        return;
+      }
+      // Wake only — wait for the command (same as acoustic arm).
+      this.armedAt = this.now();
+      this.armedFrames = [];
+      this.endpointer?.reset();
+      this.setState("armed");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.setTransientError(msg);
+    } finally {
+      this.processing = false;
+    }
+  }
+
+  private emitUtterance(text: string): void {
+    const token = this.wakeToken ?? (this.deps.mintWakeToken ?? mintWakeToken)(this.now);
+    this.wakeToken = null;
+    this.lastTranscript = text;
+    this.lastError = null;
+    const utterance: ComboVoiceUtterance = {
+      text,
+      wakeToken: token,
+      at: this.now(),
+    };
+    this.pendingUtterances.push(utterance);
+    if (this.pendingUtterances.length > 20) {
+      this.pendingUtterances.splice(0, this.pendingUtterances.length - 20);
+    }
+    this.debug("utterance", { text, via: "emit" });
+    this.onEvent?.({ type: "utterance", utterance });
+  }
+
   private async finishArmed(reason: "silence" | "max_duration" | "no_speech"): Promise<void> {
     if (this.processing) return;
     this.processing = true;
     try {
-      if (reason === "no_speech") {
-        this.armedFrames = [];
+      const frames = this.armedFrames;
+      this.armedFrames = [];
+      const stats = this.framesStats(frames);
+      this.debug("armed_end", { reason, ...stats, locale: this.locale });
+
+      // Late wake: VAD saw only silence *after* arm, but pre-roll already holds the command.
+      const oneBreathRescue =
+        reason === "no_speech" &&
+        stats.ms >= ONE_BREATH_MIN_MS &&
+        stats.peakRms >= ONE_BREATH_MIN_PEAK_RMS;
+
+      if (reason === "no_speech" && !oneBreathRescue) {
         this.wakeToken = null;
         this.endpointer?.reset();
+        this.lastError = null;
         this.setState("listening");
         return;
       }
 
-      const frames = this.armedFrames;
-      this.armedFrames = [];
       if (frames.length === 0) {
         this.wakeToken = null;
         this.endpointer?.reset();
@@ -349,7 +563,17 @@ export class JarvisVoiceRuntime {
 
       const pcm = concat(frames);
       const wav = encode(pcm, 16_000);
+      const sttStarted = this.now();
       const result = await stt(wav, this.azure);
+      this.debug("stt", {
+        ok: result.ok,
+        error: result.error ?? null,
+        text: result.text ?? null,
+        ms: this.now() - sttStarted,
+        pcmMs: stats.ms,
+        locale: this.azure.locale,
+        rescued: oneBreathRescue,
+      });
       if (!result.ok || !result.text?.trim()) {
         this.lastError = result.error ?? "empty transcript";
         this.wakeToken = null;
@@ -361,17 +585,10 @@ export class JarvisVoiceRuntime {
 
       const parsed = parse(result.text);
       const text = parsed.armed && parsed.command ? parsed.command : result.text.trim();
-      this.lastTranscript = text;
-      const token = this.wakeToken ?? (this.deps.mintWakeToken ?? mintWakeToken)(this.now);
-      const utterance: JarvisVoiceUtterance = {
-        text,
-        wakeToken: token,
-        at: this.now(),
-      };
-      this.wakeToken = null;
       this.endpointer?.reset();
       this.setState("listening");
-      this.onEvent?.({ type: "utterance", utterance });
+      this.debug("utterance", { text, matchedPhrase: parsed.matchedPhrase ?? null });
+      this.emitUtterance(text);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // A failed round trip must not deafen the runtime: ingestFrame refuses to run
@@ -391,9 +608,14 @@ export class JarvisVoiceRuntime {
       });
     }
     const ort = await loadOrt();
-    ort.env.wasm.wasmPaths = chrome.runtime.getURL("public/ort/");
-    // MV3 has no cross-origin isolation — SharedArrayBuffer threads unavailable.
+    // MV3: no COI / no blob: workers. Force single-thread + no proxy so ORT never
+    // hits URL.createObjectURL (CSP script-src 'self' blocks blob:chrome-extension:…).
+    ort.env.wasm.proxy = false;
     ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths = {
+      mjs: chrome.runtime.getURL("public/ort/ort-wasm-simd-threaded.mjs"),
+      wasm: chrome.runtime.getURL("public/ort/ort-wasm-simd-threaded.wasm"),
+    };
     return new WakeWordDetector({
       // ORT's Tensor/InferenceSession are structurally wider than OrtSessionLike (typed-array
       // unions, GPU locations); the wake pipeline only ever feeds float32 CPU tensors.
@@ -433,39 +655,22 @@ export class JarvisVoiceRuntime {
     const source = ctx.createMediaStreamSource(stream);
     this.sourceNode = source;
 
-    if (ctx.audioWorklet) {
-      const blob = new Blob([WORKLET_SOURCE], { type: "application/javascript" });
-      const url = URL.createObjectURL(blob);
-      try {
-        await ctx.audioWorklet.addModule(url);
-        const node = new AudioWorkletNode(ctx, "jarvis-capture");
-        node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
-          void this.onNativePcm(ev.data, ctx.sampleRate);
-        };
-        const gain = ctx.createGain();
-        gain.gain.value = 0;
-        source.connect(node);
-        node.connect(gain);
-        gain.connect(ctx.destination);
-        this.workletNode = node;
-        this.silentGain = gain;
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    } else {
-      const script = ctx.createScriptProcessor(CAPTURE_FRAME, 1, 1);
-      script.onaudioprocess = (ev) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        void this.onNativePcm(input.slice(0), ctx.sampleRate);
-      };
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      source.connect(script);
-      script.connect(gain);
-      gain.connect(ctx.destination);
-      this.scriptNode = script;
-      this.silentGain = gain;
-    }
+    // Do NOT use AudioWorklet in MV3 extension pages/offscreen: even
+    // chrome.runtime.getURL worklets are rewritten through blob:chrome-extension:…
+    // by Chromium and then blocked by script-src 'self' (no blob: allowed in
+    // extension_pages CSP). ScriptProcessor is deprecated but works here.
+    const script = ctx.createScriptProcessor(CAPTURE_FRAME, 1, 1);
+    script.onaudioprocess = (ev) => {
+      const input = ev.inputBuffer.getChannelData(0);
+      void this.onNativePcm(input.slice(0), ctx.sampleRate);
+    };
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    source.connect(script);
+    script.connect(gain);
+    gain.connect(ctx.destination);
+    this.scriptNode = script;
+    this.silentGain = gain;
   }
 
   private async onNativePcm(frame: Float32Array, sampleRate: number): Promise<void> {
@@ -487,11 +692,6 @@ export class JarvisVoiceRuntime {
 
   private teardownMic(): void {
     try {
-      this.workletNode?.disconnect();
-    } catch {
-      /* ignore */
-    }
-    try {
       this.scriptNode?.disconnect();
     } catch {
       /* ignore */
@@ -506,7 +706,6 @@ export class JarvisVoiceRuntime {
     } catch {
       /* ignore */
     }
-    this.workletNode = null;
     this.scriptNode = null;
     this.sourceNode = null;
     this.silentGain = null;
@@ -521,7 +720,7 @@ export class JarvisVoiceRuntime {
     this.captureBuf = new Float32Array(0);
   }
 
-  private setState(state: JarvisVoiceState): void {
+  private setState(state: ComboVoiceState): void {
     this.state = state;
     this.emitStatus();
   }
@@ -547,3 +746,19 @@ export class JarvisVoiceRuntime {
     this.onEvent?.({ type: "status", status: this.status() });
   }
 }
+
+/** @deprecated use ComboVoiceRuntime */
+export { ComboVoiceRuntime as JarvisVoiceRuntime };
+
+/** @deprecated use ComboVoiceState */
+export type JarvisVoiceState = ComboVoiceState;
+/** @deprecated use ComboVoiceStatus */
+export type JarvisVoiceStatus = ComboVoiceStatus;
+/** @deprecated use ComboVoiceUtterance */
+export type JarvisVoiceUtterance = ComboVoiceUtterance;
+/** @deprecated use ComboDebugEntry */
+export type JarvisDebugEntry = ComboDebugEntry;
+/** @deprecated use ComboVoiceEvent */
+export type JarvisVoiceEvent = ComboVoiceEvent;
+/** @deprecated use ComboVoiceDeps */
+export type JarvisVoiceDeps = ComboVoiceDeps;

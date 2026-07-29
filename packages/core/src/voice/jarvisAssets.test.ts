@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
  */
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-describe("jarvis wake asset licensing", () => {
+describe("Combo voice wake asset licensing", () => {
   it("keeps the model directory out of git", () => {
     const ignore = readFileSync(path.join(repoRoot, ".gitignore"), "utf8");
     expect(ignore).toContain("extension/public/openwakeword/");
@@ -18,7 +18,7 @@ describe("jarvis wake asset licensing", () => {
   it("only bundles models behind JARVIS_DEV_BUILD", () => {
     const config = readFileSync(path.join(repoRoot, "extension/vite.config.ts"), "utf8");
     expect(config).toContain('process.env.JARVIS_DEV_BUILD === "1"');
-    const copyBlock = config.slice(config.indexOf("function copyJarvisAssetsPlugin"));
+    const copyBlock = config.slice(config.indexOf("function copyComboVoiceAssetsPlugin"));
     const modelCopy = copyBlock.indexOf("WAKE_MODEL_FILES");
     const devGuard = copyBlock.indexOf("if (!devBuild) return;");
     expect(devGuard).toBeGreaterThan(-1);

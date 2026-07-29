@@ -1535,7 +1535,7 @@ describe("AgentLoop", () => {
     expect(secondCallToolContent).not.toContain(fat);
   });
 
-  describe("Jarvis voice gate", () => {
+  describe("Combo voice gate", () => {
     it("refuses a voice turn with no wake token before calling the model", async () => {
       const llm = mockLlm([{ content: "should never run" }]);
       const browser = stubBrowser();

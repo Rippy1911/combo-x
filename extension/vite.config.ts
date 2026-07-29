@@ -52,10 +52,11 @@ const WAKE_MODEL_FILES = [
 ];
 
 /**
- * Jarvis wake-word assets. openWakeWord pretrained models are CC BY-NC-SA 4.0, so they
- * only ship when JARVIS_DEV_BUILD=1 — a default build must contain no wake model.
+ * Combo voice wake-word assets. openWakeWord pretrained models are CC BY-NC-SA 4.0, so they
+ * only ship when JARVIS_DEV_BUILD=1 (pnpm build:combo) — a default build must contain no wake model.
+ * Acoustic model filenames stay hey_jarvis* (no hey_combo ONNX yet).
  */
-function copyJarvisAssetsPlugin(): Plugin {
+function copyComboVoiceAssetsPlugin(): Plugin {
   const devBuild = process.env.JARVIS_DEV_BUILD === "1";
   const copyInto = (root: string) => {
     // onnxruntime-web does not export ./package.json — resolve the main entry, which lives
@@ -82,7 +83,7 @@ function copyJarvisAssetsPlugin(): Plugin {
     }
   };
   return {
-    name: "copy-jarvis-assets",
+    name: "copy-combo-voice-assets",
     buildStart() {
       copyInto(__dirname);
     },
@@ -157,7 +158,7 @@ export default defineConfig({
     react(),
     crx({ manifest }),
     copyPdfWorkerPlugin(),
-    copyJarvisAssetsPlugin(),
+    copyComboVoiceAssetsPlugin(),
     stabilizeContentLoaderPlugin(),
   ],
   resolve: {

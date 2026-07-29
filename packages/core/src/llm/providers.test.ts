@@ -60,6 +60,12 @@ describe("llm providers", () => {
     expect(await resolveProviderApiKey("openai", get)).toBe("");
   });
 
+  it("resolveProviderApiKey accepts OpenRouter alias labels", async () => {
+    const get = async (l: string) =>
+      l === "OPENROUTER_API_KEY" ? "sk-or-alias" : null;
+    expect(await resolveProviderApiKey("openrouter", get)).toBe("sk-or-alias");
+  });
+
   it("resolveProviderBaseUrl prefers per-provider then compatible shared for active", async () => {
     const bag: Record<string, string> = {
       llm_provider: "moonshot",

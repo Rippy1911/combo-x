@@ -36,11 +36,38 @@ export function isSpeechLocale(v: unknown): v is SpeechLocale {
 }
 
 export function sttEndpoint(region: string, locale: SpeechLocale): string {
-  return `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${locale}&format=detailed`;
+  const r = normalizeAzureRegion(region);
+  return `https://${r}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${locale}&format=detailed`;
 }
 
 export function ttsEndpoint(region: string): string {
-  return `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  return `https://${normalizeAzureRegion(region)}.tts.speech.microsoft.com/cognitiveservices/v1`;
+}
+
+/**
+ * Vault / .env often store the Cognitive endpoint URL instead of the short region
+ * id. Turn `https://northeurope.api.cognitive.microsoft.com/` (and similar) into
+ * `northeurope` so TTS/STT hostnames stay valid.
+ */
+export function normalizeAzureRegion(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return DEFAULT_AZURE_REGION;
+  let candidate = trimmed;
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      candidate = new URL(candidate).hostname;
+    } catch {
+      candidate = trimmed.replace(/^https?:\/\//i, "").split("/")[0] ?? trimmed;
+    }
+  }
+  candidate = candidate.replace(/\/+$/, "");
+  const hostMatch = candidate.match(
+    /^([a-z0-9-]+)\.(?:tts\.|stt\.|api\.)?(?:speech\.microsoft\.com|cognitive\.microsoft\.com)$/i,
+  );
+  if (hostMatch?.[1]) return hostMatch[1].toLowerCase();
+  // Bare region id (northeurope, westeurope, …)
+  if (/^[a-z0-9-]+$/i.test(candidate)) return candidate.toLowerCase();
+  return DEFAULT_AZURE_REGION;
 }
 
 function xmlEscape(s: string): string {
@@ -62,8 +89,9 @@ export async function resolveAzureSpeechConfig(
 ): Promise<AzureSpeechConfig | null> {
   const key = (await getSecret(AZURE_SPEECH_KEY_LABEL))?.trim();
   if (!key) return null;
-  const region =
-    (await getSecret(AZURE_SPEECH_REGION_LABEL))?.trim() || DEFAULT_AZURE_REGION;
+  const region = normalizeAzureRegion(
+    (await getSecret(AZURE_SPEECH_REGION_LABEL))?.trim() || DEFAULT_AZURE_REGION,
+  );
   return {
     key,
     region,

@@ -1,8 +1,11 @@
 export const SPOKEN_WORD_CAP = 40;
 
-export const JARVIS_VOICE_SYSTEM_ADDON =
+export const COMBO_VOICE_SYSTEM_ADDON =
   "Your reply will be spoken aloud. Answer in at most 2 short sentences. " +
   "No markdown, no URLs, no code. Confirm the action taken in plain language.";
+
+/** @deprecated use COMBO_VOICE_SYSTEM_ADDON */
+export const JARVIS_VOICE_SYSTEM_ADDON = COMBO_VOICE_SYSTEM_ADDON;
 
 export function toSpokenReply(markdown: string, opts?: { wordCap?: number }): string {
   const wordCap = opts?.wordCap ?? SPOKEN_WORD_CAP;

@@ -1,21 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { guidanceForStatus } from "./useJarvis";
-import type { JarvisStatus } from "../lib/jarvis-bridge.js";
+import { guidanceForStatus } from "./useComboVoice.js";
+import type { ComboStatus } from "../lib/comboVoiceBridge.js";
 
-vi.mock("../lib/jarvis-bridge.js", () => ({
+vi.mock("../lib/comboVoiceBridge.js", () => ({
   openSetupPageForMic: vi.fn(),
-  loadJarvisLocale: () => "pl-PL",
-  saveJarvisLocale: vi.fn(),
-  startJarvis: vi.fn(),
-  stopJarvis: vi.fn(),
-  getJarvisStatus: vi.fn(),
-  speakJarvis: vi.fn(),
+  loadComboLocale: () => "pl-PL",
+  saveComboLocale: vi.fn(),
+  startCombo: vi.fn(),
+  stopCombo: vi.fn(),
+  getComboStatus: vi.fn(),
+  speakCombo: vi.fn(),
   checkMicPermission: vi.fn(),
-  onJarvisEvent: () => () => {},
+  onComboEvent: () => () => {},
   createNativePort: vi.fn(),
 }));
 
-const status = (partial: Partial<JarvisStatus> = {}): JarvisStatus => ({
+const status = (partial: Partial<ComboStatus> = {}): ComboStatus => ({
   state: "error",
   micGranted: false,
   lastTranscript: "click the login button please",
@@ -26,13 +26,14 @@ const status = (partial: Partial<JarvisStatus> = {}): JarvisStatus => ({
   ...partial,
 });
 
-describe("JarvisPanel guidance", () => {
+describe("ComboVoicePanel guidance", () => {
   it("surfaces mic + azure guidance for the panel", () => {
     const g = guidanceForStatus(status(), { azure: false, nsRag: false });
     expect(g.micMissing).toBe(true);
     expect(g.azureMissing).toBe(true);
     expect(g.messages.join(" ")).toMatch(/Microphone/i);
     expect(g.messages.join(" ")).toMatch(/azure_speech_key/);
+    expect(g.messages.join(" ")).toMatch(/Vault → Add secret/);
   });
 
   it("surfaces daemon offline when micOwner is daemon", () => {

@@ -264,7 +264,7 @@ export {
 } from "./browser/elementRef.js";
 export type { ActiveTabContext, PickedElementRef } from "./browser/elementRef.js";
 
-export { AgentLoop } from "./agent/loop.js";
+export { AgentLoop, DEFAULT_SYSTEM } from "./agent/loop.js";
 export type {
   AgentEvent,
   AgentRunOptions,

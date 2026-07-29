@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JARVIS_VOICE_SYSTEM_ADDON, SPOKEN_WORD_CAP, toSpokenReply } from "./spokenReply.js";
+import { COMBO_VOICE_SYSTEM_ADDON, SPOKEN_WORD_CAP, toSpokenReply } from "./spokenReply.js";
 
 describe("toSpokenReply", () => {
   it("drops fenced code blocks", () => {
@@ -35,7 +35,7 @@ describe("toSpokenReply", () => {
   });
 
   it("exposes a short spoken system addon", () => {
-    expect(JARVIS_VOICE_SYSTEM_ADDON.toLowerCase()).toContain("spoken");
-    expect(JARVIS_VOICE_SYSTEM_ADDON.toLowerCase()).toContain("markdown");
+    expect(COMBO_VOICE_SYSTEM_ADDON.toLowerCase()).toContain("spoken");
+    expect(COMBO_VOICE_SYSTEM_ADDON.toLowerCase()).toContain("markdown");
   });
 });

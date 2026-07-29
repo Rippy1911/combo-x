@@ -9,6 +9,12 @@ export const WAKE_PHRASES: readonly string[] = [
   "dzarwis",
   "jarwis",
   "jarvis",
+  // UI brand is Combo; strip these from STT when present (acoustic model is still hey_jarvis).
+  "hey combo",
+  "hi combo",
+  "ok combo",
+  "hej combo",
+  "combo",
   // Azure pl-PL STT renders the spoken name this way — observed in
   // _artifacts/jarvis-azure-verify/result.json. Without these the wake phrase is
   // left glued to the command text.

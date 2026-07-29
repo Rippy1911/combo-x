@@ -1,7 +1,7 @@
 /** Tool allowlist groups for Settings / Tools tabs. */
 
-/** Jarvis / Mac / portfolio tools. */
-export const JARVIS_TOOLS = [
+/** Combo voice / Mac / portfolio tools. */
+export const COMBO_VOICE_TOOLS = [
   "portfolio_ask",
   "portfolio_search",
   "mac_ui_tree",
@@ -16,6 +16,9 @@ export const JARVIS_TOOLS = [
   "index_dir",
   "ambient_recall",
 ] as const;
+
+/** @deprecated use COMBO_VOICE_TOOLS */
+export const JARVIS_TOOLS = COMBO_VOICE_TOOLS;
 
 export const TOOL_GROUPS = {
   Browser: [
@@ -118,7 +121,7 @@ export const TOOL_GROUPS = {
     "page_ext_data_clear",
     "list_page_extension_audit",
   ],
-  Jarvis: [...JARVIS_TOOLS],
+  "Combo voice": [...COMBO_VOICE_TOOLS],
 };
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
@@ -132,5 +135,5 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Agentic",
   "Meta",
   "PageExt",
-  "Jarvis",
+  "Combo voice",
 ];

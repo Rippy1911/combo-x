@@ -9,7 +9,10 @@ import {
   DEFAULT_MAC_ROOTS,
 } from "./safety.js";
 
-export const JARVIS_NATIVE_HOST = "studio.nextsolutions.jarvisd";
+export const COMBO_NATIVE_HOST = "studio.nextsolutions.jarvisd";
+
+/** @deprecated native host id is fixed for Chrome registration — use COMBO_NATIVE_HOST */
+export const JARVIS_NATIVE_HOST = COMBO_NATIVE_HOST;
 
 export const MAC_TOOL_NAMES = [
   "mac_ui_tree",
@@ -71,26 +74,26 @@ const MODIFIER_TOKENS = new Set([
 
 const MAC_TOOL_SET = new Set<string>(MAC_TOOL_NAMES);
 
-export interface JarvisNativeRequest {
+export interface ComboNativeRequest {
   id: string;
   op: string;
   args: Record<string, unknown>;
 }
 
-export interface JarvisNativeResponse {
+export interface ComboNativeResponse {
   id: string;
   ok: boolean;
   data?: unknown;
   error?: string;
 }
 
-export interface JarvisNativePort {
+export interface ComboNativePort {
   readonly connected: boolean;
-  send(op: string, args?: Record<string, unknown>): Promise<JarvisNativeResponse>;
+  send(op: string, args?: Record<string, unknown>): Promise<ComboNativeResponse>;
 }
 
 export interface MacToolDeps {
-  port: JarvisNativePort | null;
+  port: ComboNativePort | null;
   roots?: readonly string[];
   home?: string;
 }
@@ -227,7 +230,7 @@ export async function runMacTool(
     if (port == null || !port.connected) {
       return {
         ok: false,
-        error: "jarvisd not connected — install native/jarvisd (see docs/JARVIS.md)",
+        error: "jarvisd not connected — install native/jarvisd (see docs/COMBO.md)",
       };
     }
 
@@ -244,7 +247,7 @@ export async function runMacTool(
     if (raced && typeof raced === "object" && "__timeout" in raced) {
       return { ok: false, error: "timeout" };
     }
-    const resp = raced as JarvisNativeResponse;
+    const resp = raced as ComboNativeResponse;
     if (!resp.ok) {
       return {
         ok: false,
@@ -261,3 +264,10 @@ export async function runMacTool(
     return { ok: false, error: msg };
   }
 }
+
+/** @deprecated use ComboNativeRequest */
+export type JarvisNativeRequest = ComboNativeRequest;
+/** @deprecated use ComboNativeResponse */
+export type JarvisNativeResponse = ComboNativeResponse;
+/** @deprecated use ComboNativePort */
+export type JarvisNativePort = ComboNativePort;

@@ -95,7 +95,7 @@ import {
   type SubagentEvent,
   type VisionSettings,
   slimRunContextForStorage,
-  JARVIS_VOICE_SYSTEM_ADDON,
+  COMBO_VOICE_SYSTEM_ADDON,
   toSpokenReply,
 } from "@combo-x/core";
 import { buildLlmClient, shouldOmitComboWebSearch } from "./llmClient";
@@ -144,8 +144,14 @@ import {
   type SessionRuntimeMeta,
 } from "./sessionRuntime";
 import { useComboLink } from "./useComboLink";
-import { JarvisPanel } from "./JarvisPanel";
-import { useJarvis } from "./useJarvis";
+import { ComboVoicePanel } from "./ComboVoicePanel.js";
+import { useComboVoice } from "./useComboVoice.js";
+import { VaultSecretsForm } from "./VaultSecretsForm";
+import {
+  backupComboSpeechSecrets,
+  restoreComboSpeechSecrets,
+} from "../lib/comboSpeechBackup.js";
+import { resolveVoiceSendError, shouldForceClearStuckRun } from "./voiceSend";
 
 const APP_VERSION =
   typeof chrome !== "undefined" && chrome.runtime?.getManifest
@@ -218,7 +224,7 @@ type UiTurn = {
   content: string;
   createdAt?: string;
   bookmarked?: boolean;
-  /** Origin — Combo Link / Jarvis voice turns are badged in UI. */
+  /** Origin — Combo Link / Combo voice turns are badged in UI. */
   source?: "local" | "link" | "mcp" | "voice";
   attachments?: Array<{ id: string; name: string; kind: string }>;
   /** User-picked DOM elements attached to this turn. */
@@ -527,7 +533,9 @@ export function App() {
     (overrideText?: string, queued?: QueuedSend) => Promise<boolean>
   >(async () => false);
   const loadSessionRef = useRef<(id: string) => Promise<void>>(async () => {});
-  const jarvisSpeakRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const comboSpeakRef = useRef<(text: string) => Promise<void>>(async () => {});
+  /** Why the last send() returned false — never read optimistic status for this. */
+  const lastSendFailRef = useRef<string | null>(null);
   const pendingApprovalBySessionRef = useRef<
     Map<
       string,
@@ -808,6 +816,7 @@ export function App() {
             next.add("rag_status");
           }
           if (
+            p.connectors!.includes("combo") ||
             p.connectors!.includes("jarvis") ||
             p.connectors!.includes("mac") ||
             p.connectors!.includes("ns_rag")
@@ -1018,6 +1027,16 @@ export function App() {
 
   const afterUnlock = useCallback(async (activeVault?: Vault) => {
     const v = activeVault ?? vault;
+    // Restore Azure Speech labels from sealed chrome.storage.local if IDB lost them;
+    // then refresh the backup whenever the key is present (covers upgrades).
+    const vaultId = registry.activeId;
+    if (vaultId) {
+      const restored = await restoreComboSpeechSecrets(v, vaultId);
+      if (restored.restored) {
+        setStatus("Restored azure_speech_* from local backup");
+      }
+      await backupComboSpeechSecrets(v, vaultId);
+    }
     // Restore Combo API base / sync token from vault labels (LAN config survives)
     await hydrateCloudConfigFromVault((label) => v.getByLabel(label));
     const get = (label: string) => v.getByLabel(label);
@@ -1113,7 +1132,7 @@ export function App() {
     currentSession,
     rag,
     refreshProviderCreds,
-    refreshVaultLabels,
+    registry.activeId,
     sessions,
     vault,
   ]);
@@ -1355,6 +1374,37 @@ export function App() {
     bumpRuntimeMeta();
   }, [bumpRuntimeMeta, ensureRuntime, sessions, stashActiveWorkspace]);
 
+  /** Abort one session run without wiping the global send queue (voice may re-send). */
+  const clearSessionRun = useCallback(
+    (sid: string) => {
+      const controller = abortBySessionRef.current.get(sid);
+      controller?.abort();
+      abortBySessionRef.current.delete(sid);
+      const pa = pendingApprovalBySessionRef.current.get(sid);
+      if (pa) {
+        pa.resolve(false);
+        pendingApprovalBySessionRef.current.delete(sid);
+      }
+      const rt = runtimesRef.current.get(sid);
+      if (rt) {
+        rt.running = false;
+        rt.activeRunId = null;
+        rt.streamingId = null;
+        rt.status = "Stopped";
+        rt.lastTouchedAt = Date.now();
+      }
+      if (activeSessionIdRef.current === sid) {
+        abortRef.current = null;
+        runningRef.current = false;
+        setRunning(false);
+        setPendingApproval(null);
+        setStreamingId(null);
+      }
+      bumpRuntimeMeta();
+    },
+    [bumpRuntimeMeta],
+  );
+
   const stop = useCallback(() => {
     // Abort every in-flight session (active + background) so STOP always works.
     for (const [sid, controller] of [...abortBySessionRef.current]) {
@@ -1541,19 +1591,30 @@ export function App() {
 
   const send = useCallback(
     async (overrideText?: string, queued?: QueuedSend): Promise<boolean> => {
+      lastSendFailRef.current = null;
+      const fail = (reason: string): false => {
+        lastSendFailRef.current = reason;
+        return false;
+      };
       // Busy-check the *target* session (Link may send to a non-active chat).
       const targetId =
         queued?.sessionId ?? activeSessionIdRef.current ?? currentSession?.id ?? null;
-      if (targetId && runtimesRef.current.get(targetId)?.running) return false;
-      if (!targetId && runningRef.current) return false;
+      if (targetId && runtimesRef.current.get(targetId)?.running) {
+        return fail("busy: session already running — press STOP, then retry");
+      }
+      if (!targetId && runningRef.current) {
+        return fail("busy: another run is active — press STOP, then retry");
+      }
       let text = (overrideText ?? (queued ? queued.text : input)).trim();
       const pending = queued?.attachments ?? pendingAttachments;
       // Snapshot immediately — React state may clear before await points below.
       const picks = [...(queued?.picks ?? pendingPicks)];
-      if (!text && pending.length === 0 && picks.length === 0) return false;
+      if (!text && pending.length === 0 && picks.length === 0) {
+        return fail("empty message");
+      }
       if (!vault.isUnlocked()) {
         setStatus("Unlock vault first");
-        return false;
+        return fail("Unlock vault first");
       }
 
       // Embed queued secrets into the vault BEFORE send/history (no race with agent tools).
@@ -1565,6 +1626,12 @@ export function App() {
             await vault.putByLabel(e.label.trim(), e.value);
           }
           await refreshVaultLabels();
+          if (
+            registry.activeId &&
+            toEmbed.some((e) => e.label.trim() === "azure_speech_key")
+          ) {
+            await backupComboSpeechSecrets(vault, registry.activeId);
+          }
           if (text) {
             const embedded = embedSecretsInMessage(
               text,
@@ -1579,8 +1646,9 @@ export function App() {
           if (!queued) setPendingSecrets([]);
           setStatus(`Embedded ${toEmbed.length} secret(s) in vault`);
         } catch (err) {
-          setStatus(`Vault embed failed: ${err instanceof Error ? err.message : String(err)}`);
-          return false;
+          const msg = `Vault embed failed: ${err instanceof Error ? err.message : String(err)}`;
+          setStatus(msg);
+          return fail(msg);
         }
       }
 
@@ -1591,10 +1659,9 @@ export function App() {
         "";
       if (!key.trim() && !provider.keyOptional) {
         // Stay on Chat — forced tab switch felt like a redirect bug.
-        setStatus(
-          `Missing API key for ${provider.label}. Open Settings → LLM and paste your key (vault label ${apiKeyVaultLabel(provider.id)}), or pick a model from another configured provider / Ollama.`,
-        );
-        return false;
+        const msg = `Missing API key for ${provider.label}. Open Settings → LLM and paste your key (vault label ${apiKeyVaultLabel(provider.id)}), or pick a model from another configured provider / Ollama.`;
+        setStatus(msg);
+        return fail(msg);
       }
 
       const displayText =
@@ -1639,11 +1706,21 @@ export function App() {
       const editId = queued ? null : editingTurnId;
       setEditingTurnId(null);
       const boundId = session.id;
-      activeSessionIdRef.current = activeSessionIdRef.current ?? boundId;
+      // Voice/Link must always paint into the session they target — a stale
+      // activeSessionIdRef otherwise leaves rt.turns updated while Chat stays empty.
+      if (queued?.source === "voice" || queued?.source === "link") {
+        activeSessionIdRef.current = boundId;
+        setCurrentSession(session);
+        setTab("chat");
+      } else {
+        activeSessionIdRef.current = activeSessionIdRef.current ?? boundId;
+      }
       const isBoundActive = () => activeSessionIdRef.current === boundId;
       const rt = ensureRuntime(boundId);
       // Atomic claim — closes the race between concurrent send()/queue drain.
-      if (rt.running) return false;
+      if (rt.running) {
+        return fail("busy: session already running — press STOP, then retry");
+      }
       const runId = crypto.randomUUID();
       const controller = new AbortController();
       rt.running = true;
@@ -2122,7 +2199,7 @@ export function App() {
         if (isBoundActive()) setPlanningTool(null);
         const voiceRun = queued?.source === "voice";
         const systemPrompt = voiceRun
-          ? [activeProfile?.systemPrompt, JARVIS_VOICE_SYSTEM_ADDON]
+          ? [activeProfile?.systemPrompt, COMBO_VOICE_SYSTEM_ADDON]
               .filter(Boolean)
               .join("\n\n")
           : activeProfile?.systemPrompt;
@@ -2228,7 +2305,7 @@ export function App() {
         publishStatus(doneStatus);
         if (voiceRun && !result.aborted) {
           const spoken = toSpokenReply(result.finalText || "");
-          if (spoken) await jarvisSpeakRef.current(spoken);
+          if (spoken) await comboSpeakRef.current(spoken);
         }
         if (!isBoundActive() && !result.aborted) {
           rt.unread = true;
@@ -2323,6 +2400,7 @@ export function App() {
       rag,
       refreshSessions,
       refreshVaultLabels,
+      registry.activeId,
       sessionUsage,
       sessions,
       taskStore,
@@ -2383,38 +2461,140 @@ export function App() {
     vault,
   ]);
 
-  // Keep refs fresh for Combo Link / Jarvis command handlers
+  // Keep refs fresh for Combo Link / Combo voice command handlers
   sendRef.current = send;
   loadSessionRef.current = loadSession;
 
-  const jarvis = useJarvis({
+  const comboVoice = useComboVoice({
     getSecret: (label) => vault.getByLabel(label),
     onCommand: async (command, wakeToken) => {
-      try {
-        let sid = activeSessionIdRef.current ?? currentSession?.id ?? null;
-        if (!sid) {
-          const created = await sessions.create(command.slice(0, 60) || "Voice", {
-            source: "voice" as "local",
-          });
-          sid = created.id;
-          await loadSessionRef.current(sid);
+      if (!vault.isUnlocked()) {
+        throw new Error("Unlock the vault first, then say Hey Combo again.");
+      }
+      // Fail fast with spoken guidance — voice cannot chat without an LLM key.
+      {
+        const provider = resolveProvider(llmProvider);
+        const key =
+          apiKey.trim() ||
+          (await resolveProviderApiKey(llmProvider, (l) => vault.getByLabel(l))) ||
+          "";
+        if (!key.trim() && !provider.keyOptional) {
+          const msg = `Missing API key for ${provider.label}. Open Settings → LLM, paste your key (vault label ${apiKeyVaultLabel(provider.id)}), click Save keys, then try again.`;
+          setTab("settings");
+          setStatus(msg);
+          void comboSpeakRef.current(
+            `Add your ${provider.label} API key in Settings, save it, then say Hey Combo again.`,
+          );
+          throw new Error(msg);
         }
-        const ok = await sendRef.current(command, {
-          sessionId: sid,
-          text: command,
-          attachments: [],
-          secrets: [],
-          picks: [],
+      }
+      let sid = activeSessionIdRef.current ?? currentSession?.id ?? null;
+      if (!sid) {
+        const created = await sessions.create(command.slice(0, 60) || "Voice", {
           source: "voice",
-          wakeToken,
         });
-        if (!ok) setStatus("Jarvis send rejected (busy or locked)");
-      } catch (e) {
-        setStatus(`Jarvis: ${e instanceof Error ? e.message : String(e)}`);
+        sid = created.id;
+      }
+      // Always re-bind Chat to the target session before send paints turns.
+      await loadSessionRef.current(sid);
+      activeSessionIdRef.current = sid;
+      setTab("chat");
+
+      // Optimistic paint — proves the sidepanel received the voice command even if
+      // send() later fails (missing key / busy). send() will append a proper pair.
+      const optimisticAt = new Date().toISOString();
+      setTurns((prev) => {
+        const already = prev.some(
+          (t) =>
+            t.role === "user" &&
+            t.source === "voice" &&
+            t.content === command &&
+            optimisticAt.localeCompare(t.createdAt ?? "") <= 0,
+        );
+        if (already) return prev;
+        return [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            content: command,
+            createdAt: optimisticAt,
+            source: "voice" as const,
+          },
+        ];
+      });
+      setStatus(`Combo heard: ${command.slice(0, 80)}`);
+
+      const meta = await getActiveTabMeta();
+      const item: QueuedSend = {
+        sessionId: sid,
+        text: command,
+        attachments: [],
+        secrets: [],
+        picks: [],
+        activeTab: { ...meta, at: new Date().toISOString() },
+        source: "voice",
+        wakeToken,
+      };
+
+      const rt = ensureRuntime(sid);
+      const orphaned =
+        !!rt.running && !abortBySessionRef.current.has(sid);
+      if (
+        orphaned ||
+        shouldForceClearStuckRun({
+          running: !!rt.running,
+          lastTouchedAt: rt.lastTouchedAt,
+        })
+      ) {
+        clearSessionRun(sid);
+      }
+
+      let busy =
+        !!runtimesRef.current.get(sid)?.running || runningRef.current;
+      if (busy) {
+        // Voice is explicit take-over intent — abort a live run once, then send.
+        clearSessionRun(sid);
+        busy =
+          !!runtimesRef.current.get(sid)?.running || runningRef.current;
+      }
+      if (busy) {
+        sendQueueRef.current = [...sendQueueRef.current, item];
+        setSendQueue([...sendQueueRef.current]);
+        setStatus(`Combo queued · ${sendQueueRef.current.length} waiting`);
+        return;
+      }
+
+      lastSendFailRef.current = null;
+      let ok = await sendRef.current(command, item);
+      if (!ok && /^busy:/i.test(lastSendFailRef.current ?? "")) {
+        clearSessionRun(sid);
+        lastSendFailRef.current = null;
+        ok = await sendRef.current(command, item);
+      }
+      if (!ok) {
+        const hint = resolveVoiceSendError({
+          lastSendFail: lastSendFailRef.current,
+          statusText: statusRef.current,
+        });
+        setStatus(`Combo: ${hint}`);
+        if (/missing api key/i.test(hint)) {
+          setTab("settings");
+          void comboSpeakRef.current(
+            "Add your Open Router API key in Settings, save it, then try again.",
+          );
+        }
+        throw new Error(hint);
       }
     },
   });
-  jarvisSpeakRef.current = (text) => jarvis.speak(text);
+  comboSpeakRef.current = (text) => comboVoice.speak(text);
+
+  // After unlock (and restore of azure_speech_*), refresh Combo voice key chips.
+  useEffect(() => {
+    if (locked || !vault.isUnlocked()) return;
+    void comboVoice.refreshKeyStatus();
+  }, [locked, vault, comboVoice.refreshKeyStatus]);
 
   const comboLink = useComboLink(!locked && vault.isUnlocked(), sessions, {
     onLinkSend: async ({ sessionId, text, createNew }) => {
@@ -2699,7 +2879,7 @@ export function App() {
               refreshTick={tasksRefreshTick}
             />
             <div className="chat-thread">
-              <JarvisPanel jarvis={jarvis} />
+              <ComboVoicePanel comboVoice={comboVoice} />
               <div className="conv-bar">
                 <div className="conv-bar-main">
                   <button
@@ -3126,7 +3306,7 @@ export function App() {
                             </span>
                           ) : null}
                           {t.role === "user" && t.source === "voice" ? (
-                            <span className="delivery-pill stream" title="Sent via Jarvis voice">
+                            <span className="delivery-pill stream" title="Sent via Combo voice">
                               voice
                             </span>
                           ) : null}
@@ -3843,6 +4023,18 @@ export function App() {
               setStatus("Switched vault — unlock with passphrase");
             }}
             locked={locked}
+          />
+          <VaultSecretsForm
+            vault={vault}
+            locked={locked}
+            onChanged={async () => {
+              await refreshVaultLabels();
+              const vaultId = registry.activeId;
+              if (vaultId && vault.isUnlocked()) {
+                await backupComboSpeechSecrets(vault, vaultId);
+              }
+              await comboVoice.refreshKeyStatus();
+            }}
           />
           <h3>Labels in this vault</h3>
           <p className="hint wrap">Names only — values stay encrypted.</p>

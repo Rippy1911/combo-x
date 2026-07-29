@@ -15,7 +15,7 @@ const MIC_ARGS = [
 
 interface Booted {
   context: BrowserContext;
-  /** An unlocked side panel page — the Jarvis pill lives behind the vault gate. */
+  /** An unlocked side panel page — the Combo voice pill lives behind the vault gate. */
   panel: Page;
   extensionId: string;
 }
@@ -49,7 +49,7 @@ async function bootUnlockedPanel(): Promise<Booted> {
     { timeout: 20_000 },
   );
 
-  // Fresh profile → VaultGate is in "create" mode; the chat surface (and the Jarvis
+  // Fresh profile → VaultGate is in "create" mode; the chat surface (and the Combo voice
   // pill) only mounts once a vault is unlocked.
   const passphrase = panel.getByPlaceholder("passphrase");
   if (await passphrase.count().catch(() => 0)) {
@@ -59,7 +59,7 @@ async function bootUnlockedPanel(): Promise<Booted> {
     await passphrase.fill("jarvis-e2e-passphrase");
     await panel.getByRole("button", { name: "Create & unlock" }).click({ timeout: 5000 });
     await panel
-      .waitForSelector('[data-testid="jarvis-pill"]', { timeout: 45_000 })
+      .waitForSelector('[data-testid="combo-voice-pill"]', { timeout: 45_000 })
       .catch(() => undefined);
   }
   return { context, panel, extensionId };
@@ -80,7 +80,7 @@ async function ask(panel: Page, message: Record<string, unknown>, timeoutMs = 20
   );
 }
 
-test("manifest declares the Jarvis surface", async () => {
+test("manifest declares the Combo voice surface", async () => {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(extensionPath, "manifest.json"), "utf8"),
   ) as {
@@ -109,12 +109,12 @@ test("wake models ship only in a JARVIS_DEV_BUILD", async () => {
   }
 });
 
-test("side panel renders the Jarvis pill, off and unmuted by default", async () => {
+test("side panel renders the Combo voice pill, off and unmuted by default", async () => {
   const { context, panel } = await bootUnlockedPanel();
   try {
-    const pill = panel.getByTestId("jarvis-pill");
+    const pill = panel.getByTestId("combo-voice-pill");
     // Vault creation runs a slow KDF; on a cold profile it occasionally outlasts the
-    // gate wait. Skip rather than report a Jarvis failure for a vault-gate timeout.
+    // gate wait. Skip rather than report a Combo voice failure for a vault-gate timeout.
     if ((await pill.count().catch(() => 0)) === 0) {
       const gate = await panel
         .locator(".hint.wrap")
@@ -127,7 +127,7 @@ test("side panel renders the Jarvis pill, off and unmuted by default", async () 
     }
     await expect(pill).toBeVisible({ timeout: 20_000 });
     // Nothing listens until the operator presses Start — no hot mic on panel open.
-    await expect(pill).toContainText("Jarvis");
+    await expect(pill).toContainText("Combo");
     await expect(pill).toContainText("off");
     await expect(pill.getByRole("button", { name: "Start" })).toBeVisible();
     await expect(pill.getByRole("button", { name: "Mute" })).toBeVisible();
