@@ -159,16 +159,18 @@ echo "Wrote native-messaging host manifest:"
 echo "  ${MANIFEST_PATH}"
 echo
 echo "=== macOS permissions (required) ==="
+echo "TCC credits the responsible parent process, so grant Google Chrome"
+echo "(the app that spawns this host) — not ${WRAPPER}."
+echo
 echo "1) Accessibility"
-echo "   System Settings → Privacy & Security → Accessibility"
-echo "   Enable the binary that Chrome launches: ${WRAPPER}"
-echo "   (or the python3 inside ${VENV}/bin/python)."
+echo "   System Settings → Privacy & Security → Accessibility → Google Chrome"
 echo "   Needed for ui_tree / click / type / key / focus."
 echo
 echo "2) Screen Recording"
-echo "   System Settings → Privacy & Security → Screen Recording"
-echo "   Enable the same binary (or Terminal if you launch manually)."
+echo "   System Settings → Privacy & Security → Screen Recording → Google Chrome"
 echo "   Needed for screenshot; without it captures are empty/black."
+echo
+echo "Launching the daemon manually instead? Grant your terminal app."
 echo
 echo "Then reload the Combo-X extension and reconnect the native host."
 echo "Done."
