@@ -32,7 +32,7 @@ export const TEST_SPEECH_PHRASE: Record<SpeechLocale, string> = {
 };
 
 export const OFFSCREEN_UNSUPPORTED_HINT =
-  "Combo voice mic needs Chrome or Edge (Firefox has no offscreen). Use Test Speech to verify your key here.";
+  "Voice mode mic needs Chrome or Edge (Firefox has no offscreen). Use Test Speech to verify your key here.";
 
 export const WAKE_MODELS_MISSING_HINT =
   "Wake models missing — rebuild with `pnpm build:combo`, then reload. Use Test to verify Azure TTS without wake.";
@@ -45,7 +45,7 @@ export function mapComboStartError(error: string): string {
     return OFFSCREEN_UNSUPPORTED_HINT;
   }
   if (/unable to load a worklet/i.test(error)) {
-    return "Audio worklet blocked — reload the Combo voice build (public/jarvis-capture-worklet.js).";
+    return "Audio worklet blocked — reload the Voice mode build (public/jarvis-capture-worklet.js).";
   }
   if (/failed to fetch|wake models? missing|openwakeword/i.test(error)) {
     return WAKE_MODELS_MISSING_HINT;
@@ -188,7 +188,7 @@ export function guidanceForStatus(
     messages.push("Optional: add ns_rag_api_key in Vault → Add secret for portfolio answers.");
   }
   if (daemonOffline) {
-    messages.push("Mac tools daemon (jarvisd) is offline — Mac tools unavailable.");
+    messages.push("Mac tools daemon is offline — Mac tools unavailable.");
   }
   return { micMissing, azureMissing, daemonOffline, messages };
 }
@@ -453,7 +453,7 @@ export function useComboVoice(opts: UseComboVoiceOptions): UseComboVoiceResult {
       setStatus((prev) => ({
         ...prev,
         state: "error",
-        lastError: mapComboStartError(res.error ?? "Failed to start Combo voice"),
+        lastError: mapComboStartError(res.error ?? "Failed to start voice mode"),
       }));
       enabledRef.current = false;
       setEnabled(false);
@@ -483,7 +483,7 @@ export function useComboVoice(opts: UseComboVoiceOptions): UseComboVoiceResult {
         setStatus((prev) => ({
           ...prev,
           state: "error",
-          lastError: mapComboStartError(res.error ?? "Failed to restart Combo voice"),
+          lastError: mapComboStartError(res.error ?? "Failed to restart voice mode"),
           locale,
         }));
         return;

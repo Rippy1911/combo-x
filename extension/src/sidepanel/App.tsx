@@ -152,6 +152,13 @@ import {
   restoreComboSpeechSecrets,
 } from "../lib/comboSpeechBackup.js";
 import { resolveVoiceSendError, shouldForceClearStuckRun } from "./voiceSend";
+import {
+  isVoiceMicSupported,
+  parseVoicePanelMode,
+  shouldShowVoicePanel,
+  VOICE_PANEL_KEY,
+  type VoicePanelMode,
+} from "./voicePanel.js";
 
 const APP_VERSION =
   typeof chrome !== "undefined" && chrome.runtime?.getManifest
@@ -164,6 +171,7 @@ const DETECT_SECRETS_KEY = "combo_x_detect_secrets";
 const APPROVAL_KEY = "combo_x_approval_mode";
 const BUDGET_KEY = "combo_x_budget_mode";
 const CONTEXT_LIMIT_KEY = "combo_x_context_limit";
+const VOICE_PANEL_STORAGE_KEY = VOICE_PANEL_KEY;
 const RAG_EXCLUDE_KEY = "combo_x_rag_exclude";
 const LAST_SESSION_KEY = "combo_x_last_session_id";
 const SHOW_ACTIONS_KEY = "combo_x_show_actions";
@@ -293,7 +301,11 @@ const ZERO: LlmUsage = {
 function formatUsageLine(u: LlmUsage): string {
   const cost = formatUsd(u.estimatedCostUsd);
   const src = u.costSource === "openrouter" ? "OR" : u.costSource === "estimate" ? "~" : "";
-  return `in ${u.promptTokens.toLocaleString()} · out ${u.completionTokens.toLocaleString()} (${cost}${src ? ` ${src}` : ""})`;
+  const cached =
+    u.cachedTokens && u.cachedTokens > 0
+      ? ` · cache ${u.cachedTokens.toLocaleString()}`
+      : "";
+  return `in ${u.promptTokens.toLocaleString()}${cached} · out ${u.completionTokens.toLocaleString()} (${cost}${src ? ` ${src}` : ""})`;
 }
 
 function formatUsd(n: number): string {
@@ -308,11 +320,15 @@ function emptySplit(): UsageSplit {
 }
 
 function addUsage(a: LlmUsage, b: LlmUsage): LlmUsage {
+  const cachedTokens = (a.cachedTokens ?? 0) + (b.cachedTokens ?? 0);
+  const cacheWriteTokens = (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0);
   return {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
     totalTokens: a.totalTokens + b.totalTokens,
     estimatedCostUsd: a.estimatedCostUsd + b.estimatedCostUsd,
+    ...(cachedTokens > 0 ? { cachedTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
     costSource:
       a.costSource === "openrouter" || b.costSource === "openrouter"
         ? "openrouter"
@@ -466,6 +482,11 @@ export function App() {
     const v = Number.parseInt(localStorage.getItem(CONTEXT_LIMIT_KEY) ?? "", 10);
     return Number.isFinite(v) && v >= 0 ? v : CONTEXT_LIMIT_DEFAULT;
   });
+  const [voicePanelMode, setVoicePanelMode] = useState<VoicePanelMode>(() =>
+    parseVoicePanelMode(localStorage.getItem(VOICE_PANEL_STORAGE_KEY)),
+  );
+  const voiceMicSupported = isVoiceMicSupported();
+  const showVoicePanel = shouldShowVoicePanel(voicePanelMode, voiceMicSupported);
   const [ragExclude, setRagExclude] = useState(
     () => localStorage.getItem(RAG_EXCLUDE_KEY) ?? DEFAULT_SKIP_DIRS.join(", "),
   );
@@ -650,6 +671,9 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(CONTEXT_LIMIT_KEY, String(contextLimit));
   }, [contextLimit]);
+  useEffect(() => {
+    localStorage.setItem(VOICE_PANEL_STORAGE_KEY, voicePanelMode);
+  }, [voicePanelMode]);
 
   useEffect(() => {
     localStorage.setItem(RAG_EXCLUDE_KEY, ragExclude);
@@ -829,6 +853,7 @@ export function App() {
           if (
             p.connectors!.includes("combo") ||
             p.connectors!.includes("jarvis") ||
+            p.connectors!.includes("voice") ||
             p.connectors!.includes("mac") ||
             p.connectors!.includes("ns_rag")
           ) {
@@ -2613,6 +2638,13 @@ export function App() {
     void comboVoice.refreshKeyStatus();
   }, [locked, vault, comboVoice.refreshKeyStatus]);
 
+  // Hiding the strip must not leave mic/wake running with no Stop control.
+  useEffect(() => {
+    if (!showVoicePanel && comboVoice.enabled) {
+      void comboVoice.toggleEnabled();
+    }
+  }, [showVoicePanel, comboVoice.enabled, comboVoice.toggleEnabled]);
+
   const comboLink = useComboLink(!locked && vault.isUnlocked(), sessions, {
     onLinkSend: async ({ sessionId, text, createNew }) => {
       try {
@@ -2896,7 +2928,16 @@ export function App() {
               refreshTick={tasksRefreshTick}
             />
             <div className="chat-thread">
-              <ComboVoicePanel comboVoice={comboVoice} />
+              {showVoicePanel ? (
+                <ComboVoicePanel
+                  comboVoice={comboVoice}
+                  micSupported={voiceMicSupported}
+                  onHide={() => {
+                    if (comboVoice.enabled) void comboVoice.toggleEnabled();
+                    setVoicePanelMode("hide");
+                  }}
+                />
+              ) : null}
               <div className="conv-bar">
                 <div className="conv-bar-main">
                   <button
@@ -3323,7 +3364,7 @@ export function App() {
                             </span>
                           ) : null}
                           {t.role === "user" && t.source === "voice" ? (
-                            <span className="delivery-pill stream" title="Sent via Combo voice">
+                            <span className="delivery-pill stream" title="Sent via Voice mode">
                               voice
                             </span>
                           ) : null}
@@ -4000,6 +4041,9 @@ export function App() {
           setBudgetMode={setBudgetMode}
           contextLimit={contextLimit}
           setContextLimit={setContextLimit}
+          voicePanelMode={voicePanelMode}
+          setVoicePanelMode={setVoicePanelMode}
+          voiceMicSupported={voiceMicSupported}
           enabledTools={enabledTools}
           setEnabledTools={updateEnabledTools}
           activeAgentId={activeAgentId}

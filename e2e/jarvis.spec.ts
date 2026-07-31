@@ -109,12 +109,12 @@ test("wake models ship only in a JARVIS_DEV_BUILD", async () => {
   }
 });
 
-test("side panel renders the Combo voice pill, off and unmuted by default", async () => {
+test("side panel renders the Voice panel, off and unmuted by default", async () => {
   const { context, panel } = await bootUnlockedPanel();
   try {
     const pill = panel.getByTestId("combo-voice-pill");
     // Vault creation runs a slow KDF; on a cold profile it occasionally outlasts the
-    // gate wait. Skip rather than report a Combo voice failure for a vault-gate timeout.
+    // gate wait. Skip rather than report a Voice panel failure for a vault-gate timeout.
     if ((await pill.count().catch(() => 0)) === 0) {
       const gate = await panel
         .locator(".hint.wrap")
@@ -127,11 +127,12 @@ test("side panel renders the Combo voice pill, off and unmuted by default", asyn
     }
     await expect(pill).toBeVisible({ timeout: 20_000 });
     // Nothing listens until the operator presses Start — no hot mic on panel open.
-    await expect(pill).toContainText("Combo");
+    await expect(pill).toContainText("Voice");
     await expect(pill).toContainText("off");
     await expect(pill.getByRole("button", { name: "Start" })).toBeVisible();
     await expect(pill.getByRole("button", { name: "Mute" })).toBeVisible();
-    await expect(pill).toContainText("Audio stays local until the wake word fires.");
+    await expect(pill.getByRole("button", { name: "Hide" })).toBeVisible();
+    await expect(pill).toContainText("wake word");
   } finally {
     await context.close();
   }

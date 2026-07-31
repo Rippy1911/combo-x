@@ -186,6 +186,12 @@ export {
   messageContentAsText,
   stripImageParts,
 } from "./llm/openrouter.js";
+export {
+  applyCacheBreakpoints,
+  clampSessionId,
+  needsExplicitCacheControl,
+  needsTopLevelCacheControl,
+} from "./llm/promptCache.js";
 export type {
   ChatMessage,
   ChatContent,
@@ -286,9 +292,10 @@ export {
   scrubDataUrls,
   truncateToolResultForLlm,
   compressHistory,
+  compactMidLoopMessages,
   historyChars,
 } from "./agent/leanHistory.js";
-export type { UiHistoryTurn } from "./agent/leanHistory.js";
+export type { UiHistoryTurn, CompactMidLoopResult } from "./agent/leanHistory.js";
 
 export {
   DEFAULT_VISION_SETTINGS,

@@ -24,7 +24,17 @@ const DOT_COLOR: Record<UseComboVoiceResult["status"]["state"], string> = {
   error: "var(--danger)",
 };
 
-export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResult }) {
+export function ComboVoicePanel({
+  comboVoice,
+  onHide,
+  micSupported = true,
+}: {
+  comboVoice: UseComboVoiceResult;
+  /** Hide strip until re-enabled in Settings → Voice panel. */
+  onHide?: () => void;
+  /** False on Firefox (no offscreen mic/wake). */
+  micSupported?: boolean;
+}) {
   const { status, enabled, muted, testing, keyStatus, debug, debugLog } = comboVoice;
   const guidance = guidanceForStatus(status, keyStatus);
   const transcript = status.lastTranscript?.trim() || "";
@@ -34,7 +44,7 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
     status.lastError === "no_speech"
       ? status.locale === "pl-PL"
         ? 'Azure heard silence/noise. Switch locale to en-US for English, or pause after “Hey Combo” then speak the command.'
-        : 'Azure heard silence/noise. Prefer: “Hey Combo” → pause → command. (Acoustic wake model hey_jarvis also works.)'
+        : 'Azure heard silence/noise. Prefer: “Hey Combo” → pause → command.'
       : null;
 
   return (
@@ -76,7 +86,7 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
             }}
           />
           <span style={{ color: "var(--text)", fontWeight: 600 }}>
-            Combo · {STATE_LABEL[status.state]}
+            Voice · {STATE_LABEL[status.state]}
           </span>
         </span>
 
@@ -85,8 +95,8 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
             className="gate-badge"
             title={
               status.daemonConnected
-                ? "Mic owned by jarvisd (Mac daemon)"
-                : "Mac daemon (jarvisd) offline"
+                ? "Mic owned by Mac tools daemon"
+                : "Mac tools daemon offline"
             }
             style={{ fontSize: 10 }}
           >
@@ -94,16 +104,24 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
           </span>
         ) : null}
 
+        {!micSupported ? (
+          <span className="gate-badge" style={{ fontSize: 10 }} title="Mic/wake needs Chrome or Edge">
+            Test only
+          </span>
+        ) : null}
+
         <span style={{ flex: 1 }} />
 
-        <button
-          type="button"
-          className={enabled ? "msg-action active" : "msg-action"}
-          onClick={() => void comboVoice.toggleEnabled()}
-          title={enabled ? "Stop Combo voice" : "Start Combo voice"}
-        >
-          {enabled ? "Stop" : "Start"}
-        </button>
+        {micSupported ? (
+          <button
+            type="button"
+            className={enabled ? "msg-action active" : "msg-action"}
+            onClick={() => void comboVoice.toggleEnabled()}
+            title={enabled ? "Stop voice mode" : "Start voice mode"}
+          >
+            {enabled ? "Stop" : "Start"}
+          </button>
+        ) : null}
         <button
           type="button"
           className="msg-action"
@@ -113,14 +131,16 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
         >
           {testing ? "Testing…" : "Test"}
         </button>
-        <button
-          type="button"
-          className={muted ? "msg-action active dangerish" : "msg-action"}
-          onClick={() => comboVoice.setMuted(!muted)}
-          title={muted ? "Unmute — route wake commands" : "Hard mute — drop utterances"}
-        >
-          {muted ? "Muted" : "Mute"}
-        </button>
+        {micSupported ? (
+          <button
+            type="button"
+            className={muted ? "msg-action active dangerish" : "msg-action"}
+            onClick={() => comboVoice.setMuted(!muted)}
+            title={muted ? "Unmute — route wake commands" : "Hard mute — drop utterances"}
+          >
+            {muted ? "Muted" : "Mute"}
+          </button>
+        ) : null}
         <button
           type="button"
           className={debug ? "msg-action active" : "msg-action"}
@@ -130,8 +150,19 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
         >
           Debug
         </button>
+        {onHide ? (
+          <button
+            type="button"
+            className="msg-action"
+            onClick={onHide}
+            title="Hide voice panel — restore in Settings → Voice panel"
+            data-testid="combo-voice-hide"
+          >
+            Hide
+          </button>
+        ) : null}
         <select
-          aria-label="Combo voice locale"
+          aria-label="Voice mode locale"
           value={status.locale}
           onChange={(e) =>
             void comboVoice.setLocale(e.target.value as UseComboVoiceResult["status"]["locale"])
@@ -176,7 +207,7 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
             <div>Missing azure_speech_key — add it in Vault → Add secret.</div>
           ) : null}
           {guidance.daemonOffline ? (
-            <div>Mac tools daemon (jarvisd) is offline.</div>
+            <div>Mac tools daemon is offline.</div>
           ) : null}
           {guidance.micMissing ? (
             <button
@@ -192,8 +223,9 @@ export function ComboVoicePanel({ comboVoice }: { comboVoice: UseComboVoiceResul
       ) : null}
 
       <p className="hint" style={{ margin: 0, opacity: 0.75 }}>
-        Audio stays local until the wake word fires. English commands → set locale{" "}
-        <strong>en-US</strong>.
+        {micSupported
+          ? "Voice mode: audio stays local until the wake word fires. English → locale en-US."
+          : "This browser has no mic/wake path — use Test for Azure TTS, or open Chrome/Edge for full voice mode."}
       </p>
 
       {debug ? (

@@ -122,7 +122,7 @@ export const TOOL_GROUPS = {
     "page_ext_data_clear",
     "list_page_extension_audit",
   ],
-  "Combo voice": [...COMBO_VOICE_TOOLS],
+  "Voice mode": [...COMBO_VOICE_TOOLS],
 };
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
@@ -136,5 +136,5 @@ export const GROUP_ORDER: ToolGroupName[] = [
   "Agentic",
   "Meta",
   "PageExt",
-  "Combo voice",
+  "Voice mode",
 ];

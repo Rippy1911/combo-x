@@ -1,13 +1,15 @@
-# Combo voice — wake-driven control via Combo-X
+# Voice mode — wake-driven control via Combo-X
 
-> **Brand:** Combo voice · wake phrase **"Hey Combo"**. Technical wake assets still use the openWakeWord `hey_jarvis` model (no `hey_combo` ONNX yet). See also [`COMBO.md`](./COMBO.md).
+> **Brand:** Voice mode · wake phrase **"Hey Combo"**. Technical wake assets still use the openWakeWord `hey_jarvis` model (no `hey_combo` ONNX yet). Wire protocol may still say `jarvis_*` / `JARVIS_*` for compatibility. See also [`COMBO.md`](./COMBO.md).
 
 Wake-word voice assistant. Say **"Hey Combo"** (or the acoustic alias **"Hey Jarvis"** via the wake model), then a command; Combo-X's existing agent
 loop plans and acts. Slice 1 acts inside browser tabs. Slice 2 adds whole-Mac vision and
 input through a native-messaging daemon (`jarvisd`).
 
-Chrome/Chromium only — the Firefox build drops `sidePanel`, `offscreen` and `tabCapture`
-(see `FIREFOX.md`).
+**Panel visibility:** Settings → Voice panel = `auto` (default: hide when `chrome.offscreen` is missing, e.g. Firefox), `show`, or `hide`. The strip also has a Hide button.
+
+Chrome/Chromium for full mic/wake — the Firefox build drops `sidePanel`, `offscreen` and `tabCapture`
+(see `FIREFOX.md`); Auto mode hides the Voice strip there so it does not waste space.
 
 ---
 
@@ -43,7 +45,7 @@ Add them under **Vault → Add secret** (or Chat → Add secret… → Send). Sa
 labels if IndexedDB is empty. Prefer Chrome unpacked for Combo voice (stable extension id);
 Firefox temporary add-ons wipe storage on Remove — use **Reload** or Vault → disk pack.
 
-**Test** on the Combo voice pill synthesizes a short TTS phrase in the side panel (no mic).
+**Test** on the Voice panel synthesizes a short TTS phrase in the side panel (no mic).
 Wake + STT (**Start**) needs Chromium `chrome.offscreen` — use Chrome/Edge; rebuild with
 `pnpm build:combo` (alias `pnpm build:jarvis`). Mic capture uses ScriptProcessor (not AudioWorklet): MV3
 `script-src 'self'` forbids `blob:` and Chromium rewrites worklet modules through blob URLs.
