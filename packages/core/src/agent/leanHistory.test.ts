@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../llm/openrouter.js";
 import {
+  compactMidLoopMessages,
   compressHistory,
   historyChars,
   historyFromUiTurns,
@@ -262,5 +263,85 @@ describe("compressHistory (context limit)", () => {
       const summary = String(r.history[0]?.content);
       expect(summary).toMatch(/tools:\s*navigate/i);
     }
+  });
+});
+
+describe("compactMidLoopMessages", () => {
+  function toolRound(id: string, name: string, resultChars: number): ChatMessage[] {
+    return [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id,
+            type: "function",
+            function: { name, arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: id,
+        name,
+        content: "x".repeat(resultChars),
+      },
+    ];
+  }
+
+  it("no-ops when under maxChars", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+      ...toolRound("1", "navigate", 100),
+    ];
+    const r = compactMidLoopMessages(messages, { maxChars: 50_000 });
+    expect(r.compacted).toBe(false);
+    expect(r.messages).toBe(messages);
+  });
+
+  it("keeps newest tool rounds in OpenAI shape and folds older ones", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "audit the site" },
+      ...toolRound("1", "navigate", 3_000),
+      ...toolRound("2", "page_digest", 3_000),
+      ...toolRound("3", "get_interactive", 3_000),
+      ...toolRound("4", "click_index", 3_000),
+    ];
+    const r = compactMidLoopMessages(messages, {
+      maxChars: 8_000,
+      keepRecentRounds: 2,
+    });
+    expect(r.compacted).toBe(true);
+    expect(r.droppedRounds).toBe(2);
+    expect(r.afterChars).toBeLessThan(r.beforeChars);
+    // System preserved
+    expect(r.messages[0]?.role).toBe("system");
+    // Newest rounds still have real tool rows
+    const toolRows = r.messages.filter((m) => m.role === "tool");
+    expect(toolRows.length).toBeGreaterThanOrEqual(2);
+    expect(toolRows.some((m) => m.tool_call_id === "4")).toBe(true);
+    // Older rounds should not keep raw tool rows for id 1
+    expect(toolRows.some((m) => m.tool_call_id === "1")).toBe(false);
+  });
+
+  it("preserves the last assistant tool_calls pair for the next model turn", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+      ...toolRound("a", "navigate", 4_000),
+      ...toolRound("b", "page_digest", 4_000),
+      ...toolRound("c", "get_page", 4_000),
+    ];
+    const r = compactMidLoopMessages(messages, {
+      maxChars: 6_000,
+      keepRecentRounds: 1,
+    });
+    expect(r.compacted).toBe(true);
+    const lastAssistant = [...r.messages].reverse().find((m) => m.role === "assistant");
+    expect(lastAssistant?.tool_calls?.[0]?.id).toBe("c");
+    const lastTool = [...r.messages].reverse().find((m) => m.role === "tool");
+    expect(lastTool?.tool_call_id).toBe("c");
   });
 });

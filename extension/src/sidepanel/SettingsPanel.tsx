@@ -77,6 +77,9 @@ export type SettingsPanelProps = {
   setBudgetMode: (v: AgentBudgetMode) => void;
   contextLimit: number;
   setContextLimit: (v: number) => void;
+  voicePanelMode: "auto" | "show" | "hide";
+  setVoicePanelMode: (v: "auto" | "show" | "hide") => void;
+  voiceMicSupported: boolean;
   enabledTools: Set<string>;
   setEnabledTools: (fn: (prev: Set<string>) => Set<string>) => void;
   activeAgentId: string | null;
@@ -132,6 +135,9 @@ export function SettingsPanel({
   setBudgetMode,
   contextLimit,
   setContextLimit,
+  voicePanelMode,
+  setVoicePanelMode,
+  voiceMicSupported,
   enabledTools,
   setEnabledTools,
   activeAgentId,
@@ -1268,10 +1274,29 @@ export function SettingsPanel({
         <option value="128000">128k chars</option>
       </select>
       <p className="hint wrap">
-        When prior-turn history exceeds this, older turns collapse into a single summary
-        (user goals + tool crumbs) so the run keeps going past the model's window. The open
-        task list is re-injected each turn and survives compression — use create_task for
-        multi-step work so goals are not lost.
+        When history exceeds this (prior turns at start, and mid-run tool rounds), older
+        turns collapse into crumbs so the run keeps going. Open tasks survive compression —
+        use create_task for multi-step work. On OpenRouter, sticky session_id reuses the
+        provider prompt cache for system + tools (cost ↓; meter may still show full in-tokens).
+      </p>
+      <label className="hint">Voice panel</label>
+      <select
+        value={voicePanelMode}
+        onChange={(e) =>
+          setVoicePanelMode(e.target.value as "auto" | "show" | "hide")
+        }
+        data-testid="settings-voice-panel"
+      >
+        <option value="auto">
+          Auto — show only when mic/wake works
+          {voiceMicSupported ? " (this browser: yes)" : " (this browser: no — hidden)"}
+        </option>
+        <option value="show">Always show (Test Speech even without mic)</option>
+        <option value="hide">Hide — reclaim chat space</option>
+      </select>
+      <p className="hint wrap">
+        Voice mode needs Chrome/Edge for wake + mic. Firefox hides the strip in Auto (no wasted
+        space). Hide anytime from the panel; restore here.
       </p>
     </div>
   );

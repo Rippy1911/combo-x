@@ -255,4 +255,90 @@ describe("OpenRouterClient.chat", () => {
     ).rejects.toMatchObject({ name: "LlmError", status: 400 });
     expect(called).toBe(false);
   });
+
+  it("sends session_id + x-session-id for sticky prompt cache on OpenRouter", async () => {
+    let body: Record<string, unknown> = {};
+    let headers: HeadersInit | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      headers = init?.headers;
+      body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+          usage: {
+            prompt_tokens: 8000,
+            completion_tokens: 10,
+            prompt_tokens_details: { cached_tokens: 7500, cache_write_tokens: 0 },
+            cost: 0.001,
+          },
+        }),
+        { status: 200 },
+      );
+    };
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    const result = await client.chat({
+      model: "x-ai/grok-4.5",
+      messages: [{ role: "user", content: "hi" }],
+      sessionId: "sess_abc",
+    });
+    expect(body.session_id).toBe("sess_abc");
+    expect(body.cache_control).toBeUndefined();
+    const h = new Headers(headers);
+    expect(h.get("x-session-id")).toBe("sess_abc");
+    expect(result.usage.cachedTokens).toBe(7500);
+    expect(result.usage.costSource).toBe("openrouter");
+  });
+
+  it("adds cache_control for Anthropic models on OpenRouter", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200 },
+      );
+    };
+    const client = new OpenRouterClient({ apiKey: "sk-test", fetchImpl });
+    await client.chat({
+      model: "anthropic/claude-sonnet-4",
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+      ],
+      sessionId: "run_1",
+    });
+    expect(body.session_id).toBe("run_1");
+    expect(body.cache_control).toEqual({ type: "ephemeral" });
+    const msgs = body.messages as Array<{ role: string; content: unknown }>;
+    expect(Array.isArray(msgs[0]?.content)).toBe(true);
+  });
+
+  it("omits session_id on non-OpenRouter hosts", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200 },
+      );
+    };
+    const client = new OpenRouterClient({
+      apiKey: "sk-test",
+      baseUrl: "https://api.moonshot.ai/v1",
+      fetchImpl,
+    });
+    await client.chat({
+      model: "kimi-k3",
+      messages: [{ role: "user", content: "hi" }],
+      sessionId: "sess_x",
+    });
+    expect(body.session_id).toBeUndefined();
+    expect(body.cache_control).toBeUndefined();
+  });
 });

@@ -64,7 +64,12 @@ import {
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
-import { leanHistory, truncateToolResultForLlm, compressHistory } from "./leanHistory.js";
+import {
+  leanHistory,
+  truncateToolResultForLlm,
+  compressHistory,
+  compactMidLoopMessages,
+} from "./leanHistory.js";
 import type {
   ChatMessage,
   ChatResult,
@@ -411,9 +416,9 @@ TASK TRACKING (mandatory for multi-step work):
 - Set status=doing on the active item; update_task status=done ONLY when verifiably finished — never invent completion.
 - list_tasks at the start of a turn when resuming, and any time you see a "CONTEXT AUTO-COMPRESSED" notice — the open task list is re-injected each turn and survives compression, so it is your source of truth for goals.
 - When context is auto-compressed, do NOT claim prior work is done — verify with tools first, then update tasks.
-Combo voice / Azure Speech:
-- Vault labels azure_speech_key and azure_speech_region belong to the Combo voice pill (Start / Test Speech) — NOT to save_rest_connector or rest_request.
-- Never create Azure Speech STT/TTS REST connectors. Tell the user to use Combo Test Speech (any browser) or Combo Start (Chrome/Edge; mic/wake needs offscreen).
+Voice mode / Azure Speech:
+- Vault labels azure_speech_key and azure_speech_region belong to the Voice panel (Start / Test Speech) — NOT to save_rest_connector or rest_request.
+- Never create Azure Speech STT/TTS REST connectors. Tell the user to use Voice Test Speech (any browser) or Voice Start (Chrome/Edge; mic/wake needs offscreen).
 Rules:
 - Prefer page_digest over full get_page dumps.
 - Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
@@ -451,11 +456,15 @@ function voiceRefusalFor(
 }
 
 function sumUsage(a: LlmUsage, b: LlmUsage): LlmUsage {
+  const cachedTokens = (a.cachedTokens ?? 0) + (b.cachedTokens ?? 0);
+  const cacheWriteTokens = (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0);
   return {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
     totalTokens: a.totalTokens + b.totalTokens,
     estimatedCostUsd: a.estimatedCostUsd + b.estimatedCostUsd,
+    ...(cachedTokens > 0 ? { cachedTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
   };
 }
 
@@ -651,6 +660,8 @@ export class AgentLoop {
       resolvedProfile?.workerModel ??
       DEFAULT_WORKER_MODEL;
     const orchestratorModel = resolvedProfile?.orchestratorModel ?? options.model;
+    /** Sticky prompt-cache key for OpenRouter (session preferred; else this run). */
+    const cacheSessionId = options.sessionId ?? runId;
     const emit = options.onEvent ?? (() => undefined);
 
     const logUsage = async (input: Omit<UsageEvent, "id" | "at">) => {
@@ -868,6 +879,30 @@ export class AgentLoop {
       activeToolNames = runCtx.activeToolNames;
       rebuildTools();
 
+      // Mid-run compact: fold older tool rounds so prompt tokens don't grow O(n²).
+      // Uses contextLimit when set; otherwise 2× lean history cap.
+      if (step > 0) {
+        const midCap =
+          options.contextLimit && options.contextLimit > 0
+            ? options.contextLimit
+            : leanHistoryMaxChars(budgetMode) * 2;
+        const mid = compactMidLoopMessages(messages, {
+          maxChars: midCap,
+          keepRecentRounds: budgetMode === "budget" ? 1 : 2,
+        });
+        if (mid.compacted) {
+          messages.length = 0;
+          messages.push(...mid.messages);
+          emit({
+            type: "context_compressed",
+            message: `Mid-run compact: dropped ${mid.droppedRounds} older tool round(s) (${mid.beforeChars} → ${mid.afterChars} chars). Review list_tasks if goals were long-running.`,
+            compressedTurns: mid.droppedRounds,
+            beforeChars: mid.beforeChars,
+            afterChars: mid.afterChars,
+          });
+        }
+      }
+
       emit({
         type: "status",
         message: `Calling model… (turn ${step + 1})`,
@@ -887,6 +922,7 @@ export class AgentLoop {
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
+            sessionId: cacheSessionId,
             signal: options.signal,
             onDelta: (accumulated) => {
               emit({ type: "assistant_delta", message: accumulated });
@@ -904,6 +940,7 @@ export class AgentLoop {
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.2,
+            sessionId: cacheSessionId,
           });
           if (result.reasoning?.trim()) {
             emit({ type: "reasoning_delta", message: result.reasoning });
@@ -998,6 +1035,7 @@ export class AgentLoop {
             });
           },
           options.approvalPolicies,
+          cacheSessionId,
         );
         const decision = approvalDecisionFor(modeNow, allowed, sensitive);
         if (!allowed) {
@@ -1100,6 +1138,7 @@ export class AgentLoop {
     signal: AbortSignal | undefined,
     onUsage: (u: LlmUsage) => void,
     approvalPolicies?: ApprovalPolicyStore,
+    sessionId?: string,
   ): Promise<boolean> {
     if (!SENSITIVE_TOOLS.has(call.function.name)) return true;
     // Page-extension lifecycle that installs MAIN-world JS must never auto-approve.
@@ -1138,6 +1177,7 @@ export class AgentLoop {
           ],
           maxTokens: 4,
           temperature: 0,
+          sessionId,
         });
         onUsage(verdict.usage);
         emit({ type: "usage", usage: verdict.usage, usageSource: "approval" });
@@ -1391,6 +1431,7 @@ export class AgentLoop {
       ],
       temperature: 0.2,
       maxTokens: 1200,
+      sessionId: runCtx.sessionId ?? runCtx.runId,
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "vision_worker" });
@@ -1995,7 +2036,14 @@ export class AgentLoop {
       } else if (name === "close_tab") {
         result = await this.browser.closeTab(Number(args.tabId));
       } else if (name === "parse_data") {
-        result = await this.parseData(args, workerModel, emit, workerOnUsage, attachments);
+        result = await this.parseData(
+          args,
+          workerModel,
+          emit,
+          workerOnUsage,
+          attachments,
+          runCtx?.sessionId ?? runCtx?.runId,
+        );
       } else if (name === "rag_status") {
         if (!rag) result = { ok: false, error: "rag store unavailable" };
         else {
@@ -2538,7 +2586,13 @@ export class AgentLoop {
       } else if (name === "login") {
         result = await this.loginWithProfile(args, emit, runCtx);
       } else if (name === "scrape_catalog") {
-        result = await this.scrapeCatalog(args, workerModel, emit, workerOnUsage);
+        result = await this.scrapeCatalog(
+          args,
+          workerModel,
+          emit,
+          workerOnUsage,
+          runCtx?.sessionId ?? runCtx?.runId,
+        );
       } else if (name === "ensure_scrape_table") {
         if (!views) result = { ok: false, error: "view store unavailable" };
         else {
@@ -3391,6 +3445,7 @@ export class AgentLoop {
     emit: (e: AgentEvent) => void,
     onUsage: (u: LlmUsage) => void,
     attachments?: AttachmentStore,
+    sessionId?: string,
   ): Promise<unknown> {
     const intent = String(args.intent ?? "");
     const schemaHint = args.schema_hint != null ? String(args.schema_hint) : "";
@@ -3492,6 +3547,7 @@ export class AgentLoop {
       ],
       temperature: 0.1,
       maxTokens,
+      sessionId,
     });
     onUsage(result.usage);
     emit({ type: "usage", usage: result.usage, usageSource: "worker" });
@@ -3610,6 +3666,7 @@ export class AgentLoop {
     workerModel: string,
     emit: (e: AgentEvent) => void,
     onUsage: (u: LlmUsage) => void,
+    sessionId?: string,
   ): Promise<unknown> {
     const profileName = strOpt(args.profile);
     let profile: SiteProfile | null = null;
@@ -3644,7 +3701,14 @@ export class AgentLoop {
       }
       emit({ type: "status", message: `Scrape page ${page + 1}: ${values.length} items` });
       const text = values.join("\n---\n").slice(0, 14_000);
-      const parsed = await this.parseData({ intent, schema_hint: schemaHint, text }, workerModel, emit, onUsage);
+      const parsed = await this.parseData(
+        { intent, schema_hint: schemaHint, text },
+        workerModel,
+        emit,
+        onUsage,
+        undefined,
+        sessionId,
+      );
       const data = (parsed as { data?: { rows?: unknown[]; notes?: string } } | undefined)?.data;
       const rows = Array.isArray(data?.rows) ? data!.rows! : [];
       for (const row of rows) {

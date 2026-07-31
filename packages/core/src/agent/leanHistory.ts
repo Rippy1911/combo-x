@@ -312,3 +312,106 @@ Resume instructions: re-read open tasks via list_tasks before continuing. Do not
 
   return { role: "user", content };
 }
+
+export type CompactMidLoopResult = {
+  messages: ChatMessage[];
+  compacted: boolean;
+  beforeChars: number;
+  afterChars: number;
+  droppedRounds: number;
+};
+
+/**
+ * Mid-run prompt compact: fold older tool rounds into lean crumbs while keeping
+ * the newest `keepRecentRounds` rounds in OpenAI tool-call shape (assistant +
+ * tool rows) so the next model call stays valid.
+ *
+ * Call before each orchestrator step after the first. Stops quadratic token growth
+ * within a single AgentLoop.run() without waiting for the next user turn.
+ */
+export function compactMidLoopMessages(
+  messages: ChatMessage[],
+  opts: { maxChars: number; keepRecentRounds?: number },
+): CompactMidLoopResult {
+  const maxChars = opts.maxChars;
+  const keepRecentRounds = Math.max(1, opts.keepRecentRounds ?? 2);
+  const beforeChars = historyChars(messages);
+  if (!maxChars || maxChars <= 0 || beforeChars <= maxChars) {
+    return {
+      messages,
+      compacted: false,
+      beforeChars,
+      afterChars: beforeChars,
+      droppedRounds: 0,
+    };
+  }
+
+  let i = 0;
+  const system: ChatMessage[] = [];
+  while (i < messages.length && messages[i]!.role === "system") {
+    system.push(messages[i]!);
+    i += 1;
+  }
+  const rest = messages.slice(i);
+  const systemChars = historyChars(system);
+
+  const roundStarts: number[] = [];
+  for (let j = 0; j < rest.length; j++) {
+    const m = rest[j]!;
+    if (m.role === "assistant" && m.tool_calls?.length) roundStarts.push(j);
+  }
+
+  let keepFrom = 0;
+  let droppedRounds = 0;
+  if (roundStarts.length > keepRecentRounds) {
+    droppedRounds = roundStarts.length - keepRecentRounds;
+    keepFrom = roundStarts[roundStarts.length - keepRecentRounds]!;
+  } else if (roundStarts.length > 0) {
+    // Over budget but few rounds — still lean-fold everything before the first tool round.
+    keepFrom = roundStarts[0]!;
+  } else {
+    // No tool rounds yet — compress the whole rest as history.
+    const lean = leanHistory(rest, maxChars);
+    const budget = Math.max(512, maxChars - systemChars);
+    const compressed = compressHistory(lean, budget);
+    const out = [...system, ...compressed.history];
+    return {
+      messages: out,
+      compacted: compressed.compressed || lean.length < rest.length,
+      beforeChars,
+      afterChars: historyChars(out),
+      droppedRounds: 0,
+    };
+  }
+
+  const older = rest.slice(0, keepFrom);
+  const recent = rest.slice(keepFrom);
+  const recentChars = historyChars(recent);
+  const olderBudget = Math.max(512, Math.floor(maxChars * 0.45) - systemChars);
+  // Prefer leaving room for recent rounds; if recent alone blows the cap, still
+  // shrink older as much as possible.
+  const olderCap = Math.max(
+    512,
+    Math.min(olderBudget, Math.max(512, maxChars - systemChars - recentChars)),
+  );
+
+  let olderLean = leanHistory(older, olderCap);
+  const compressed = compressHistory(olderLean, olderCap);
+  olderLean = compressed.history;
+
+  const out = [...system, ...olderLean, ...recent];
+  const afterChars = historyChars(out);
+  const compacted =
+    droppedRounds > 0 ||
+    compressed.compressed ||
+    olderLean.length < older.length ||
+    afterChars < beforeChars;
+
+  return {
+    messages: out,
+    compacted,
+    beforeChars,
+    afterChars,
+    droppedRounds,
+  };
+}

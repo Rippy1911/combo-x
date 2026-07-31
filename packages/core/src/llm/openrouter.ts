@@ -5,11 +5,25 @@
 
 import { modelOmitsTemperature } from "../models.js";
 import { modalitySupportsVision } from "../vision/capability.js";
+import {
+  applyCacheBreakpoints,
+  clampSessionId,
+  needsTopLevelCacheControl,
+} from "./promptCache.js";
 
 /** OpenAI/OpenRouter multimodal content parts (text + image_url). */
 export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+  | {
+      type: "text";
+      text: string;
+      /** Anthropic/OpenRouter prompt-cache breakpoint (ignored by most other hosts). */
+      cache_control?: { type: "ephemeral"; ttl?: "1h" | "5m" };
+    }
+  | {
+      type: "image_url";
+      image_url: { url: string; detail?: "auto" | "low" | "high" };
+      cache_control?: { type: "ephemeral"; ttl?: "1h" | "5m" };
+    };
 
 export type ChatContent = string | ContentPart[] | null;
 
@@ -63,6 +77,10 @@ export interface LlmUsage {
   estimatedCostUsd: number;
   /** Where estimatedCostUsd came from. */
   costSource?: "openrouter" | "estimate";
+  /** Tokens read from provider prompt cache (subset of promptTokens). */
+  cachedTokens?: number;
+  /** Tokens written into the provider prompt cache this call. */
+  cacheWriteTokens?: number;
 }
 
 export interface OpenRouterModelInfo {
@@ -83,6 +101,11 @@ type RawUsage = {
   total_tokens?: number;
   /** OpenRouter native generation cost in USD. */
   cost?: number;
+  cached_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
 };
 
 export interface ChatResult {
@@ -207,6 +230,17 @@ export class OpenRouterClient {
     const promptTokens = usage.prompt_tokens ?? 0;
     const completionTokens = usage.completion_tokens ?? 0;
     const totalTokens = usage.total_tokens ?? promptTokens + completionTokens;
+    const cachedTokens =
+      usage.prompt_tokens_details?.cached_tokens ?? usage.cached_tokens;
+    const cacheWriteTokens = usage.prompt_tokens_details?.cache_write_tokens;
+    const cacheFields = {
+      ...(typeof cachedTokens === "number" && cachedTokens > 0
+        ? { cachedTokens }
+        : {}),
+      ...(typeof cacheWriteTokens === "number" && cacheWriteTokens > 0
+        ? { cacheWriteTokens }
+        : {}),
+    };
     if (typeof usage.cost === "number" && Number.isFinite(usage.cost)) {
       return {
         promptTokens,
@@ -214,6 +248,7 @@ export class OpenRouterClient {
         totalTokens,
         estimatedCostUsd: usage.cost,
         costSource: "openrouter",
+        ...cacheFields,
       };
     }
     const estimatedCostUsd =
@@ -225,7 +260,54 @@ export class OpenRouterClient {
       totalTokens,
       estimatedCostUsd,
       costSource: "estimate",
+      ...cacheFields,
     };
+  }
+
+  /**
+   * Build chat/completions body with OpenRouter prompt-cache sticky routing.
+   * Non-OpenRouter hosts get a plain OpenAI-compat body (no session_id / cache_control).
+   */
+  private buildChatBody(input: {
+    model: string;
+    messages: ChatMessage[];
+    tools?: ChatTool[];
+    temperature?: number;
+    maxTokens?: number;
+    stream: boolean;
+    sessionId?: string;
+  }): Record<string, unknown> {
+    const openRouter = this.isOpenRouter();
+    const messages = openRouter
+      ? applyCacheBreakpoints(input.messages, input.model)
+      : input.messages;
+    const body: Record<string, unknown> = {
+      model: input.model,
+      messages,
+      stream: input.stream,
+    };
+    const tools = this.mergeTools(input.tools);
+    if (tools?.length) body.tools = tools;
+    if (input.temperature !== undefined && !modelOmitsTemperature(input.model)) {
+      body.temperature = input.temperature;
+    }
+    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+    if (openRouter) {
+      if (input.stream) body.stream_options = { include_usage: true };
+      const sid = clampSessionId(input.sessionId);
+      if (sid) body.session_id = sid;
+      if (needsTopLevelCacheControl(input.model)) {
+        body.cache_control = { type: "ephemeral" };
+      }
+    }
+    return body;
+  }
+
+  private requestHeaders(sessionId?: string): Record<string, string> {
+    const h = this.headers();
+    const sid = clampSessionId(sessionId);
+    if (sid && this.isOpenRouter()) h["x-session-id"] = sid;
+    return h;
   }
 
   /** List models from OpenRouter (for searchable picker). */
@@ -275,6 +357,8 @@ export class OpenRouterClient {
     tools?: ChatTool[];
     temperature?: number;
     maxTokens?: number;
+    /** Sticky routing / cache key — preferred = combo sessionId or runId. */
+    sessionId?: string;
   }): Promise<ChatResult> {
     const model = input.model?.trim();
     if (!model) {
@@ -283,22 +367,19 @@ export class OpenRouterClient {
         400,
       );
     }
-    const body: Record<string, unknown> = {
+    const body = this.buildChatBody({
       model,
       messages: input.messages,
+      tools: input.tools,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
       stream: false,
-    };
-    const tools = this.mergeTools(input.tools);
-    if (tools?.length) body.tools = tools;
-    // Kimi K2/K3 reject explicit temperature (fixed server-side).
-    if (input.temperature !== undefined && !modelOmitsTemperature(model)) {
-      body.temperature = input.temperature;
-    }
-    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+      sessionId: input.sessionId,
+    });
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: this.headers(),
+      headers: this.requestHeaders(input.sessionId),
       body: JSON.stringify(body),
     });
 
@@ -353,6 +434,8 @@ export class OpenRouterClient {
     tools?: ChatTool[];
     temperature?: number;
     maxTokens?: number;
+    /** Sticky routing / cache key — preferred = combo sessionId or runId. */
+    sessionId?: string;
     signal?: AbortSignal;
     onDelta?: (accumulated: string) => void;
     onReasoning?: (accumulated: string) => void;
@@ -366,25 +449,19 @@ export class OpenRouterClient {
         400,
       );
     }
-    const body: Record<string, unknown> = {
+    const body = this.buildChatBody({
       model,
       messages: input.messages,
+      tools: input.tools,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
       stream: true,
-    };
-    // OpenRouter usage-in-stream only — other compat APIs often 400 on unknown fields.
-    if (this.isOpenRouter()) {
-      body.stream_options = { include_usage: true };
-    }
-    const tools = this.mergeTools(input.tools);
-    if (tools?.length) body.tools = tools;
-    if (input.temperature !== undefined && !modelOmitsTemperature(model)) {
-      body.temperature = input.temperature;
-    }
-    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+      sessionId: input.sessionId,
+    });
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: this.headers(),
+      headers: this.requestHeaders(input.sessionId),
       body: JSON.stringify(body),
       signal: input.signal,
     });
@@ -503,27 +580,21 @@ export class OpenRouterClient {
     messages: ChatMessage[];
     temperature?: number;
     maxTokens?: number;
+    sessionId?: string;
     signal?: AbortSignal;
   }): AsyncGenerator<string, LlmUsage, void> {
-    const body: Record<string, unknown> = {
+    const body = this.buildChatBody({
       model: input.model,
       messages: input.messages,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
       stream: true,
-    };
-    if (this.isOpenRouter()) {
-      body.stream_options = { include_usage: true };
-    }
-    if (
-      input.temperature !== undefined &&
-      !modelOmitsTemperature(input.model)
-    ) {
-      body.temperature = input.temperature;
-    }
-    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+      sessionId: input.sessionId,
+    });
 
     const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: this.headers(),
+      headers: this.requestHeaders(input.sessionId),
       body: JSON.stringify(body),
       signal: input.signal,
     });
