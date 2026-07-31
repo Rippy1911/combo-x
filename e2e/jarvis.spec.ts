@@ -127,7 +127,7 @@ test("side panel renders the Combo voice pill, off and unmuted by default", asyn
     }
     await expect(pill).toBeVisible({ timeout: 20_000 });
     // Nothing listens until the operator presses Start — no hot mic on panel open.
-    await expect(pill).toContainText("Combo");
+    await expect(pill).toContainText("Voice");
     await expect(pill).toContainText("off");
     await expect(pill.getByRole("button", { name: "Start" })).toBeVisible();
     await expect(pill.getByRole("button", { name: "Mute" })).toBeVisible();
