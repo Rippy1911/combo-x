@@ -2638,6 +2638,13 @@ export function App() {
     void comboVoice.refreshKeyStatus();
   }, [locked, vault, comboVoice.refreshKeyStatus]);
 
+  // Hiding the strip must not leave mic/wake running with no Stop control.
+  useEffect(() => {
+    if (!showVoicePanel && comboVoice.enabled) {
+      void comboVoice.toggleEnabled();
+    }
+  }, [showVoicePanel, comboVoice.enabled, comboVoice.toggleEnabled]);
+
   const comboLink = useComboLink(!locked && vault.isUnlocked(), sessions, {
     onLinkSend: async ({ sessionId, text, createNew }) => {
       try {
@@ -2925,7 +2932,10 @@ export function App() {
                 <ComboVoicePanel
                   comboVoice={comboVoice}
                   micSupported={voiceMicSupported}
-                  onHide={() => setVoicePanelMode("hide")}
+                  onHide={() => {
+                    if (comboVoice.enabled) void comboVoice.toggleEnabled();
+                    setVoicePanelMode("hide");
+                  }}
                 />
               ) : null}
               <div className="conv-bar">
