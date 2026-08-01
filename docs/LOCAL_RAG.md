@@ -17,6 +17,8 @@ Chrome cannot open `~/projects/foo` from a path string. Combo-X uses the **File 
 | `rag_search` | Fuzzy keyword / conceptual questions only |
 | `rag_status` | Confirm grant, file/chunk counts, lastError |
 
+Line numbers are real file lines: each chunk records its `startLine` at index time, and `rag_read_file` reads live from disk when read permission is already granted (`source:"live"`), falling back to the index snapshot (`source:"index"`) with a note when it is not. Indexes built before 1.8.1 lack `startLine` — grep flags those hits `lineIsEstimate:true`; reindex once to fix.
+
 `rag_search` returning empty hits is a retrieval failure (hash-vector scoring floors out on natural language about code) — switch to `rag_grep`. Do not conclude the code is missing.
 
 Workspace setup page only toggles tool flags — folder grant stays in Settings.

@@ -130,6 +130,7 @@ import { isMacToolName, runMacTool, type ComboNativePort } from "../mac/bridge.j
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
 import { globToRegExp, grepChunks } from "../rag/store.js";
+import { readLiveFile } from "../rag/folder.js";
 import {
   formatSessionExport,
   type SessionExportFormat,
@@ -2270,13 +2271,36 @@ export class AgentLoop {
         else {
           const path = String(args.path ?? "");
           const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
-          const file = await rag.readPath(path, maxChars);
-          if (!file) {
-            result = { ok: false, error: `path not in index: ${path}. List candidates with rag_glob({pattern:"**/*${path.split("/").pop() ?? ""}"})` };
+          const startLine = typeof args.startLine === "number" ? Math.max(1, Math.floor(args.startLine)) : undefined;
+          const endLine = typeof args.endLine === "number" ? Math.floor(args.endLine) : undefined;
+          // Prefer live disk text: the index is a chunk-joined snapshot, so
+          // line ranges are only exact against the real file.
+          const live = await readLiveFile(rag, path);
+          if (live != null) {
+            const lines = live.split("\n");
+            const from = (startLine ?? 1) - 1;
+            const to = endLine != null ? Math.min(endLine, lines.length) : lines.length;
+            let content = lines.slice(from, to).join("\n");
+            let truncated = to < lines.length;
+            if (content.length > maxChars) {
+              content = content.slice(0, maxChars);
+              truncated = true;
+            }
+            result = {
+              ok: true,
+              path,
+              source: "live",
+              startLine: from + 1,
+              endLine: to,
+              totalLines: lines.length,
+              content,
+              truncated,
+            };
           } else {
-            const startLine = typeof args.startLine === "number" ? Math.max(1, Math.floor(args.startLine)) : undefined;
-            const endLine = typeof args.endLine === "number" ? Math.floor(args.endLine) : undefined;
-            if (startLine != null || endLine != null) {
+            const file = await rag.readPath(path, maxChars);
+            if (!file) {
+              result = { ok: false, error: `path not in index: ${path}. List candidates with rag_glob({pattern:"**/*${path.split("/").pop() ?? ""}"})` };
+            } else if (startLine != null || endLine != null) {
               const lines = file.content.split("\n");
               const from = (startLine ?? 1) - 1;
               const to = endLine != null ? endLine : lines.length;
@@ -2284,14 +2308,16 @@ export class AgentLoop {
               result = {
                 ok: true,
                 path: file.path,
+                source: "index",
                 startLine: from + 1,
                 endLine: Math.min(to, lines.length),
                 totalLines: lines.length,
                 content: slice.join("\n"),
                 truncated: file.truncated || to < lines.length,
+                note: "Read from the index snapshot (folder not readable right now). Line numbers follow the snapshot, not the live file — reindex or grant read permission for exact lines.",
               };
             } else {
-              result = { ok: true, ...file };
+              result = { ok: true, source: "index", ...file };
             }
           }
         }

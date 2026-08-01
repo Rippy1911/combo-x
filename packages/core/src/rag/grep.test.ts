@@ -4,9 +4,9 @@
  * language; these cover the exact-match path an agent actually needs for code.
  */
 import { describe, expect, it } from "vitest";
-import { globToRegExp, grepChunks, type RagChunkRow } from "./store.js";
+import { chunkStartLines, globToRegExp, grepChunks, type RagChunkRow } from "./store.js";
 
-function chunk(path: string, chunkIndex: number, content: string): RagChunkRow {
+function chunk(path: string, chunkIndex: number, content: string, startLine?: number): RagChunkRow {
   return {
     id: `${path}#${chunkIndex}`,
     path,
@@ -15,6 +15,7 @@ function chunk(path: string, chunkIndex: number, content: string): RagChunkRow {
     embedding: [],
     bytes: content.length,
     indexedAt: "2026-08-01T00:00:00.000Z",
+    ...(startLine != null ? { startLine } : {}),
   };
 }
 
@@ -118,11 +119,59 @@ describe("grepChunks", () => {
   });
 
   it("does not double-report a line that appears in two overlapping chunks", () => {
+    // Same source line 2 seen at the end of chunk 0 and the start of chunk 1.
     const overlapping: RagChunkRow[] = [
-      chunk("a.ts", 0, "line one\ntarget line\nline three"),
-      chunk("a.ts", 1, "target line\nline three\nline four"),
+      chunk("a.ts", 0, "line one\ntarget line\nline three", 1),
+      chunk("a.ts", 1, "target line\nline three\nline four", 2),
     ];
     const out = grepChunks(overlapping, { pattern: "target line" });
     expect(out.matches).toHaveLength(1);
+    expect(out.matches[0]!.line).toBe(2);
+  });
+
+  it("still reports identical text on DIFFERENT real lines", () => {
+    const repeated: RagChunkRow[] = [
+      chunk("b.ts", 0, "if (x) {\n  return;\n}\nif (y) {\n  return;\n}", 1),
+    ];
+    const out = grepChunks(repeated, { pattern: "return;", context: 0 });
+    expect(out.matches.map((m) => m.line)).toEqual([2, 5]);
+  });
+
+  it("reports real file lines via startLine, not chunk-relative ones", () => {
+    const multi: RagChunkRow[] = [
+      chunk("c.ts", 0, "alpha\nbeta", 1),
+      chunk("c.ts", 1, "gamma\ntarget here", 50),
+    ];
+    const out = grepChunks(multi, { pattern: "target here" });
+    expect(out.matches[0]!.line).toBe(51);
+    expect(out.matches[0]!.lineIsEstimate).toBeUndefined();
+  });
+
+  it("flags chunk-relative line numbers on pre-startLine indexes", () => {
+    const legacy: RagChunkRow[] = [chunk("old.ts", 3, "needle line")];
+    const out = grepChunks(legacy, { pattern: "needle" });
+    expect(out.matches[0]!.lineIsEstimate).toBe(true);
+  });
+});
+
+describe("chunkStartLines", () => {
+  it("locates each chunk's 1-based start line in the source", () => {
+    const source = "l1\nl2\nl3\nl4\nl5\nl6";
+    const parts = ["l1\nl2\nl3", "l3\nl4\nl5", "l5\nl6"];
+    expect(chunkStartLines(source, parts)).toEqual([1, 3, 5]);
+  });
+
+  it("accounts for leading blank lines stripped by the chunker", () => {
+    const source = "\n\nconst a = 1;\nconst b = 2;";
+    expect(chunkStartLines(source, ["const a = 1;\nconst b = 2;"])).toEqual([3]);
+  });
+
+  it("normalizes CRLF like the chunker does", () => {
+    const source = "l1\r\nl2\r\nl3";
+    expect(chunkStartLines(source, ["l1\nl2", "l2\nl3"])).toEqual([1, 2]);
+  });
+
+  it("returns undefined for a chunk it cannot locate", () => {
+    expect(chunkStartLines("a\nb", ["not in file"])).toEqual([undefined]);
   });
 });

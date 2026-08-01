@@ -9,6 +9,8 @@ export interface RagChunkRow {
   embedding: number[];
   bytes: number;
   indexedAt: string;
+  /** 1-based line in the source file where this chunk starts (absent in pre-1.8.1 indexes). */
+  startLine?: number;
 }
 
 export interface RagFolderRef {
@@ -185,6 +187,7 @@ export class RagStore {
     const store = tx.objectStore("chunks");
     for (const file of files) {
       const parts = chunkText(file.text);
+      const startLines = chunkStartLines(file.text, parts);
       for (let i = 0; i < parts.length; i++) {
         const content = parts[i]!;
         const row: RagChunkRow = {
@@ -195,6 +198,7 @@ export class RagStore {
           embedding: mockVector(content),
           bytes: content.length,
           indexedAt: now,
+          ...(startLines[i] != null ? { startLine: startLines[i] } : {}),
         };
         store.put(row);
         chunkCount += 1;
@@ -256,6 +260,35 @@ export class RagStore {
 }
 
 /**
+ * Locate each chunk's 1-based start line in the source text. Chunks are
+ * sequential substrings of the trimmed, CRLF-normalized text (overlap means a
+ * chunk re-starts inside the previous one), so a forward-only indexOf finds
+ * each start. Returns undefined for a chunk that cannot be located — grep then
+ * falls back to a chunk-relative estimate rather than a wrong file line.
+ */
+export function chunkStartLines(sourceText: string, parts: string[]): (number | undefined)[] {
+  const normalized = sourceText.replace(/\r\n/g, "\n");
+  const leadingWs = /^\s*/.exec(normalized)?.[0] ?? "";
+  const haystack = normalized.slice(leadingWs.length);
+  let line = 1;
+  for (let i = 0; i < leadingWs.length; i++) if (leadingWs[i] === "\n") line++;
+  const out: (number | undefined)[] = [];
+  let searchFrom = 0;
+  for (const part of parts) {
+    let at = haystack.indexOf(part, searchFrom);
+    if (at < 0 && part.length > 60) at = haystack.indexOf(part.slice(0, 60), searchFrom);
+    if (at < 0) {
+      out.push(undefined);
+      continue;
+    }
+    for (let i = searchFrom; i < at; i++) if (haystack[i] === "\n") line++;
+    out.push(line);
+    searchFrom = at;
+  }
+  return out;
+}
+
+/**
  * Convert a glob to a RegExp. Supports `**` (any depth), `*` (within a segment),
  * `?`, and `{a,b}` alternation. Anchored to the full path.
  */
@@ -310,6 +343,8 @@ export interface GrepMatch {
   text: string;
   before: string[];
   after: string[];
+  /** True when the index predates startLine tracking and `line` is chunk-relative. */
+  lineIsEstimate?: boolean;
 }
 
 /**
@@ -343,8 +378,11 @@ export function grepChunks(
     return { matches: [], scannedFiles: 0, truncated: false };
   }
 
-  // Chunks overlap, so a line can appear in two of them. Track the first-seen
-  // path:line so a match is not reported twice.
+  // Chunks overlap, so a source line can appear in two of them. Dedupe on the
+  // real file line (startLine recorded at index time): identical text on
+  // DIFFERENT lines is still reported, while an overlap duplicate — same line,
+  // seen via two chunks — is not. Pre-1.8.1 indexes lack startLine; then the
+  // line is chunk-relative and lineIsEstimate flags it.
   const seen = new Set<string>();
   const matches: GrepMatch[] = [];
   let scannedFiles = 0;
@@ -368,20 +406,19 @@ export function grepChunks(
         matcher.lastIndex = 0;
         const m = matcher.exec(lineText);
         if (!m) continue;
-        // Line numbers are approximate: chunking is character-based, so we only
-        // know the offset within the chunk. Dedupe on the matched text itself,
-        // since the same source line appears at a different offset in the next
-        // overlapping chunk.
-        const key = `${path}:${lineText.trim()}`;
+        const lineIsEstimate = row.startLine == null;
+        const line = lineIsEstimate ? li + 1 : row.startLine! + li;
+        const key = `${path}:${line}`;
         if (seen.has(key)) continue;
         seen.add(key);
         matches.push({
           path,
-          line: li + 1,
+          line,
           column: m.index + 1,
           text: lineText.trim().slice(0, 240),
           before: context > 0 ? lines.slice(Math.max(0, li - context), li).map((l) => l.trimEnd()) : [],
           after: context > 0 ? lines.slice(li + 1, li + 1 + context).map((l) => l.trimEnd()) : [],
+          ...(lineIsEstimate ? { lineIsEstimate: true } : {}),
         });
         if (matches.length >= maxMatches) {
           truncated = true;

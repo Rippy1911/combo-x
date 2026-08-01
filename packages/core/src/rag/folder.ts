@@ -296,3 +296,51 @@ export async function reindexSaved(
 ): Promise<RagMeta> {
   return reindexAll(store, onProgress);
 }
+
+/**
+ * Read a file straight from the granted folder(s), bypassing the index — the
+ * index is a snapshot with chunk-relative line math, so line-ranged reads are
+ * only exact against live text. Returns null (caller falls back to the index)
+ * when the path is not under a grant or read permission is not already
+ * granted — we never requestPermission here because there is no user gesture.
+ */
+export async function readLiveFile(store: RagStore, path: string): Promise<string | null> {
+  try {
+    const handles = await store.listHandles();
+    if (!handles.length) return null;
+    let dir: FileSystemDirectoryHandle;
+    let rel = path;
+    if (handles.length === 1) {
+      dir = handles[0]!.handle;
+    } else {
+      // Mirror reindexAll's prefixing: folderName, deduped with `__<id6>`.
+      const used = new Set<string>();
+      const byPrefix = new Map<string, FileSystemDirectoryHandle>();
+      for (const h of handles) {
+        let name = h.folderName || h.id;
+        if (used.has(name)) name = `${name}__${h.id.slice(0, 6)}`;
+        used.add(name);
+        byPrefix.set(name, h.handle);
+      }
+      const segs = path.split("/");
+      const root = byPrefix.get(segs[0] ?? "");
+      if (!root) return null;
+      dir = root;
+      rel = segs.slice(1).join("/");
+    }
+    // @ts-expect-error — FileSystemHandle permission API
+    const perm = await dir.queryPermission?.({ mode: "read" });
+    if (perm !== "granted") return null;
+    const segs = rel.split("/").filter(Boolean);
+    if (!segs.length) return null;
+    for (let i = 0; i < segs.length - 1; i++) {
+      dir = await dir.getDirectoryHandle(segs[i]!);
+    }
+    const fh = await dir.getFileHandle(segs[segs.length - 1]!);
+    const file = await fh.getFile();
+    if (file.size > MAX_FILE_BYTES) return null;
+    return await file.text();
+  } catch {
+    return null;
+  }
+}

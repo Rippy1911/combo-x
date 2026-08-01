@@ -526,7 +526,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "rag_read_file",
       description:
-        "Read a file from the local RAG index (relative path from grant root). Prefer startLine/endLine from a rag_grep hit over re-reading the whole file.",
+        "Read a file from the granted Device RAG folder (relative path from grant root). Reads live from disk when permission allows (source:\"live\"), so startLine/endLine from a rag_grep hit are exact; falls back to the index snapshot otherwise. Prefer a line range over re-reading the whole file.",
       parameters: {
         type: "object",
         properties: {
