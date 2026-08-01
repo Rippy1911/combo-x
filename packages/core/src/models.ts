@@ -36,6 +36,20 @@ export const MODEL_PRESETS: ModelPreset[] = [
     vision: true,
     providers: ["openrouter"],
   },
+  // DeepSeek — automatic prefix caching makes long tool loops very cheap
+  // (cache reads bill ~10× less), so these suit multi-step browser runs.
+  {
+    id: "deepseek/deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash",
+    hint: "cheap · prompt cache",
+    providers: ["openrouter"],
+  },
+  {
+    id: "deepseek/deepseek-v4-0731",
+    label: "DeepSeek V4",
+    hint: "prompt cache",
+    providers: ["openrouter"],
+  },
   { id: "gpt-4.1", label: "GPT-4.1", vision: true, providers: ["openai"] },
   { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", hint: "cheap", vision: true, providers: ["openai"] },
   // Moonshot / Kimi

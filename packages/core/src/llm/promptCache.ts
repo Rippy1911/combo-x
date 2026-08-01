@@ -14,6 +14,29 @@
 
 import type { ChatContent, ChatMessage, ContentPart } from "./openrouter.js";
 
+/**
+ * Providers that cache automatically on an exact token-prefix match (DeepSeek,
+ * Moonshot, OpenAI, Gemini, Grok). No breakpoints needed — but they only pay
+ * off if the prompt is *append-only*: any edit near the front invalidates every
+ * cached token after it. Callers should therefore order the system prompt
+ * stable-first and compact rarely (see `COMPACT_TRIGGER_RATIO`).
+ */
+export function supportsAutomaticPrefixCache(model: string): boolean {
+  const m = model.trim().toLowerCase();
+  if (!m) return false;
+  if (needsExplicitCacheControl(m)) return false;
+  return (
+    m.includes("deepseek") ||
+    m.includes("moonshot") ||
+    m.includes("kimi") ||
+    m.includes("openai/") ||
+    m.includes("gpt-") ||
+    m.includes("gemini") ||
+    m.includes("grok") ||
+    m.includes("x-ai/")
+  );
+}
+
 /** Models that require explicit cache_control breakpoints (via OpenRouter). */
 export function needsExplicitCacheControl(model: string): boolean {
   const m = model.trim().toLowerCase();

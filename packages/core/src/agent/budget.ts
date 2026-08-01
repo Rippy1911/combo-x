@@ -14,14 +14,56 @@ export const BUDGET_MID_LOOP_TOOL_CHARS = 2_000;
 export const NORMAL_MID_LOOP_TOOL_CHARS = 4_000;
 
 /**
+ * Compaction hysteresis.
+ *
+ * Prompt caching (DeepSeek/Moonshot/OpenAI/Gemini automatic prefix cache) only
+ * pays off while the prompt grows append-only: rewriting the middle invalidates
+ * every cached token after the edit. Compacting on every step therefore *costs*
+ * money — you pay full price for the whole prompt each turn instead of ~10% for
+ * a cache read. So: tolerate a modest overflow, then cut deep once and coast.
+ */
+/** Only compact once the prompt is this much over the cap. */
+export const COMPACT_TRIGGER_RATIO = 1.25;
+/** Compact down to this fraction of the cap so the next steps stay under it. */
+export const COMPACT_TARGET_RATIO = 0.5;
+/** Steps to wait before compacting again (overridden by the hard ceiling). */
+export const COMPACT_COOLDOWN_STEPS = 3;
+/** Ignore the cooldown above this multiple of the cap — correctness beats cache. */
+export const COMPACT_HARD_CEILING_RATIO = 2;
+
+/**
+ * Should this step rewrite the prompt? Keeps the cache-vs-context tradeoff in
+ * one testable place.
+ */
+export function shouldCompactNow(input: {
+  chars: number;
+  cap: number;
+  step: number;
+  lastCompactStep: number | null;
+}): boolean {
+  const { chars, cap, step, lastCompactStep } = input;
+  if (!cap || cap <= 0) return false;
+  if (chars > cap * COMPACT_HARD_CEILING_RATIO) return true;
+  if (chars <= cap * COMPACT_TRIGGER_RATIO) return false;
+  if (lastCompactStep == null) return true;
+  return step - lastCompactStep >= COMPACT_COOLDOWN_STEPS;
+}
+
+/** Target size for a compaction pass — deep enough to avoid re-firing. */
+export function compactTargetChars(cap: number): number {
+  return Math.max(2_000, Math.floor(cap * COMPACT_TARGET_RATIO));
+}
+
+/**
  * System addon for budget runs.
  * Hard rule: full TOOL INDEX + ACTIVE schemas stay available — save tokens via
  * page-read discipline and step count, not by inventing missing tools.
  */
 export const BUDGET_SYSTEM_ADDON = `BUDGET MODE (minimize tokens & steps — tools stay fully listed):
 - Full TOOL INDEX and ACTIVE tool schemas remain available. Do not claim tools are missing or truncated.
-- Prefer page_digest over get_page. get_page mode=full is REJECTED (use page_digest or mode=snippet|structure).
+- Prefer page_digest over get_page. get_page mode=full is REJECTED (use page_digest or mode=main|snippet|structure).
 - Prefer extract / query_all / find_text with tight selectors over dumping page text.
+- Cherry-pick before you page: get_interactive({filter,kind,region}) and get_page({filter}) cost a fraction of a full listing. When a reply says hasMore, resume with offset — never re-run the tool from the start.
 - Multi-tab compare: list_tabs once, then ONE model turn with parallel page_digest/extract (not serial get_page dumps).
 - Prefer scrape_pdps for many SAPs/URLs (one tool turn). Prefer ensure_scrape_table BEFORE first navigate.
 - Prefer parse_data (cheap worker) to structure text/rows — do NOT paste huge text into your replies.
