@@ -236,9 +236,21 @@ const CURATED: Record<string, CatalogMeta> = {
   },
   rag_search: {
     group: "memory",
-    useCases: ["Codebase Q&A from granted folder", "Find file snippets by keyword"],
-    whenToUse: "Local RAG index is granted and question is about repo/docs.",
-    whenNotToUse: "Answer is on the live web page in front of you.",
+    useCases: ["Fuzzy concept search over granted folder", "NL questions when identifier unknown"],
+    whenToUse: "Local RAG index is granted and the question is conceptual.",
+    whenNotToUse: "Looking for an exact identifier/string — use rag_grep (path:line).",
+  },
+  rag_grep: {
+    group: "memory",
+    useCases: ["Exact identifier / string / regex search", "Get path:line citations for code"],
+    whenToUse: "Any codebase lookup you could type into a search box.",
+    whenNotToUse: "Discovering files by name — use rag_glob; reading a known range — use rag_read_file.",
+  },
+  rag_glob: {
+    group: "memory",
+    useCases: ["List files matching a glob under the grant", "Discover paths before read/grep"],
+    whenToUse: "Need candidate paths (e.g. **/loop.ts) before reading.",
+    whenNotToUse: "Searching file contents — use rag_grep.",
   },
   recall: {
     group: "memory",
@@ -366,6 +378,8 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   scrape_catalog: "agentic",
   scrape_pdps: "agentic",
   rag_search: "memory",
+  rag_grep: "memory",
+  rag_glob: "memory",
   rag_read_file: "memory",
   remember: "memory",
   save_memory: "memory",

@@ -2099,7 +2099,9 @@ export function App() {
             name: event.tool,
             args,
             result: event.result,
-            status: denied ? "denied" : "done",
+            // A failed tool was rendering as "done", so an abort or a capture
+            // error looked like a successful call until the chip was expanded.
+            status: denied ? "denied" : resultOk(event.result) ? "done" : "error",
           });
           if (![...blocks].some((b) => b.kind === "tools" && b.toolIds.includes(id))) {
             const last = blocks[blocks.length - 1];
@@ -2353,8 +2355,15 @@ export function App() {
           void refreshSessions();
         }
       } catch (error) {
+        // A user Stop aborts the in-flight fetch and lands here as an
+        // AbortError. That is a clean stop, not a failure — do not render it as
+        // a red `Error:` bubble.
+        const isAbort =
+          (error instanceof Error && error.name === "AbortError") ||
+          (error instanceof Error && /aborted/i.test(error.message)) ||
+          controller.signal.aborted;
         const msg = error instanceof Error ? error.message : String(error);
-        const errText = `Error: ${msg}`;
+        const errText = isAbort ? "Stopped." : `Error: ${msg}`;
         const erroredTurns = (rt.turns as UiTurn[]).map((t) => {
           if (t.id !== assistantId) return t;
           const content = t.content?.trim() ? t.content : errText;
@@ -2368,7 +2377,7 @@ export function App() {
           return { ...t, content, blocks };
         });
         publishTurns(erroredTurns);
-        publishStatus("Error");
+        publishStatus(isAbort ? "Stopped" : "Error");
         if (session) {
           try {
             await persistSession(session, erroredTurns, rt.sessionUsage.total);

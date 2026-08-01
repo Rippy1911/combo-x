@@ -128,8 +128,10 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
       description: "Search local folder knowledge base and attachments",
       body: `RAG PLAYBOOK
 - rag_status to confirm index
-- rag_search then rag_read_file for snippets
-- list_attachments / read_attachment for chat files`,
+- For code: rag_grep (exact identifier/string → path:line) then rag_read_file with startLine/endLine
+- Discover files by name with rag_glob; fuzzy concepts only with rag_search
+- list_attachments / read_attachment for chat files
+- Tools auto-attach when a folder is indexed — do not wait for skill_read if they are already active`,
       tags: [...nowTag, "rag", "knowledge"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rag],

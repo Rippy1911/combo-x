@@ -70,6 +70,18 @@ const TEXT_EXT = new Set([
 const MAX_FILE_BYTES = 220_000;
 const MAX_FILES = 2_500;
 
+/** Generated lockfiles and bundles — huge, near-zero signal, crowd the keyword space. */
+const SKIP_FILES = new Set([
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "composer.lock",
+  "cargo.lock",
+  "poetry.lock",
+  "gemfile.lock",
+  "bun.lockb",
+]);
+
 export function shouldIndexFile(path: string, extraSkip: string[] = []): boolean {
   const skip = new Set<string>([...DEFAULT_SKIP_DIRS, ...extraSkip.map((s) => s.trim()).filter(Boolean)]);
   const base = path.split("/").pop() ?? path;
@@ -77,6 +89,7 @@ export function shouldIndexFile(path: string, extraSkip: string[] = []): boolean
   for (const p of parts) {
     if (skip.has(p)) return false;
   }
+  if (SKIP_FILES.has(base.toLowerCase())) return false;
   if (base === "AGENTS.md" || base === "README" || base === "LICENSE") return true;
   const dot = base.lastIndexOf(".");
   if (dot < 0) return base === "Makefile" || base === "Dockerfile";
@@ -114,12 +127,19 @@ async function walk(
   out: IndexedFile[],
   errors: string[],
   extraSkip: string[],
+  state: { truncated: boolean } = { truncated: false },
 ): Promise<void> {
   const skip = new Set<string>([...DEFAULT_SKIP_DIRS, ...extraSkip]);
-  if (out.length >= MAX_FILES) return;
+  if (out.length >= MAX_FILES) {
+    state.truncated = true;
+    return;
+  }
   // @ts-expect-error — async iterator on directory handle
   for await (const [name, handle] of dir.entries()) {
-    if (out.length >= MAX_FILES) return;
+    if (out.length >= MAX_FILES) {
+      state.truncated = true;
+      return;
+    }
     if (handle.kind === "directory") {
       if (skip.has(name)) continue;
       await walk(
@@ -128,6 +148,7 @@ async function walk(
         out,
         errors,
         extraSkip,
+        state,
       );
       continue;
     }
@@ -207,6 +228,7 @@ export async function reindexAll(
 
   const files: IndexedFile[] = [];
   const errors: string[] = [];
+  const walkState = { truncated: false };
   onProgress?.({ phase: "walk", message: `Scanning ${handles.length} folder(s)…` });
   // Single folder: keep unprefixed paths (v0.8 compat for rag_read_file).
   // Multi: prefix with unique root id so same folder names don't collide.
@@ -225,7 +247,11 @@ export async function reindexAll(
       usedNames.add(name);
       prefix = name;
     }
-    await walk(h.handle, prefix, files, errors, extra);
+    await walk(h.handle, prefix, files, errors, extra, walkState);
+  }
+  // A walk that stopped at the file cap must not look like a complete index.
+  if (walkState.truncated) {
+    errors.push(`index truncated at ${MAX_FILES} files — narrow the grant or add excludeDirs`);
   }
   onProgress?.({ phase: "index", files: files.length, message: `Indexing ${files.length} files…` });
   const label = handles.map((h) => h.folderName).join(" + ");
@@ -269,4 +295,52 @@ export async function reindexSaved(
   onProgress?: (p: IndexProgress) => void,
 ): Promise<RagMeta> {
   return reindexAll(store, onProgress);
+}
+
+/**
+ * Read a file straight from the granted folder(s), bypassing the index — the
+ * index is a snapshot with chunk-relative line math, so line-ranged reads are
+ * only exact against live text. Returns null (caller falls back to the index)
+ * when the path is not under a grant or read permission is not already
+ * granted — we never requestPermission here because there is no user gesture.
+ */
+export async function readLiveFile(store: RagStore, path: string): Promise<string | null> {
+  try {
+    const handles = await store.listHandles();
+    if (!handles.length) return null;
+    let dir: FileSystemDirectoryHandle;
+    let rel = path;
+    if (handles.length === 1) {
+      dir = handles[0]!.handle;
+    } else {
+      // Mirror reindexAll's prefixing: folderName, deduped with `__<id6>`.
+      const used = new Set<string>();
+      const byPrefix = new Map<string, FileSystemDirectoryHandle>();
+      for (const h of handles) {
+        let name = h.folderName || h.id;
+        if (used.has(name)) name = `${name}__${h.id.slice(0, 6)}`;
+        used.add(name);
+        byPrefix.set(name, h.handle);
+      }
+      const segs = path.split("/");
+      const root = byPrefix.get(segs[0] ?? "");
+      if (!root) return null;
+      dir = root;
+      rel = segs.slice(1).join("/");
+    }
+    // @ts-expect-error — FileSystemHandle permission API
+    const perm = await dir.queryPermission?.({ mode: "read" });
+    if (perm !== "granted") return null;
+    const segs = rel.split("/").filter(Boolean);
+    if (!segs.length) return null;
+    for (let i = 0; i < segs.length - 1; i++) {
+      dir = await dir.getDirectoryHandle(segs[i]!);
+    }
+    const fh = await dir.getFileHandle(segs[segs.length - 1]!);
+    const file = await fh.getFile();
+    if (file.size > MAX_FILE_BYTES) return null;
+    return await file.text();
+  } catch {
+    return null;
+  }
 }

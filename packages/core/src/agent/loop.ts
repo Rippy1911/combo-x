@@ -41,7 +41,41 @@ import {
   initialActiveTools,
   isSkillGatedTool,
   unlockFromHints,
+  unionNames,
 } from "../tools/gating.js";
+
+/** Device RAG search tools — auto-attached when a folder is actually indexed. */
+const RAG_TOOL_NAMES = ["rag_search", "rag_grep", "rag_glob", "rag_read_file", "rag_status"] as const;
+
+/**
+ * Turn a bare thrown message into something the model can act on.
+ *
+ * "The operation was aborted." reached the model verbatim and gave it no
+ * recovery path — it is a DOMException from a cancelled fetch or a
+ * captureVisibleTab that raced a navigation, not a finding about the page.
+ */
+export function toolErrorRecovery(tool: string, message: string): Record<string, unknown> {
+  const lower = message.toLowerCase();
+  if (lower.includes("aborted") || lower.includes("abort")) {
+    return {
+      tool,
+      hint:
+        `${tool} was cancelled — the run was stopped, the tab was mid-navigation, or a screenshot ` +
+        `raced another capture. This is not a result about the page. Wait for the tab to settle ` +
+        `(wait), make sure it is focused, then retry ${tool} once. If it aborts again, move on and ` +
+        `tell the user rather than retrying.`,
+    };
+  }
+  if (lower.includes("timeout") || lower.includes("timed out")) {
+    return {
+      tool,
+      hint:
+        `${tool} timed out — the page is slow or still loading. wait() for it to settle, then retry ` +
+        `once with a narrower call (filter/offset) rather than the same broad one.`,
+    };
+  }
+  return { tool };
+}
 import { pickToolsForGoal } from "../tools/pickTools.js";
 import {
   customToolToDefinition,
@@ -95,6 +129,8 @@ import { portfolioAsk, portfolioSearch } from "../nsrag/client.js";
 import { isMacToolName, runMacTool, type ComboNativePort } from "../mac/bridge.js";
 import type { ContentRequest, ContentResponse } from "../protocol/messages.js";
 import type { RagStore } from "../rag/store.js";
+import { globToRegExp, grepChunks } from "../rag/store.js";
+import { readLiveFile } from "../rag/folder.js";
 import {
   formatSessionExport,
   type SessionExportFormat,
@@ -426,7 +462,11 @@ SKILLS vs MEMORY:
 - Use skill_save to create/update playbooks when that tool is enabled. Use custom_tool_save / list_custom_tools for user-defined tools when enabled.
 - TOOL INDEX lists ACTIVE tools (one-liners) and LOCKED packs (pack → combo-* skill). Parameter schemas are NOT in the system prompt — only on the attached tools[] for ACTIVE tools.
 - For LOCKED packs: skill_search → skill_read (combo-scrape, combo-rest, combo-rag, combo-page-ext, combo-media) to unlock; then those tools join tools[] with full schemas.
-Browse with page_digest / get_page freely. Specialized scrape/REST/RAG/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode).
+Browse with page_digest / get_page freely. Specialized scrape/REST/media/page-ext tools require a skill unlock first (unless this agent uses static toolMode). Device RAG tools (rag_grep / rag_glob / rag_search / rag_read_file / rag_status) auto-attach when a folder is indexed — do not skill_read combo-rag just to unlock them.
+CODEBASE SEARCH (Device RAG, when active):
+- Exact identifier / string / regex → rag_grep (returns path:line with context). Narrow with glob:"**/*.{ts,tsx}".
+- Find files by name → rag_glob. Read a known range → rag_read_file({path, startLine, endLine}).
+- rag_search is fuzzy keyword only — if it returns empty hits, that is a retrieval failure, NOT "the code is missing". Switch to rag_grep.
 UX Vision Lab: For any visual UX audit you MUST call ux_critique (always-on) — do not answer from get_page alone. It captures, shows a chat screenshot artifact, and vision-attaches for the next turn. Then annotate_screenshot({ attachmentId, markers }) and/or open_preview with attachmentId / beforeAttachmentId / afterAttachmentId. Optional live CSS: page_css_preview → ux_critique again → compare → page_css_clear. Raw screenshot_* need combo-media. Never paste base64.
 Durable notes: remember / save_memory / recall / memory_list (scope global|agent).
 TASK TRACKING (mandatory for multi-step work):
@@ -441,6 +481,7 @@ Rules:
 - Prefer page_digest over full get_page dumps.
 - Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
 - Prefer skill_read + tools / rag / memories over inventing facts.
+- A tool result with error "aborted" / "The operation was aborted" is NOT a finding about the page — wait, refocus the tab, retry once, then tell the user.
 - After click/navigate, wait briefly then re-read.
 - Never invent page content — use tools.
 - Be concise in the final answer.`;
@@ -741,6 +782,15 @@ export class AgentLoop {
       toolMode === "skill_gated"
         ? [...initialActiveTools(ceiling), ...customRows.map((c) => c.name).filter((n) => ceiling.has(n))]
         : enabledToolNames.filter((n) => ceiling.has(n));
+
+    // Device RAG is useless behind a skill the model forgets to read. When a
+    // folder is actually granted and indexed, attach the search tools directly.
+    if (toolMode === "skill_gated" && options.rag) {
+      const meta = await options.rag.getMeta().catch(() => null);
+      if (meta?.chunkCount) {
+        activeToolNames = unionNames(activeToolNames, RAG_TOOL_NAMES).filter((n) => ceiling.has(n));
+      }
+    }
     activeToolNames = [...new Set(activeToolNames)];
 
     const omitWeb = options.omitComboWebSearch === true;
@@ -1479,7 +1529,16 @@ export class AgentLoop {
       totalTokens: result.usage.totalTokens,
       estimatedCostUsd: result.usage.estimatedCostUsd,
     });
-    return (result.content ?? "").trim() || "(vision worker returned empty critique)";
+    const content = (result.content ?? "").trim();
+    // An empty critique is a failure, not a finding. Say so explicitly — the
+    // model was paraphrasing the old placeholder as if the page had been
+    // reviewed and come back blank.
+    return (
+      content ||
+      `[VISION WORKER FAILED] ${model} returned an empty critique. The screenshot was captured but NOT reviewed. ` +
+        `Do not describe the UI from this result. Retry ux_critique once; if it stays empty, the worker model ` +
+        `may not accept images — switch Settings → Vision worker model or use a vision-capable orchestrator.`
+    );
   }
 
   private async finalizeScreenshotCapture(
@@ -2133,6 +2192,77 @@ export class AgentLoop {
                 score: Number(h.score.toFixed(3)),
                 snippet: h.content.slice(0, 500),
               })),
+              // An empty list is a retrieval failure, not "the code isn't there" —
+              // fuzzy scoring floors out on natural-language questions about code.
+              ...(hits.length === 0
+                ? {
+                    hint:
+                      "No fuzzy hits. For an exact identifier, string, or regex use rag_grep (returns path:line); " +
+                      "to find files by name use rag_glob; to confirm the index is healthy use rag_status.",
+                  }
+                : {}),
+            };
+          }
+        }
+      } else if (name === "rag_grep") {
+        if (!rag) result = { ok: false, error: "rag store unavailable" };
+        else {
+          const meta = await rag.getMeta();
+          if (!meta?.chunkCount) {
+            result = {
+              ok: false,
+              error: "No local RAG index — grant a folder in Setup/Settings and wait for indexing",
+            };
+          } else {
+            const chunks = await rag.allChunks();
+            const out = grepChunks(chunks, {
+              pattern: String(args.pattern ?? ""),
+              regex: args.regex === true,
+              caseInsensitive: args.caseInsensitive === true,
+              glob: typeof args.glob === "string" ? args.glob : undefined,
+              maxMatches: typeof args.maxMatches === "number" ? args.maxMatches : 50,
+              context: typeof args.context === "number" ? args.context : 2,
+            });
+            result = {
+              ok: true,
+              ...out,
+              ...(out.matches.length === 0
+                ? {
+                    hint:
+                      "No matches. Check the pattern (it is case-sensitive by default — try caseInsensitive:true), " +
+                      "widen the glob, or list candidates with rag_glob.",
+                  }
+                : out.truncated
+                  ? {
+                      hint: `Stopped at ${out.matches.length} matches. Narrow with glob:"<pattern>" or a more specific pattern.`,
+                    }
+                  : {}),
+            };
+          }
+        }
+      } else if (name === "rag_glob") {
+        if (!rag) result = { ok: false, error: "rag store unavailable" };
+        else {
+          const meta = await rag.getMeta();
+          if (!meta?.chunkCount) {
+            result = {
+              ok: false,
+              error: "No local RAG index — grant a folder in Setup/Settings and wait for indexing",
+            };
+          } else {
+            const pattern = String(args.pattern ?? "");
+            const limit = typeof args.limit === "number" ? args.limit : 200;
+            const re = globToRegExp(pattern);
+            const all = await rag.allPaths();
+            const paths = all.filter((p) => re.test(p));
+            result = {
+              ok: true,
+              paths: paths.slice(0, limit),
+              total: paths.length,
+              truncated: paths.length > limit,
+              ...(paths.length === 0
+                ? { hint: `No path matches "${pattern}". Try a broader glob like **/*${pattern.includes(".") ? "" : "*"} or rag_status to see what was indexed.` }
+                : {}),
             };
           }
         }
@@ -2141,10 +2271,55 @@ export class AgentLoop {
         else {
           const path = String(args.path ?? "");
           const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
-          const file = await rag.readPath(path, maxChars);
-          result = file
-            ? { ok: true, ...file }
-            : { ok: false, error: `path not in index: ${path}` };
+          const startLine = typeof args.startLine === "number" ? Math.max(1, Math.floor(args.startLine)) : undefined;
+          const endLine = typeof args.endLine === "number" ? Math.floor(args.endLine) : undefined;
+          // Prefer live disk text: the index is a chunk-joined snapshot, so
+          // line ranges are only exact against the real file.
+          const live = await readLiveFile(rag, path);
+          if (live != null) {
+            const lines = live.split("\n");
+            const from = (startLine ?? 1) - 1;
+            const to = endLine != null ? Math.min(endLine, lines.length) : lines.length;
+            let content = lines.slice(from, to).join("\n");
+            let truncated = to < lines.length;
+            if (content.length > maxChars) {
+              content = content.slice(0, maxChars);
+              truncated = true;
+            }
+            result = {
+              ok: true,
+              path,
+              source: "live",
+              startLine: from + 1,
+              endLine: to,
+              totalLines: lines.length,
+              content,
+              truncated,
+            };
+          } else {
+            const file = await rag.readPath(path, maxChars);
+            if (!file) {
+              result = { ok: false, error: `path not in index: ${path}. List candidates with rag_glob({pattern:"**/*${path.split("/").pop() ?? ""}"})` };
+            } else if (startLine != null || endLine != null) {
+              const lines = file.content.split("\n");
+              const from = (startLine ?? 1) - 1;
+              const to = endLine != null ? endLine : lines.length;
+              const slice = lines.slice(from, to);
+              result = {
+                ok: true,
+                path: file.path,
+                source: "index",
+                startLine: from + 1,
+                endLine: Math.min(to, lines.length),
+                totalLines: lines.length,
+                content: slice.join("\n"),
+                truncated: file.truncated || to < lines.length,
+                note: "Read from the index snapshot (folder not readable right now). Line numbers follow the snapshot, not the live file — reindex or grant read permission for exact lines.",
+              };
+            } else {
+              result = { ok: true, source: "index", ...file };
+            }
+          }
         }
       } else if (name === "portfolio_ask" || name === "portfolio_search") {
         result = await this.runPortfolioTool(name, args, connectors);
@@ -2926,7 +3101,7 @@ export class AgentLoop {
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      const result = { ok: false, error: msg };
+      const result = { ok: false, error: msg, ...toolErrorRecovery(name, msg) };
       emit({
         type: "tool_result",
         tool: name,

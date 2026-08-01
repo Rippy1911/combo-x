@@ -135,8 +135,10 @@ Structured extraction, RAG, attachments, views, export.
 |------|----------|
 | `parse_data` | Worker LLM extracts JSON rows from text or current page |
 | `rag_status` | Check local folder index health |
-| `rag_search` | Keyword search granted repo folder |
-| `rag_read_file` | Read indexed file path |
+| `rag_grep` | Exact identifier / string / regex over granted folder → `path:line` (prefer for code) |
+| `rag_glob` | List paths matching a glob under the grant |
+| `rag_search` | Fuzzy keyword search granted repo folder (concepts only — empty hits ≠ missing code) |
+| `rag_read_file` | Read indexed file path; supports `startLine`/`endLine` |
 | `list_attachments` / `read_attachment` | Chat-uploaded PDF/CSV/images |
 | `export_csv` | Download row matrix as CSV |
 | `save_view` / `list_views` / `get_view` | Named table snapshots (Views tab) |
