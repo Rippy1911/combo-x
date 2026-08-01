@@ -56,19 +56,23 @@ import {
 import type { Skill, SkillStore } from "../skills/store.js";
 import {
   BUDGET_SYSTEM_ADDON,
+  compactTargetChars,
   leanHistoryMaxChars,
   midLoopToolResultMaxChars,
   preferPageDigest,
   resolveMaxSteps,
   rewriteGetPageArgs,
+  shouldCompactNow,
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
+import { annotateRedirect, RepeatGuard } from "./repeatGuard.js";
 import {
   leanHistory,
   truncateToolResultForLlm,
   compressHistory,
   compactMidLoopMessages,
+  historyChars,
 } from "./leanHistory.js";
 import type {
   ChatMessage,
@@ -401,9 +405,21 @@ export const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orc
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Ephemeral pagination listboxes (rows-per-page 5/10/25…) are ignored; if still stuck, press_key Escape then get_interactive({scope:"page"}). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets). page_digest includes seo.* (meta/canonical/robots/JSON-LD) for indexing checks; skill_read combo-seo-check for SERP/GSC playbook.
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
+SEARCH, DON'T DUMP (this is how you stay fast on big apps):
+- Looking for ONE labelled thing? Go straight to it: get_interactive({filter:"Save"}) or find_text({text:"App content"}). find_text returns interactiveIndex on hits inside a control, so you can click_index immediately. Never list 100 controls to find one.
+- get_page defaults to mode:"main", which drops nav/header/footer. On consoles (Play Console, GSC, admin panels) the chrome is most of the page — mode:"full" is almost always the wrong call.
+- Reading a long document? get_page({filter:"keyword"}) greps it by line. That beats paging through it.
+NOTHING IS EVER SILENTLY CUT — always read the envelope:
+- List results carry matched/total/offset/nextOffset/hasMore; text results carry totalChars/nextOffset/hasMore. When hasMore is true there IS more data: call the SAME tool again with offset:<nextOffset>, or narrow with filter/kind/region. Do not report a partial list as if it were complete, and do not restart the task from scratch.
+- A "_truncated" field means entries were dropped to fit the budget, not that they do not exist. Resume from its offset.
+- item.i from get_interactive is an absolute handle into the full scan — filtering and paging never invalidate it, so click_index({index:i}) always hits the control you saw.
+DON'T REPEAT YOURSELF:
+- Identical arguments return an identical result. If a call yields nothing useful, change the arguments or the tool — a third identical call is refused outright.
+- navigate reports redirected:true + requestedUrl when you did not land where you asked. That path is gated or renamed: reach the page through its on-page link instead of retrying the URL.
+- If two different approaches both fail, stop and tell the user what blocked you. That is a better answer than burning the step budget.
 For current facts / news use web_search (or OpenRouter built-in web search when enabled); use web_fetch or navigate for full pages. Prefer web_search over inventing URLs.
 SKILLS vs MEMORY:
-- Memories are already prepended in the system message each turn (global + active agent). Do not re-fetch them mid-stream.
+- Memories and open tasks are injected just before your latest user turn (global + active agent). Do not re-fetch them mid-stream.
 - Skill descriptions are listed in AVAILABLE SKILLS below. Use skill_search / skill_read for the full body AND to unlock specialized tools (scrape, rest, rag, page-ext, media).
 - Use skill_save to create/update playbooks when that tool is enabled. Use custom_tool_save / list_custom_tools for user-defined tools when enabled.
 - TOOL INDEX lists ACTIVE tools (one-liners) and LOCKED packs (pack → combo-* skill). Parameter schemas are NOT in the system prompt — only on the attached tools[] for ACTIVE tools.
@@ -575,6 +591,8 @@ interface RunContext {
   ephemeralTabIds: number[];
   /** Session-pinned browser tab — DOM/navigate target without activate_tab. */
   boundTabId?: number;
+  /** Detects identical call+result pairs and refuses the third one. */
+  repeatGuard?: RepeatGuard;
 }
 
 export class AgentLoop {
@@ -682,6 +700,8 @@ export class AgentLoop {
     let usage = ZERO;
     let steps = 0;
     let finalText = "";
+    /** Last step that rewrote the prompt — throttles cache-busting compactions. */
+    let lastCompactStep: number | null = null;
     const pageTemplates = new PageTemplateCache();
 
     const customRows = options.customTools ? await options.customTools.list() : [];
@@ -743,13 +763,15 @@ export class AgentLoop {
     const toolCatalogBlock = formatToolSchemaBlock(enabledToolNames, activeToolNames, {
       custom: customRows,
     });
-    const systemParts = [
-      systemBase,
-      memBlock,
-      taskBlock,
-      skillBlock,
-      toolCatalogBlock,
-    ].filter(Boolean);
+    // Cache layout: providers with automatic prefix caching (DeepSeek, Moonshot,
+    // OpenAI, Gemini, Grok) reuse tokens only up to the FIRST byte that changed.
+    // The tool catalog is the largest block and is stable for the whole session;
+    // the task list changes on every create_task/update_task. Keeping tasks in the
+    // system message therefore invalidated the catalog behind it on every turn.
+    // So: stable blocks stay in `system`, volatile blocks ride just ahead of the
+    // user turn — where they are also freshest for the model to act on.
+    const systemParts = [systemBase, skillBlock, toolCatalogBlock].filter(Boolean);
+    const volatileBlock = [memBlock, taskBlock].filter(Boolean).join("\n\n");
     const messages: ChatMessage[] = [
       { role: "system", content: systemParts.join("\n\n") },
       ...this.applyContextLimit(
@@ -757,6 +779,7 @@ export class AgentLoop {
         options.contextLimit,
         emit,
       ),
+      ...(volatileBlock ? [{ role: "user" as const, content: volatileBlock }] : []),
       { role: "user", content: userContent },
     ];
 
@@ -832,6 +855,7 @@ export class AgentLoop {
       openRouterVision: options.openRouterVision,
       ephemeralTabIds: [],
       boundTabId: options.boundTabId,
+      repeatGuard: new RepeatGuard(),
     };
     // Point rebuild at runCtx so unlocks sync both arrays.
     runCtx.rebuildTools = () => {
@@ -880,26 +904,35 @@ export class AgentLoop {
       rebuildTools();
 
       // Mid-run compact: fold older tool rounds so prompt tokens don't grow O(n²).
-      // Uses contextLimit when set; otherwise 2× lean history cap.
+      // Rewriting the prompt invalidates the provider's prefix cache, so this is
+      // deliberately hysteretic — tolerate an overflow, then cut deep and coast
+      // (see shouldCompactNow / COMPACT_* in budget.ts).
       if (step > 0) {
         const midCap =
           options.contextLimit && options.contextLimit > 0
             ? options.contextLimit
             : leanHistoryMaxChars(budgetMode) * 2;
-        const mid = compactMidLoopMessages(messages, {
-          maxChars: midCap,
-          keepRecentRounds: budgetMode === "budget" ? 1 : 2,
-        });
-        if (mid.compacted) {
-          messages.length = 0;
-          messages.push(...mid.messages);
-          emit({
-            type: "context_compressed",
-            message: `Mid-run compact: dropped ${mid.droppedRounds} older tool round(s) (${mid.beforeChars} → ${mid.afterChars} chars). Review list_tasks if goals were long-running.`,
-            compressedTurns: mid.droppedRounds,
-            beforeChars: mid.beforeChars,
-            afterChars: mid.afterChars,
+        const chars = historyChars(messages);
+        if (shouldCompactNow({ chars, cap: midCap, step, lastCompactStep })) {
+          const mid = compactMidLoopMessages(messages, {
+            maxChars: compactTargetChars(midCap),
+            keepRecentRounds: budgetMode === "budget" ? 1 : 2,
           });
+          if (mid.compacted) {
+            messages.length = 0;
+            messages.push(...mid.messages);
+            lastCompactStep = step;
+            emit({
+              type: "context_compressed",
+              message: `Mid-run compact: dropped ${mid.droppedRounds} older tool round(s) (${mid.beforeChars} → ${mid.afterChars} chars). Prompt cache resets once here. Review list_tasks if goals were long-running.`,
+              compressedTurns: mid.droppedRounds,
+              beforeChars: mid.beforeChars,
+              afterChars: mid.afterChars,
+            });
+          } else {
+            // Nothing foldable (one huge round) — don't retry every step.
+            lastCompactStep = step;
+          }
         }
       }
 
@@ -1922,6 +1955,22 @@ export class AgentLoop {
         return voiceBlock;
       }
 
+      // Loop breaker: this exact call already ran twice with an identical result.
+      // Refuse rather than let it eat the step budget (see repeatGuard.ts).
+      const repeatBlock = runCtx?.repeatGuard?.check(name, args);
+      if (repeatBlock?.kind === "block") {
+        emit({
+          type: "tool_result",
+          tool: name,
+          args,
+          result: repeatBlock.result,
+          toolCallId: call.id,
+          approvalMode: approvalMeta?.approvalMode,
+          approvalDecision: approvalMeta?.approvalDecision,
+        });
+        return repeatBlock.result;
+      }
+
       // Hard gate: skill-gated tools must be unlocked (or toolMode static).
       if (
         runCtx &&
@@ -2022,10 +2071,13 @@ export class AgentLoop {
         {
           const tabId = await this.resolveTargetTabId(runCtx, args, emit);
           const url = String(args.url ?? "");
-          result =
+          const navResult =
             tabId != null
               ? await this.browser.navigate(url, tabId)
               : await this.browser.navigate(url);
+          // A silent redirect looked like success and sent the agent back to
+          // re-read the wrong page; say where it actually landed.
+          result = annotateRedirect(url, navResult);
         }
       } else if (name === "go_back") {
         {
@@ -2852,6 +2904,11 @@ export class AgentLoop {
             }
           }
         }
+      }
+
+      const repeat = runCtx?.repeatGuard?.record(name, args, result);
+      if (repeat?.kind === "warn") {
+        result = RepeatGuard.annotate(result, repeat.note);
       }
 
       emit({

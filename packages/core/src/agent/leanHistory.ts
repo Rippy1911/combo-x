@@ -55,31 +55,145 @@ export function redactToolResultSnippet(raw: unknown, max = RESULT_SNIPPET): str
 }
 
 /**
+ * Array fields that carry the bulk of a list-shaped tool result. When a result
+ * is too big we drop whole entries from these instead of slicing the serialized
+ * JSON — a mid-string cut hands the model unparseable text (it sees half an
+ * object and cannot tell how many entries it missed or how to ask for more).
+ */
+const LIST_FIELDS = [
+  "items",
+  "links",
+  "matches",
+  "rows",
+  "hits",
+  "tables",
+  "values",
+  "results",
+  "tabs",
+  "attachments",
+  "memories",
+] as const;
+
+function toPlainObject(result: unknown): unknown {
+  if (typeof result === "string") {
+    try {
+      return redactSensitiveDeep(JSON.parse(result));
+    } catch {
+      return result;
+    }
+  }
+  return redactSensitiveDeep(result);
+}
+
+/** The dominant list field of an object result, if any. */
+function pickListField(obj: Record<string, unknown>): string | null {
+  let best: string | null = null;
+  let bestLen = 0;
+  for (const key of LIST_FIELDS) {
+    const v = obj[key];
+    if (Array.isArray(v) && v.length > bestLen) {
+      best = key;
+      bestLen = v.length;
+    }
+  }
+  return best;
+}
+
+/**
+ * Shrink a list result by dropping trailing entries until it fits, keeping the
+ * JSON valid and telling the agent exactly how to fetch the remainder.
+ */
+function shapeListResult(
+  obj: Record<string, unknown>,
+  field: string,
+  cap: number,
+): string | null {
+  const full = obj[field] as unknown[];
+  let lo = 0;
+  let hi = full.length;
+  let bestJson: string | null = null;
+  let bestCount = 0;
+
+  // Binary search the largest prefix that fits — list entries are near-uniform
+  // in size, so this converges in ~log2(n) serializations.
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const kept = full.slice(0, mid);
+    const dropped = full.length - kept.length;
+    const candidate = {
+      ...obj,
+      [field]: kept,
+      _truncated: {
+        field,
+        shown: kept.length,
+        of: full.length,
+        dropped,
+        hint: buildListHint(obj, field, kept.length, dropped),
+      },
+    };
+    const json = scrubDataUrls(JSON.stringify(candidate));
+    if (json.length <= cap) {
+      bestJson = json;
+      bestCount = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return bestCount > 0 ? bestJson : null;
+}
+
+function buildListHint(
+  obj: Record<string, unknown>,
+  field: string,
+  shown: number,
+  dropped: number,
+): string {
+  if (dropped <= 0) return `All ${shown} ${field} shown.`;
+  const offset = typeof obj.offset === "number" ? obj.offset : 0;
+  const resume = offset + shown;
+  return (
+    `${dropped} more ${field} were dropped to fit the context budget — they are NOT gone. ` +
+    `Re-call the same tool with offset:${resume} to continue, or narrow with filter/kind/region ` +
+    `so the answer fits in one call. Do not conclude the list ended here.`
+  );
+}
+
+/**
  * Cap a mid-loop tool result for the LLM `messages[]` row.
  * Full payload still goes to UI via tool_result events — this only shrinks the
  * prompt replayed on every subsequent model turn.
+ *
+ * Always emits valid JSON. List results lose whole entries (with a resume hint);
+ * only unstructured blobs fall back to a string preview.
  */
 export function truncateToolResultForLlm(result: unknown, maxChars: number): string {
   const cap = Math.max(256, maxChars);
-  let text: string;
-  if (typeof result === "string") {
-    try {
-      text = JSON.stringify(redactSensitiveDeep(JSON.parse(result)));
-    } catch {
-      text = result;
+  const plain = toPlainObject(result);
+
+  if (typeof plain !== "string" && plain && typeof plain === "object" && !Array.isArray(plain)) {
+    const obj = plain as Record<string, unknown>;
+    const direct = scrubDataUrls(JSON.stringify(obj));
+    if (direct.length <= cap) return direct;
+    const field = pickListField(obj);
+    if (field) {
+      const shaped = shapeListResult(obj, field, cap);
+      if (shaped) return shaped;
     }
-  } else {
-    text = JSON.stringify(redactSensitiveDeep(result));
   }
+
+  let text = typeof plain === "string" ? plain : JSON.stringify(plain);
   text = scrubDataUrls(text);
   if (text.length <= cap) return text;
   // Leave room for the envelope keys so the stored string stays near `cap`.
-  const previewBudget = Math.max(128, cap - 96);
-  const preview =
-    text.length > previewBudget ? `${text.slice(0, previewBudget)}…` : text;
+  const previewBudget = Math.max(128, cap - 220);
+  const preview = text.length > previewBudget ? `${text.slice(0, previewBudget)}…` : text;
   return JSON.stringify({
     truncated: true,
     chars: text.length,
+    hint:
+      "Result was too large and is cut mid-way. Re-read a narrower slice " +
+      "(get_page offset/filter, get_interactive filter/region, find_text) rather than repeating this call.",
     preview,
   });
 }

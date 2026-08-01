@@ -8,12 +8,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab. Prefer page_digest in budget mode. mode=snippet|structure|full; maxChars caps text. Prefer extract/query_all for fields.",
+        "Read the active tab's text. Default mode=main strips nav/header/footer chrome (on app consoles the chrome is most of the page). Reply carries totalChars/nextOffset/hasMore — when hasMore, call again with offset:<nextOffset> instead of giving up. filter:\"word\" keeps only matching lines (grep a long doc). mode=full includes chrome; mode=structure = page_digest; mode=snippet = short main-only peek.",
       parameters: {
         type: "object",
         properties: {
-          mode: { type: "string", enum: ["snippet", "structure", "full"] },
+          mode: { type: "string", enum: ["main", "snippet", "structure", "full"] },
           maxChars: { type: "number" },
+          offset: { type: "number", description: "Char offset — pass nextOffset to continue" },
+          filter: { type: "string", description: "Keep only lines containing this substring" },
         },
         additionalProperties: false,
       },
@@ -32,10 +34,16 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "get_links",
-      description: "List links on the active page (text + href).",
+      description:
+        "List links (text + href + region). filter matches text or href; region:\"main\" drops nav/footer links. Reply carries total/nextOffset — page with offset instead of re-listing.",
       parameters: {
         type: "object",
-        properties: { limit: { type: "number" } },
+        properties: {
+          limit: { type: "number" },
+          offset: { type: "number" },
+          filter: { type: "string", description: "Substring of link text or href" },
+          region: { type: "string", enum: ["any", "main", "nav"] },
+        },
         additionalProperties: false,
       },
     },
@@ -45,11 +53,18 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Compact indexed list of clickable/inputs (prefer over guessing CSS). Then use click_index / type_index. Default scope=auto: scopes to topmost dialog/menu/high-z portal (not ephemeral pagination listboxes). scope=page forces full document; scope=dialog requires an open dialog. Stuck in a rows-per-page menu? press_key Escape then get_interactive({scope:\"page\"}). Check item.type before type_index (never free-text into type=time).",
+        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping: filter:\"Save\" returns just the controls whose label/aria/name/placeholder/href matches. kind narrows to link|button|input|select; region:\"main\" drops nav/header/footer. item.i is an absolute handle into the full scan, so filtering and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
         properties: {
           limit: { type: "number" },
+          offset: { type: "number", description: "Pass nextOffset to continue paging" },
+          filter: {
+            type: "string",
+            description: "Substring of label/aria-label/name/placeholder/href — the fast path",
+          },
+          kind: { type: "string", enum: ["any", "link", "button", "input", "select"] },
+          region: { type: "string", enum: ["any", "main", "nav"] },
           scope: { type: "string", enum: ["auto", "page", "dialog"] },
         },
         additionalProperties: false,
@@ -223,13 +238,16 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "find_text",
-      description: "Search visible text; optionally scroll first match into view.",
+      description:
+        "Search visible text and get back an ACTIONABLE handle: each hit reports region plus interactiveIndex when it sits inside a control, so you can click_index({index:<interactiveIndex>}) straight away. Best way to locate one labelled thing on a huge page — cheaper than get_page. Carries total/nextOffset for paging; context:N adds surrounding chars.",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string" },
           scrollIntoView: { type: "boolean" },
           limit: { type: "number" },
+          offset: { type: "number" },
+          context: { type: "number", description: "Extra chars of surrounding text per hit" },
         },
         required: ["text"],
         additionalProperties: false,
@@ -2074,10 +2092,15 @@ export function toolArgsToContentRequest(
       return {
         op: "get_page",
         mode:
-          args.mode === "snippet" || args.mode === "structure" || args.mode === "full"
+          args.mode === "snippet" ||
+          args.mode === "structure" ||
+          args.mode === "full" ||
+          args.mode === "main"
             ? args.mode
             : undefined,
         maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
+        offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
+        filter: typeof args.filter === "string" ? args.filter : undefined,
       };
     case "page_digest":
       return { op: "page_digest" };
@@ -2085,6 +2108,12 @@ export function toolArgsToContentRequest(
       return {
         op: "get_links",
         limit: typeof args.limit === "number" ? args.limit : 30,
+        offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
+        filter: typeof args.filter === "string" ? args.filter : undefined,
+        region:
+          args.region === "main" || args.region === "nav" || args.region === "any"
+            ? args.region
+            : undefined,
       };
     case "click":
       if (typeof args.selector !== "string") return null;
@@ -2130,11 +2159,27 @@ export function toolArgsToContentRequest(
         text: args.text,
         scrollIntoView: Boolean(args.scrollIntoView),
         limit: typeof args.limit === "number" ? args.limit : 20,
+        offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
+        context: typeof args.context === "number" ? Math.max(0, Math.floor(args.context)) : undefined,
       };
     case "get_interactive":
       return {
         op: "get_interactive",
         limit: typeof args.limit === "number" ? args.limit : 80,
+        offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
+        filter: typeof args.filter === "string" ? args.filter : undefined,
+        kind:
+          args.kind === "link" ||
+          args.kind === "button" ||
+          args.kind === "input" ||
+          args.kind === "select" ||
+          args.kind === "any"
+            ? args.kind
+            : undefined,
+        region:
+          args.region === "main" || args.region === "nav" || args.region === "any"
+            ? args.region
+            : undefined,
         scope:
           args.scope === "page" || args.scope === "dialog" || args.scope === "auto"
             ? args.scope

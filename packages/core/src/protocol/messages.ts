@@ -115,10 +115,20 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("get_page"),
     maxChars: z.number().int().positive().max(50_000).optional(),
-    mode: z.enum(["full", "snippet", "structure"]).optional(),
+    mode: z.enum(["full", "snippet", "structure", "main"]).optional(),
+    /** Character offset into the extracted text — page through long documents. */
+    offset: z.number().int().min(0).max(5_000_000).optional(),
+    /** Only return paragraphs containing this substring (case-insensitive). */
+    filter: z.string().max(200).optional(),
   }),
   z.object({ op: z.literal("page_digest") }),
-  z.object({ op: z.literal("get_links"), limit: z.number().int().positive().max(200).optional() }),
+  z.object({
+    op: z.literal("get_links"),
+    limit: z.number().int().positive().max(200).optional(),
+    offset: z.number().int().min(0).max(10_000).optional(),
+    filter: z.string().max(200).optional(),
+    region: z.enum(["any", "main", "nav"]).optional(),
+  }),
   z.object({ op: z.literal("click"), selector: z.string().min(1) }),
   z.object({
     op: z.literal("type_text"),
@@ -151,11 +161,21 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     text: z.string().min(1),
     scrollIntoView: z.boolean().optional(),
     limit: z.number().int().positive().max(50).optional(),
+    offset: z.number().int().min(0).max(10_000).optional(),
+    /** Chars of surrounding text to include per hit (0 = just the node text). */
+    context: z.number().int().min(0).max(600).optional(),
   }),
   z.object({
     op: z.literal("get_interactive"),
     limit: z.number().int().positive().max(120).optional(),
     scope: z.enum(["auto", "page", "dialog"]).optional(),
+    offset: z.number().int().min(0).max(10_000).optional(),
+    /** Substring match (case-insensitive) over text/aria-label/name/placeholder/href. */
+    filter: z.string().max(200).optional(),
+    /** Restrict to a control family. */
+    kind: z.enum(["any", "link", "button", "input", "select"]).optional(),
+    /** Restrict to page region — `main` drops nav/header/footer chrome. */
+    region: z.enum(["any", "main", "nav"]).optional(),
   }),
   z.object({
     op: z.literal("press_key"),

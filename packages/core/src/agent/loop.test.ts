@@ -545,15 +545,17 @@ describe("AgentLoop", () => {
     expect(store.get("foodwell")?.selector).toBe(".card");
   });
 
-  it("injects memories into system prompt (T-MEM-1)", async () => {
+  it("injects memories ahead of the user turn, not into the cached system prefix (T-MEM-1)", async () => {
     const memory = new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` });
     await memory.remember({ text: "Anita prefers morning calls", tags: ["anita"] });
     let seenSystem = "";
+    let seenAll = "";
     const llm = mockLlm([{ content: "Noted preferences." }]);
     const origChat = llm.chatStreaming as ReturnType<typeof vi.fn>;
     origChat.mockImplementationOnce(async (opts: { messages: Array<{ role: string; content: unknown }> }) => {
       const sys = opts.messages.find((m) => m.role === "system");
       seenSystem = String(sys?.content ?? "");
+      seenAll = opts.messages.map((m) => String(m.content ?? "")).join("\n");
       return {
         content: "Noted preferences.",
         toolCalls: [],
@@ -569,8 +571,11 @@ describe("AgentLoop", () => {
     });
     const agent = new AgentLoop(llm, stubBrowser(), memory);
     await agent.run({ model: "mock", userMessage: "hi" });
-    expect(seenSystem).toMatch(/AGENT MEMORIES/);
-    expect(seenSystem).toMatch(/Anita prefers morning calls/);
+    expect(seenAll).toMatch(/AGENT MEMORIES/);
+    expect(seenAll).toMatch(/Anita prefers morning calls/);
+    // Volatile blocks must stay out of `system` so the provider's prefix cache
+    // (and the tool catalog behind it) survives across turns.
+    expect(seenSystem).not.toMatch(/AGENT MEMORIES/);
   });
 
   it("leans history so LLM never sees tool roles (T-LEAN-1)", async () => {

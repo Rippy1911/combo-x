@@ -12,6 +12,164 @@ const interactiveMaps = new WeakMap<Document, HTMLElement[]>();
 
 const EAN_RE = /\b(\d{8}|\d{13}|\d{14})\b/g;
 
+/**
+ * Site chrome — nav/header/footer/sidebars. On app consoles (Google Play, GSC,
+ * Base44) this is 10–50× the size of the actual content, so a naive body-text
+ * read returns 100% chrome and the agent learns nothing. Everything here is
+ * *tagged*, never silently deleted: callers opt in via `region`.
+ */
+const CHROME_SEL =
+  'nav, header, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], [role="menubar"], [role="toolbar"]';
+
+/** Preferred primary-content roots, most specific first. */
+const MAIN_SEL =
+  'main, [role="main"], article, #main, #content, #main-content, .main-content, [class*="page-content"]';
+
+/** Upper bound on elements scanned per get_interactive call (paging needs a total). */
+const INTERACTIVE_SCAN_CAP = 600;
+
+/**
+ * The interactive map keyed off `document` survives client-side navigation in a
+ * SPA, so its elements can be detached while the map still looks populated —
+ * click_index would then "succeed" against a node nobody can see. Treat a map
+ * whose entries have left the DOM as absent.
+ */
+function liveInteractiveMap(doc: Document): HTMLElement[] | undefined {
+  const map = interactiveMaps.get(doc);
+  if (!map?.length) return undefined;
+  const connected = map.some((el) => el.isConnected !== false && doc.contains(el));
+  if (!connected) {
+    interactiveMaps.delete(doc);
+    return undefined;
+  }
+  return map;
+}
+
+/** The page's primary content root, or null when the page has no clear main. */
+function findMainRoot(doc: Document): HTMLElement | null {
+  for (const sel of MAIN_SEL.split(",")) {
+    const el = doc.querySelector(sel.trim());
+    if (el instanceof HTMLElement && (el.textContent ?? "").trim().length > 40) {
+      return el;
+    }
+  }
+  return null;
+}
+
+/** "nav" when the element lives inside site chrome, else "main". */
+function regionOf(el: Element, mainRoot: HTMLElement | null): "main" | "nav" {
+  if (el.closest(CHROME_SEL)) return "nav";
+  if (mainRoot) return mainRoot.contains(el) ? "main" : "nav";
+  return "main";
+}
+
+function stripNonText(root: HTMLElement): void {
+  for (const sel of ["script", "style", "noscript", "svg", "template"]) {
+    for (const n of Array.from(root.querySelectorAll(sel))) n.remove();
+  }
+}
+
+function normalizeText(raw: string): string {
+  return raw
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const BLOCK_TAGS = new Set([
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "BR", "BUTTON", "DD", "DIV", "DL", "DT",
+  "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6",
+  "HEADER", "HR", "LABEL", "LI", "MAIN", "NAV", "OL", "OPTION", "P", "PRE", "SECTION",
+  "TABLE", "TD", "TH", "TR", "UL",
+]);
+
+/**
+ * Text with block elements separated by newlines.
+ *
+ * `innerText` only inserts line breaks for *rendered* elements — and we read
+ * from a detached clone, so it degrades to `textContent` and glues every
+ * paragraph into one line. That silently broke line-oriented features (and made
+ * page text far harder to read). Emulate block separation ourselves.
+ */
+function blockAwareText(root: HTMLElement): string {
+  const parts: string[] = [];
+  const visit = (node: Node): void => {
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      parts.push(node.textContent ?? "");
+      return;
+    }
+    if (node.nodeType !== 1 /* ELEMENT_NODE */) return;
+    const el = node as Element;
+    const block = BLOCK_TAGS.has(el.tagName);
+    if (block) parts.push("\n");
+    for (const child of Array.from(el.childNodes)) visit(child);
+    if (block) parts.push("\n");
+  };
+  visit(root);
+  return parts.join("");
+}
+
+/**
+ * Text of the primary content region with site chrome removed.
+ * Returns the chrome char count so the caller can tell the agent what it skipped.
+ */
+function mainText(doc: Document): { text: string; region: string; chromeChars: number } {
+  const body = doc.body;
+  if (!body) return { text: "", region: "none", chromeChars: 0 };
+  const mainRoot = findMainRoot(doc);
+  const source = mainRoot ?? body;
+  const clone = source.cloneNode(true) as HTMLElement;
+  stripNonText(clone);
+
+  let chromeChars = 0;
+  for (const n of Array.from(clone.querySelectorAll(CHROME_SEL))) {
+    chromeChars += (n.textContent ?? "").length;
+    n.remove();
+  }
+
+  return {
+    text: normalizeText(blockAwareText(clone)),
+    region: mainRoot ? mainRoot.tagName.toLowerCase() : "body-minus-chrome",
+    chromeChars,
+  };
+}
+
+/** Keep only lines matching `needle` — lets the agent grep a huge document. */
+function filterLines(text: string, needle: string): { text: string; matched: number } {
+  const lower = needle.toLowerCase();
+  const lines = text.split("\n");
+  const kept = lines.filter((l) => l.toLowerCase().includes(lower));
+  return { text: kept.join("\n"), matched: kept.length };
+}
+
+/**
+ * Window a string and describe the window so the agent can page instead of
+ * giving up. `nextOffset` is null when the tail has been reached.
+ */
+function windowText(
+  text: string,
+  offset: number,
+  cap: number,
+): {
+  slice: string;
+  totalChars: number;
+  offset: number;
+  nextOffset: number | null;
+  hasMore: boolean;
+} {
+  const start = Math.min(Math.max(0, offset), text.length);
+  const end = Math.min(start + cap, text.length);
+  const hasMore = end < text.length;
+  return {
+    slice: text.slice(start, end),
+    totalChars: text.length,
+    offset: start,
+    nextOffset: hasMore ? end : null,
+    hasMore,
+  };
+}
+
 function metaContent(doc: Document, nameOrProp: string): string | undefined {
   for (const meta of Array.from(doc.querySelectorAll("meta"))) {
     const name = meta.getAttribute("name") ?? "";
@@ -123,21 +281,52 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
   try {
     switch (request.op) {
       case "get_page": {
-        const mode = request.mode ?? "full";
+        // `main` is the default: whole-body reads on app consoles return pure
+        // nav chrome and burn the char budget before reaching any content.
+        const mode = request.mode ?? "main";
         const maxChars = request.maxChars ?? MAX_TEXT;
         if (mode === "structure") {
           return { ok: true, data: pageDigest(doc) };
         }
-        const text = visibleText(doc);
+
+        const useMain = mode === "main" || mode === "snippet";
+        const extracted = useMain
+          ? mainText(doc)
+          : { text: visibleText(doc), region: "body", chromeChars: 0 };
+
+        let text = extracted.text;
+        let filterMatched: number | undefined;
+        if (request.filter?.trim()) {
+          const filtered = filterLines(text, request.filter.trim());
+          text = filtered.text;
+          filterMatched = filtered.matched;
+        }
+
         const cap = mode === "snippet" ? Math.min(maxChars, 2_500) : maxChars;
+        const win = windowText(text, request.offset ?? 0, cap);
+
         return {
           ok: true,
           data: {
             title: doc.title,
             url: doc.location?.href ?? "",
-            text: text.slice(0, cap),
-            truncated: text.length > cap,
+            text: win.slice,
             mode,
+            region: extracted.region,
+            chromeSkippedChars: extracted.chromeChars || undefined,
+            ...(filterMatched != null
+              ? { filter: request.filter, filterMatchedLines: filterMatched }
+              : {}),
+            totalChars: win.totalChars,
+            offset: win.offset,
+            nextOffset: win.nextOffset,
+            hasMore: win.hasMore,
+            truncated: win.hasMore,
+            hint: win.hasMore
+              ? `Showing chars ${win.offset}–${win.offset + win.slice.length} of ${win.totalChars}. Continue with get_page({offset:${win.nextOffset}${mode !== "main" ? `, mode:"${mode}"` : ""}}) or narrow with get_page({filter:"…"}).`
+              : useMain && extracted.chromeChars > 0
+                ? `Skipped ${extracted.chromeChars} chars of nav/header/footer chrome. Use mode:"full" if you need it.`
+                : undefined,
           },
         };
       }
@@ -145,14 +334,43 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         return { ok: true, data: pageDigest(doc) };
       case "get_links": {
         const limit = request.limit ?? 30;
-        const links = Array.from(doc.querySelectorAll("a[href]"))
-          .slice(0, limit)
+        const offset = request.offset ?? 0;
+        const needle = request.filter?.trim().toLowerCase() ?? "";
+        const wantRegion = request.region ?? "any";
+        const mainRoot = findMainRoot(doc);
+
+        const all = Array.from(doc.querySelectorAll("a[href]"))
           .map((a) => ({
-            text: (a.textContent ?? "").trim().slice(0, 120),
+            text: (a.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 120),
             href: (a as HTMLAnchorElement).href,
+            region: regionOf(a, mainRoot),
           }))
-          .filter((l) => l.href);
-        return { ok: true, data: { links } };
+          .filter((l) => l.href)
+          .filter((l) => wantRegion === "any" || l.region === wantRegion)
+          .filter(
+            (l) =>
+              !needle ||
+              l.text.toLowerCase().includes(needle) ||
+              l.href.toLowerCase().includes(needle),
+          );
+
+        const page = all.slice(offset, offset + limit);
+        const nextOffset = offset + page.length < all.length ? offset + page.length : null;
+        return {
+          ok: true,
+          data: {
+            links: page,
+            shown: page.length,
+            total: all.length,
+            offset,
+            nextOffset,
+            hasMore: nextOffset != null,
+            hint:
+              nextOffset != null
+                ? `${all.length} links match; showing ${page.length}. Page with get_links({offset:${nextOffset}}) or narrow with get_links({filter:"…", region:"main"}).`
+                : undefined,
+          },
+        };
       }
       case "click": {
         const el = doc.querySelector(request.selector);
@@ -199,31 +417,87 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         return { ok: true, data: { waitedMs: Math.min(request.ms, 10_000) } };
       case "find_text": {
         const limit = request.limit ?? 20;
+        const offset = request.offset ?? 0;
+        const contextChars = request.context ?? 0;
         const needle = request.text.toLowerCase();
-        const matches: Array<{ index: number; text: string; tag: string }> = [];
+
+        // Reuse the live interactive map when one exists so indices reported here
+        // stay valid for click_index; build one on demand so find_text alone is
+        // actionable. The map is per-Document, so navigation clears it naturally.
+        let map = liveInteractiveMap(doc);
+        let mapRefreshed = false;
+        if (!map?.length) {
+          map = collectInteractive(doc, INTERACTIVE_SCAN_CAP, "page").els;
+          interactiveMaps.set(doc, map);
+          mapRefreshed = true;
+        }
+        const mainRoot = findMainRoot(doc);
+
+        type Hit = {
+          index: number;
+          text: string;
+          tag: string;
+          region: "main" | "nav";
+          interactiveIndex?: number;
+          clickable: boolean;
+        };
+        const all: Hit[] = [];
         const walker = doc.createTreeWalker(doc.body ?? doc, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
-        let i = 0;
-        while (node && matches.length < limit) {
+        while (node && all.length < 500) {
           const raw = (node.textContent ?? "").trim();
           if (raw.length > 1 && raw.toLowerCase().includes(needle)) {
             const parent = node.parentElement;
-            matches.push({
-              index: i,
-              text: raw.slice(0, 200),
+            const host = (parent?.closest(INTERACTIVE_SEL) as HTMLElement | null) ?? null;
+            const mapIdx = host ? map.indexOf(host) : -1;
+            const body =
+              contextChars > 0
+                ? normalizeText(parent?.textContent ?? raw).slice(0, 200 + contextChars)
+                : raw.slice(0, 200);
+            all.push({
+              index: all.length,
+              text: body,
               tag: parent?.tagName?.toLowerCase() ?? "text",
+              region: parent ? regionOf(parent, mainRoot) : "main",
+              ...(mapIdx >= 0 ? { interactiveIndex: mapIdx } : {}),
+              clickable: mapIdx >= 0,
             });
-            if (request.scrollIntoView && parent && matches.length === 1) {
-              parent.scrollIntoView?.({ block: "center", behavior: "instant" as ScrollBehavior });
-            }
-            i += 1;
           }
           node = walker.nextNode();
         }
-        return { ok: true, data: { matches, count: matches.length } };
+
+        const matches = all.slice(offset, offset + limit);
+        if (request.scrollIntoView && matches.length) {
+          const first = matches[0]!;
+          const el = first.interactiveIndex != null ? map[first.interactiveIndex] : null;
+          el?.scrollIntoView?.({ block: "center", behavior: "instant" as ScrollBehavior });
+        }
+        const nextOffset = offset + matches.length < all.length ? offset + matches.length : null;
+        const clickableCount = matches.filter((m) => m.clickable).length;
+
+        return {
+          ok: true,
+          data: {
+            matches,
+            count: matches.length,
+            total: all.length,
+            offset,
+            nextOffset,
+            hasMore: nextOffset != null,
+            mapRefreshed,
+            hint: !all.length
+              ? "No match. Text may be inside an iframe, lazily rendered, or differently cased/accented — try a shorter distinctive substring."
+              : clickableCount > 0
+                ? `${clickableCount} of ${matches.length} hits sit inside a control — act directly with click_index({index:<interactiveIndex>}).`
+                : nextOffset != null
+                  ? `Showing ${matches.length} of ${all.length}. Page with find_text({text:"…", offset:${nextOffset}}).`
+                  : undefined,
+          },
+        };
       }
       case "get_interactive": {
         const limit = request.limit ?? 80;
+        const offset = request.offset ?? 0;
         const scopeMode = request.scope ?? "auto";
         if (scopeMode === "dialog" && !findTopModal(doc)) {
           return {
@@ -231,35 +505,82 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             error: "no open dialog/menu to scope to; use scope=auto or scope=page",
           };
         }
-        const collected = collectInteractive(doc, limit, scopeMode);
+
+        // Scan a superset so `i` is an absolute, stable handle into the map:
+        // filtering and paging then never invalidate click_index.
+        const collected = collectInteractive(doc, INTERACTIVE_SCAN_CAP, scopeMode);
         interactiveMaps.set(doc, collected.els);
-        const items = collected.els.map((el, index) => ({
-          i: index,
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role") ?? undefined,
-          text: (el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "")
-            .trim()
-            .replace(/\s+/g, " ")
-            .slice(0, 100),
-          href: el.tagName === "A" ? (el as HTMLAnchorElement).href : undefined,
-          type: isInputEl(el) ? resolveInputType(el) : undefined,
-          placeholder:
-            isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
-          name: el.getAttribute("name") ?? undefined,
-          title: el.getAttribute("title") ?? undefined,
-        }));
+        const mainRoot = findMainRoot(doc);
+        const all = collected.els.map((el, index) => describeInteractive(el, index, mainRoot));
+
+        const needle = request.filter?.trim().toLowerCase() ?? "";
+        const wantKind = request.kind ?? "any";
+        let wantRegion = request.region ?? "any";
+
+        const byKindAndFilter = all
+          .filter((it) => wantKind === "any" || it.kind === wantKind)
+          .filter((it) => !needle || interactiveHaystack(it).includes(needle));
+
+        // Adaptive default: on console-style pages the nav alone exceeds any
+        // sane limit. When the caller did not choose, prefer main content and
+        // say so — rather than silently handing back 100 sidebar links.
+        let regionAuto = false;
+        if (request.region == null && !needle) {
+          const mainOnly = byKindAndFilter.filter((it) => it.region === "main");
+          if (byKindAndFilter.length > limit && mainOnly.length > 0 && mainOnly.length < byKindAndFilter.length) {
+            wantRegion = "main";
+            regionAuto = true;
+          }
+        }
+
+        const matched = byKindAndFilter.filter(
+          (it) => wantRegion === "any" || it.region === wantRegion,
+        );
+        const items = matched.slice(offset, offset + limit);
+        const nextOffset = offset + items.length < matched.length ? offset + items.length : null;
+
+        const navCount = byKindAndFilter.filter((it) => it.region === "nav").length;
+        const hints = [collected.hint];
+        if (regionAuto) {
+          hints.push(
+            `Auto-scoped to main content (${matched.length} of ${byKindAndFilter.length} controls; ${navCount} nav/header/footer controls hidden). Pass region:"any" or region:"nav" to see them.`,
+          );
+        }
+        if (nextOffset != null) {
+          hints.push(
+            `Showing ${items.length} of ${matched.length}. Page with get_interactive({offset:${nextOffset}}) or jump straight to one with get_interactive({filter:"<label>"}).`,
+          );
+        }
+        if (needle && !matched.length) {
+          hints.push(
+            `No control matches "${request.filter}". Try a shorter substring, region:"any", or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
+          );
+        }
+        if (!all.length) {
+          hints.push(
+            "No interactive elements found. Close overlays (press_key Escape), hard-refresh the tab, or reload the extension.",
+          );
+        }
+
         return {
           ok: true,
           data: {
             items,
             count: items.length,
+            /** Controls left after kind/filter/region — `i` indexes the full scan. */
+            matched: matched.length,
+            total: all.length,
+            offset,
+            nextOffset,
+            hasMore: nextOffset != null,
+            region: wantRegion,
+            regionCounts: {
+              main: all.filter((it) => it.region === "main").length,
+              nav: all.filter((it) => it.region === "nav").length,
+            },
             /** dialog = open modal/menu/sheet; page = full document */
             scope: collected.scope,
-            hint:
-              collected.hint ??
-              (items.length === 0
-                ? "No interactive elements found. Close overlays (press_key Escape), hard-refresh the tab, or reload the extension."
-                : undefined),
+            hint: hints.filter(Boolean).join(" ") || undefined,
           },
         };
       }
@@ -291,9 +612,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         };
       }
       case "click_index": {
-        const map = interactiveMaps.get(doc);
+        const map = liveInteractiveMap(doc);
         if (!map?.length) {
-          return { ok: false, error: "call get_interactive first on this page" };
+          return {
+            ok: false,
+            error:
+              "no live interactive map — the page changed since the last get_interactive. Call get_interactive (filter:\"…\") again, then click_index.",
+          };
         }
         const el = map[request.index];
         if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
@@ -301,9 +626,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         return { ok: true, data: { clickedIndex: request.index, tag: el.tagName.toLowerCase() } };
       }
       case "type_index": {
-        const map = interactiveMaps.get(doc);
+        const map = liveInteractiveMap(doc);
         if (!map?.length) {
-          return { ok: false, error: "call get_interactive first on this page" };
+          return {
+            ok: false,
+            error:
+              "no live interactive map — the page changed since the last get_interactive. Call get_interactive (filter:\"…\") again, then type_index.",
+          };
         }
         const el = map[request.index];
         if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
@@ -328,8 +657,7 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         if (request.selector) {
           el = doc.querySelector(request.selector);
         } else if (request.index != null) {
-          const map = interactiveMaps.get(doc);
-          el = map?.[request.index] ?? null;
+          el = liveInteractiveMap(doc)?.[request.index] ?? null;
         }
         if (!el || !(el instanceof HTMLElement)) {
           return { ok: false, error: "element not found" };
@@ -397,6 +725,72 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+export type InteractiveItem = {
+  i: number;
+  tag: string;
+  kind: "link" | "button" | "input" | "select";
+  region: "main" | "nav";
+  role?: string;
+  text: string;
+  href?: string;
+  type?: string;
+  placeholder?: string;
+  name?: string;
+  title?: string;
+};
+
+/** Coarse control family used by the `kind` filter. */
+function interactiveKind(el: HTMLElement): InteractiveItem["kind"] {
+  const tag = el.tagName;
+  const role = (el.getAttribute("role") ?? "").toLowerCase();
+  if (tag === "SELECT") return "select";
+  if (tag === "TEXTAREA") return "input";
+  if (tag === "INPUT") {
+    const t = resolveInputType(el as HTMLInputElement);
+    return t === "button" || t === "submit" || t === "reset" ? "button" : "input";
+  }
+  if (tag === "A" || role === "link") return "link";
+  if (el.isContentEditable) return "input";
+  return "button";
+}
+
+function describeInteractive(
+  el: HTMLElement,
+  index: number,
+  mainRoot: HTMLElement | null,
+): InteractiveItem {
+  return {
+    i: index,
+    tag: el.tagName.toLowerCase(),
+    kind: interactiveKind(el),
+    region: regionOf(el, mainRoot),
+    role: el.getAttribute("role") ?? undefined,
+    text: (
+      el.innerText ||
+      el.textContent ||
+      el.getAttribute("aria-label") ||
+      el.getAttribute("title") ||
+      ""
+    )
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 100),
+    href: el.tagName === "A" ? (el as HTMLAnchorElement).href : undefined,
+    type: isInputEl(el) ? resolveInputType(el) : undefined,
+    placeholder: isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
+    name: el.getAttribute("name") ?? undefined,
+    title: el.getAttribute("title") ?? undefined,
+  };
+}
+
+/** Everything `filter` searches: label, aria/title, form name, placeholder, href. */
+function interactiveHaystack(it: InteractiveItem): string {
+  return [it.text, it.title, it.name, it.placeholder, it.href, it.role]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 /** Inputs that accept free-text titles (not temporal/numeric constrained types). */
@@ -900,10 +1294,8 @@ function visibleText(doc: Document): string {
   const body = doc.body;
   if (!body) return "";
   const clone = body.cloneNode(true) as HTMLElement;
-  for (const sel of ["script", "style", "noscript", "svg"]) {
-    for (const n of Array.from(clone.querySelectorAll(sel))) n.remove();
-  }
-  return (clone.innerText || clone.textContent || "").replace(/\s+\n/g, "\n").replace(/[ \t]+/g, " ").trim();
+  stripNonText(clone);
+  return normalizeText(blockAwareText(clone));
 }
 
 /** Async wait for content script (real delay). */
@@ -917,7 +1309,9 @@ export async function waitMs(ms: number): Promise<void> {
  * Refreshes the interactive map so interactiveIndex matches get_interactive.
  */
 export function buildPickedElementRef(el: HTMLElement, doc: Document = document): PickedElementRef {
-  const collected = collectInteractive(doc, 120);
+  // Same scan width as get_interactive so a picked element's interactiveIndex
+  // matches the index the agent would see when it lists controls.
+  const collected = collectInteractive(doc, INTERACTIVE_SCAN_CAP);
   interactiveMaps.set(doc, collected.els);
   let target = el;
   let interactiveIndex = collected.els.indexOf(el);
