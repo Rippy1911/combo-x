@@ -85,18 +85,64 @@ function toPlainObject(result: unknown): unknown {
   return redactSensitiveDeep(result);
 }
 
-/** The dominant list field of an object result, if any. */
-function pickListField(obj: Record<string, unknown>): string | null {
-  let best: string | null = null;
-  let bestLen = 0;
-  for (const key of LIST_FIELDS) {
-    const v = obj[key];
-    if (Array.isArray(v) && v.length > bestLen) {
-      best = key;
-      bestLen = v.length;
+/**
+ * Where the bulk array actually lives.
+ *
+ * Every browser tool answers `{ ok, data: { items: [...] } }`, so a top-level
+ * scan finds nothing and the whole item-level path is dead on real payloads.
+ * That regression shipped once already — the tests used flat `{items}` fixtures
+ * the runtime never produces. Search nested containers too.
+ */
+const MAX_LIST_DEPTH = 3;
+
+type ListSite = {
+  /** Key path from the root object to the array, e.g. `["data", "items"]`. */
+  path: string[];
+  /** The object directly holding the array — where `offset`/`total` live. */
+  container: Record<string, unknown>;
+  field: string;
+  list: unknown[];
+};
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/** The dominant list field of a result, at any reachable depth. */
+function pickListSite(root: Record<string, unknown>): ListSite | null {
+  let best: ListSite | null = null;
+
+  const visit = (node: Record<string, unknown>, path: string[]): void => {
+    if (path.length > MAX_LIST_DEPTH) return;
+    for (const key of LIST_FIELDS) {
+      const v = node[key];
+      if (Array.isArray(v) && v.length > (best?.list.length ?? 0)) {
+        best = { path: [...path, key], container: node, field: key, list: v };
+      }
     }
-  }
+    for (const [key, v] of Object.entries(node)) {
+      if (isPlainRecord(v)) visit(v, [...path, key]);
+    }
+  };
+
+  visit(root, []);
   return best;
+}
+
+/** Immutable deep set — replaces the array without mutating the live result. */
+function withListAt(
+  root: Record<string, unknown>,
+  path: string[],
+  value: unknown,
+): Record<string, unknown> {
+  const [head, ...rest] = path;
+  if (head === undefined) return root;
+  if (rest.length === 0) return { ...root, [head]: value };
+  const child = root[head];
+  return {
+    ...root,
+    [head]: withListAt(isPlainRecord(child) ? child : {}, rest, value),
+  };
 }
 
 /**
@@ -104,11 +150,11 @@ function pickListField(obj: Record<string, unknown>): string | null {
  * JSON valid and telling the agent exactly how to fetch the remainder.
  */
 function shapeListResult(
-  obj: Record<string, unknown>,
-  field: string,
+  root: Record<string, unknown>,
+  site: ListSite,
   cap: number,
 ): string | null {
-  const full = obj[field] as unknown[];
+  const full = site.list;
   let lo = 0;
   let hi = full.length;
   let bestJson: string | null = null;
@@ -121,14 +167,13 @@ function shapeListResult(
     const kept = full.slice(0, mid);
     const dropped = full.length - kept.length;
     const candidate = {
-      ...obj,
-      [field]: kept,
+      ...withListAt(root, site.path, kept),
       _truncated: {
-        field,
+        field: site.path.join("."),
         shown: kept.length,
         of: full.length,
         dropped,
-        hint: buildListHint(obj, field, kept.length, dropped),
+        hint: buildListHint(site, kept.length, dropped),
       },
     };
     const json = scrubDataUrls(JSON.stringify(candidate));
@@ -143,17 +188,13 @@ function shapeListResult(
   return bestCount > 0 ? bestJson : null;
 }
 
-function buildListHint(
-  obj: Record<string, unknown>,
-  field: string,
-  shown: number,
-  dropped: number,
-): string {
-  if (dropped <= 0) return `All ${shown} ${field} shown.`;
-  const offset = typeof obj.offset === "number" ? obj.offset : 0;
+function buildListHint(site: ListSite, shown: number, dropped: number): string {
+  if (dropped <= 0) return `All ${shown} ${site.field} shown.`;
+  // `offset` sits beside the array (inside `data`), not at the envelope root.
+  const offset = typeof site.container.offset === "number" ? site.container.offset : 0;
   const resume = offset + shown;
   return (
-    `${dropped} more ${field} were dropped to fit the context budget — they are NOT gone. ` +
+    `${dropped} more ${site.field} were dropped to fit the context budget — they are NOT gone. ` +
     `Re-call the same tool with offset:${resume} to continue, or narrow with filter/kind/region ` +
     `so the answer fits in one call. Do not conclude the list ended here.`
   );
@@ -175,9 +216,9 @@ export function truncateToolResultForLlm(result: unknown, maxChars: number): str
     const obj = plain as Record<string, unknown>;
     const direct = scrubDataUrls(JSON.stringify(obj));
     if (direct.length <= cap) return direct;
-    const field = pickListField(obj);
-    if (field) {
-      const shaped = shapeListResult(obj, field, cap);
+    const site = pickListSite(obj);
+    if (site) {
+      const shaped = shapeListResult(obj, site, cap);
       if (shaped) return shaped;
     }
   }

@@ -30,7 +30,8 @@ export type RepeatVerdict =
   | { kind: "warn"; repeats: number; note: string }
   | { kind: "block"; repeats: number; result: Record<string, unknown> };
 
-type Entry = { count: number; fingerprint: string };
+/** `repeats` counts *duplicate outcomes*, not calls: it is 0 after the first. */
+type Entry = { repeats: number; fingerprint: string };
 
 /** Stable stringify so `{a:1,b:2}` and `{b:2,a:1}` hash alike. */
 function canonicalize(value: unknown): string {
@@ -93,30 +94,39 @@ function alternativesFor(name: string, args: Record<string, unknown>): string {
 export class RepeatGuard {
   private readonly seen = new Map<string, Entry>();
 
-  /** Nudge after the 2nd identical call+result; refuse the 3rd. */
-  private static readonly WARN_AT = 1;
-  private static readonly BLOCK_AT = 1;
+  /**
+   * Thresholds are in *duplicate outcomes*, so the timeline reads:
+   *
+   * | call | `repeats` before | check   | record  |
+   * |------|------------------|---------|---------|
+   * | 1st  | —                | ok      | ok  (repeats→0) |
+   * | 2nd  | 0                | ok      | warn (repeats→1) |
+   * | 3rd  | 1                | block   | —       |
+   */
+  private static readonly WARN_AT_REPEATS = 1;
+  private static readonly BLOCK_AT_REPEATS = 1;
 
   private key(name: string, args: Record<string, unknown>): string {
     return `${name}#${canonicalize(args)}`;
   }
 
   /**
-   * Called before executing. Returns `block` when this exact call has already
-   * been made twice with an unchanged result — the tool is then not run at all.
+   * Called before executing. Returns `block` once this exact call has produced
+   * the same result twice — the tool is then not run at all.
    */
   check(name: string, args: Record<string, unknown>): RepeatVerdict {
     const entry = this.seen.get(this.key(name, args));
-    if (!entry || entry.count < RepeatGuard.BLOCK_AT) return { kind: "ok" };
+    if (!entry || entry.repeats < RepeatGuard.BLOCK_AT_REPEATS) return { kind: "ok" };
+    const calls = entry.repeats + 1;
     return {
       kind: "block",
-      repeats: entry.count,
+      repeats: entry.repeats,
       result: {
         ok: false,
         error: "repeated_call_blocked",
-        repeats: entry.count,
+        repeats: entry.repeats,
         hint:
-          `Refused: ${name} has already been called ${entry.count}× with these exact arguments ` +
+          `Refused: ${name} has already been called ${calls}× with these exact arguments ` +
           `and returned the same result each time. ${alternativesFor(name, args)}`,
       },
     };
@@ -135,18 +145,18 @@ export class RepeatGuard {
 
     // A changed result means the retry was productive — reset the streak.
     if (!prev || prev.fingerprint !== fp) {
-      this.seen.set(key, { count: 0, fingerprint: fp });
+      this.seen.set(key, { repeats: 0, fingerprint: fp });
       return { kind: "ok" };
     }
 
-    const count = prev.count + 1;
-    this.seen.set(key, { count, fingerprint: fp });
-    if (count < RepeatGuard.WARN_AT) return { kind: "ok" };
+    const repeats = prev.repeats + 1;
+    this.seen.set(key, { repeats, fingerprint: fp });
+    if (repeats < RepeatGuard.WARN_AT_REPEATS) return { kind: "ok" };
     return {
       kind: "warn",
-      repeats: count,
+      repeats,
       note:
-        `Repeated call: ${name} with these exact arguments returned an identical result ${count + 1}× ` +
+        `Repeated call: ${name} with these exact arguments returned an identical result ${repeats + 1}× ` +
         `— you learned nothing new. ${alternativesFor(name, args)}` +
         (POLLING_TOOLS.has(name) ? " If you are waiting for the page to change, wait() first." : "") +
         ` One more identical call will be refused.`,

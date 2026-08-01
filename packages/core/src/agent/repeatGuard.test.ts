@@ -10,6 +10,14 @@ describe("RepeatGuard", () => {
     expect(g.record("navigate", NAV, { ok: true, url: "/app-list" }).kind).toBe("ok");
   });
 
+  it("still lets the second call reach the browser", () => {
+    // The thresholds count duplicate *outcomes*, not calls. Blocking here would
+    // mean one unlucky result permanently bans the arguments.
+    const g = new RepeatGuard();
+    g.record("navigate", NAV, { ok: true, url: "/app-list" });
+    expect(g.check("navigate", NAV).kind).toBe("ok");
+  });
+
   it("nudges on the second identical call+result", () => {
     const g = new RepeatGuard();
     const same = { ok: true, url: "/app-list" };
