@@ -49,9 +49,9 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 | Tool | Use when |
 |------|----------|
 | `page_digest` | Cheap page map (title, headings, EAN/label hits, `seo.*`) — **default in budget mode** |
-| `get_page` | Read tab text. `mode` defaults to `main` (drops nav/header/footer); `offset` + `filter` page and grep long docs; also `snippet` / `structure` / `full` (budget caps/rejects `full`) |
-| `get_links` | List links (text + href); `offset`, `filter`, `region` |
-| `get_interactive` | Indexed clickable/inputs — prefer over guessing CSS; `scope` auto\|page\|dialog, plus `filter` / `kind` / `region` / `offset` |
+| `get_page` | Read tab text. `mode` defaults to `main` (drops nav/header/footer); `offset` + `filter` + `exclude` page, grep, and de-boilerplate long docs; also `snippet` / `structure` / `full` (budget caps/rejects `full`) |
+| `get_links` | List links (text + href); `filter` / `exclude` / `region` / `unique` / `origin` / `fields` / `offset` |
+| `get_interactive` | Indexed clickable/inputs — prefer over guessing CSS; `scope` auto\|page\|dialog, plus `filter` / `exclude` / `kind` / `region` / `state` / `requireLabel` / `fields` / `offset` |
 | `press_key` | Escape/Enter/Tab/arrows on active element (dismiss stuck listboxes) |
 | `click_index` / `type_index` | Act on index from `get_interactive` |
 | `click` / `type_text` | CSS selector interaction |
@@ -60,7 +60,7 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 | `scrape_tables` | HTML `<table>` → row arrays |
 | `scroll` | Page/container scroll |
 | `wait` | Post-navigation settle (≤10s) |
-| `find_text` | Visible text search + optional scroll-into-view; returns `interactiveIndex` per hit so a match can be clicked directly |
+| `find_text` | Visible text search + optional scroll-into-view; returns `interactiveIndex` per hit so a match can be clicked directly. `clickableOnly` / `region` / `exclude` narrow it |
 | `navigate` / `go_back` | Same-tab URL / history |
 | `list_tabs` / `open_tab` / `activate_tab` / `close_tab` | Tab management |
 | `login` | Vault/profile-based login flow |
@@ -72,6 +72,28 @@ DOM navigation, interaction, and scrape helpers. Most map to `ContentRequest` op
 | `scrape_pdps` | Batch PDP scrape: navigate → digest → upsert (one tool turn) |
 
 **Sensitive** (approval-gated): `click`, `type_text`, `click_index`, `type_index`, `press_key`, `open_tab`, `activate_tab`, `navigate`, `go_back`, `close_tab`, `login`, `scrape_catalog`, `scrape_pdps` — see `SENSITIVE_TOOLS` in `packages/core/src/protocol/messages.ts`.
+
+### Cherry-picking
+
+Every read tool lets the agent describe what it wants instead of paging a dump.
+Narrowing is free; a 100-item listing costs the same tokens on every subsequent
+turn of the run.
+
+| Control | On | Does |
+|---|---|---|
+| `filter` | all four | Keep matches (label/aria/name/placeholder/href, or line) |
+| `exclude` | all four | Drop matches — icon-font ligatures, cookie bars, repeated nav |
+| `kind` | `get_interactive` | `link` / `button` / `input` / `select` |
+| `region` | all four | `main` drops nav+header+footer |
+| `state` | `get_interactive` | `enabled` hides controls that cannot be clicked yet |
+| `requireLabel` | `get_interactive` | Drops unnamed icon buttons |
+| `fields` | `get_interactive`, `get_links` | Project each entry down; `i` always survives |
+| `unique` | `get_links` | Collapse a href rendered in both a drawer and a header |
+| `origin` | `get_links` | `internal` / `external` |
+| `clickableOnly` | `find_text` | Every hit carries an `interactiveIndex` |
+
+Items now report `disabled: true` when the control is `disabled`, `aria-disabled`,
+or inside a disabled fieldset — clicking one is a wasted turn.
 
 ### Paging, filtering, and the repeat guard
 

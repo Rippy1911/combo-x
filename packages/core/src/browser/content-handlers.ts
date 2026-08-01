@@ -143,6 +143,14 @@ function filterLines(text: string, needle: string): { text: string; matched: num
   return { text: kept.join("\n"), matched: kept.length };
 }
 
+/** Inverse of `filterLines` — strips repeated boilerplate (cookie bars, legal footers). */
+function dropLines(text: string, needle: string): { text: string; removed: number } {
+  const lower = needle.toLowerCase();
+  const lines = text.split("\n");
+  const kept = lines.filter((l) => !l.toLowerCase().includes(lower));
+  return { text: kept.join("\n"), removed: lines.length - kept.length };
+}
+
 /**
  * Window a string and describe the window so the agent can page instead of
  * giving up. `nextOffset` is null when the tail has been reached.
@@ -301,6 +309,12 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           text = filtered.text;
           filterMatched = filtered.matched;
         }
+        let excludedLines: number | undefined;
+        if (request.exclude?.trim()) {
+          const dropped = dropLines(text, request.exclude.trim());
+          text = dropped.text;
+          excludedLines = dropped.removed;
+        }
 
         const cap = mode === "snippet" ? Math.min(maxChars, 2_500) : maxChars;
         const win = windowText(text, request.offset ?? 0, cap);
@@ -316,6 +330,9 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             chromeSkippedChars: extracted.chromeChars || undefined,
             ...(filterMatched != null
               ? { filter: request.filter, filterMatchedLines: filterMatched }
+              : {}),
+            ...(excludedLines != null
+              ? { exclude: request.exclude, excludedLines }
               : {}),
             totalChars: win.totalChars,
             offset: win.offset,
@@ -336,10 +353,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const limit = request.limit ?? 30;
         const offset = request.offset ?? 0;
         const needle = request.filter?.trim().toLowerCase() ?? "";
+        const banned = request.exclude?.trim().toLowerCase() ?? "";
         const wantRegion = request.region ?? "any";
+        const wantOrigin = request.origin ?? "any";
+        const pageOrigin = doc.location?.origin ?? "";
         const mainRoot = findMainRoot(doc);
 
-        const all = Array.from(doc.querySelectorAll("a[href]"))
+        const scanned = Array.from(doc.querySelectorAll("a[href]"))
           .map((a) => ({
             text: (a.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 120),
             href: (a as HTMLAnchorElement).href,
@@ -347,14 +367,38 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           }))
           .filter((l) => l.href)
           .filter((l) => wantRegion === "any" || l.region === wantRegion)
+          .filter((l) => {
+            if (wantOrigin === "any" || !pageOrigin) return true;
+            const internal = l.href.startsWith(pageOrigin);
+            return wantOrigin === "internal" ? internal : !internal;
+          })
           .filter(
             (l) =>
               !needle ||
               l.text.toLowerCase().includes(needle) ||
               l.href.toLowerCase().includes(needle),
+          )
+          .filter(
+            (l) =>
+              !banned ||
+              !(l.text.toLowerCase().includes(banned) || l.href.toLowerCase().includes(banned)),
           );
 
-        const page = all.slice(offset, offset + limit);
+        // Drawer + header + footer usually repeat the same destinations; the
+        // duplicates are pure token cost.
+        let duplicates = 0;
+        let all = scanned;
+        if (request.unique) {
+          const seen = new Set<string>();
+          all = scanned.filter((l) => {
+            if (seen.has(l.href)) return false;
+            seen.add(l.href);
+            return true;
+          });
+          duplicates = scanned.length - all.length;
+        }
+
+        const page = all.slice(offset, offset + limit).map((l) => projectFields(l, request.fields));
         const nextOffset = offset + page.length < all.length ? offset + page.length : null;
         return {
           ok: true,
@@ -365,9 +409,10 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             offset,
             nextOffset,
             hasMore: nextOffset != null,
+            ...(duplicates > 0 ? { duplicatesCollapsed: duplicates } : {}),
             hint:
               nextOffset != null
-                ? `${all.length} links match; showing ${page.length}. Page with get_links({offset:${nextOffset}}) or narrow with get_links({filter:"…", region:"main"}).`
+                ? `${all.length} links match; showing ${page.length}. Page with get_links({offset:${nextOffset}}), or narrow with filter/exclude/region:"main"/unique:true.`
                 : undefined,
           },
         };
@@ -441,6 +486,8 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           interactiveIndex?: number;
           clickable: boolean;
         };
+        const banned = request.exclude?.trim().toLowerCase() ?? "";
+        const wantRegion = request.region ?? "any";
         const all: Hit[] = [];
         const walker = doc.createTreeWalker(doc.body ?? doc, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
@@ -454,14 +501,21 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
               contextChars > 0
                 ? normalizeText(parent?.textContent ?? raw).slice(0, 200 + contextChars)
                 : raw.slice(0, 200);
-            all.push({
-              index: all.length,
-              text: body,
-              tag: parent?.tagName?.toLowerCase() ?? "text",
-              region: parent ? regionOf(parent, mainRoot) : "main",
-              ...(mapIdx >= 0 ? { interactiveIndex: mapIdx } : {}),
-              clickable: mapIdx >= 0,
-            });
+            const region = parent ? regionOf(parent, mainRoot) : "main";
+            const keep =
+              (!request.clickableOnly || mapIdx >= 0) &&
+              (wantRegion === "any" || region === wantRegion) &&
+              (!banned || !body.toLowerCase().includes(banned));
+            if (keep) {
+              all.push({
+                index: all.length,
+                text: body,
+                tag: parent?.tagName?.toLowerCase() ?? "text",
+                region,
+                ...(mapIdx >= 0 ? { interactiveIndex: mapIdx } : {}),
+                clickable: mapIdx >= 0,
+              });
+            }
           }
           node = walker.nextNode();
         }
@@ -514,12 +568,19 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const all = collected.els.map((el, index) => describeInteractive(el, index, mainRoot));
 
         const needle = request.filter?.trim().toLowerCase() ?? "";
+        const banned = request.exclude?.trim().toLowerCase() ?? "";
         const wantKind = request.kind ?? "any";
+        const wantState = request.state ?? "any";
         let wantRegion = request.region ?? "any";
 
         const byKindAndFilter = all
           .filter((it) => wantKind === "any" || it.kind === wantKind)
-          .filter((it) => !needle || interactiveHaystack(it).includes(needle));
+          .filter((it) =>
+            wantState === "any" ? true : wantState === "disabled" ? !!it.disabled : !it.disabled,
+          )
+          .filter((it) => !request.requireLabel || it.text.length > 0)
+          .filter((it) => !needle || interactiveHaystack(it).includes(needle))
+          .filter((it) => !banned || !interactiveHaystack(it).includes(banned));
 
         // Adaptive default: on console-style pages the nav alone exceeds any
         // sane limit. When the caller did not choose, prefer main content and
@@ -536,7 +597,9 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const matched = byKindAndFilter.filter(
           (it) => wantRegion === "any" || it.region === wantRegion,
         );
-        const items = matched.slice(offset, offset + limit);
+        const items = matched
+          .slice(offset, offset + limit)
+          .map((it) => projectFields(it, request.fields, "i"));
         const nextOffset = offset + items.length < matched.length ? offset + items.length : null;
 
         const navCount = byKindAndFilter.filter((it) => it.region === "nav").length;
@@ -553,8 +616,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         }
         if (needle && !matched.length) {
           hints.push(
-            `No control matches "${request.filter}". Try a shorter substring, region:"any", or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
+            `No control matches "${request.filter}". Try a shorter substring, region:"any", state:"any", or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
           );
+        }
+        const disabledHidden =
+          wantState === "enabled" ? all.filter((it) => it.disabled).length : 0;
+        if (disabledHidden > 0) {
+          hints.push(`${disabledHidden} disabled control(s) hidden by state:"enabled".`);
         }
         if (!all.length) {
           hints.push(
@@ -739,7 +807,38 @@ export type InteractiveItem = {
   placeholder?: string;
   name?: string;
   title?: string;
+  /** Only set when true — clicking it is a wasted turn. */
+  disabled?: boolean;
 };
+
+/**
+ * Narrow an item to the keys the caller asked for.
+ *
+ * A 100-control listing is mostly fields the agent will not read; `fields`
+ * turns it into `{i, text}` and cuts the payload by an order of magnitude.
+ * `always` keys (the click index) survive any projection.
+ */
+function projectFields<T extends Record<string, unknown>>(
+  item: T,
+  fields: readonly string[] | undefined,
+  ...always: string[]
+): Record<string, unknown> {
+  if (!fields?.length) return item;
+  const keep = new Set<string>([...fields, ...always]);
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(item)) {
+    if (keep.has(key) && item[key] !== undefined) out[key] = item[key];
+  }
+  return out;
+}
+
+/** `disabled` attribute, ARIA equivalent, or an inert ancestor fieldset. */
+function isDisabled(el: HTMLElement): boolean {
+  if ((el as HTMLButtonElement).disabled === true) return true;
+  const aria = el.getAttribute("aria-disabled");
+  if (aria === "true") return true;
+  return el.closest("fieldset[disabled],[aria-disabled='true']") != null;
+}
 
 /** Coarse control family used by the `kind` filter. */
 function interactiveKind(el: HTMLElement): InteractiveItem["kind"] {
@@ -782,6 +881,7 @@ function describeInteractive(
     placeholder: isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
     name: el.getAttribute("name") ?? undefined,
     title: el.getAttribute("title") ?? undefined,
+    disabled: isDisabled(el) || undefined,
   };
 }
 

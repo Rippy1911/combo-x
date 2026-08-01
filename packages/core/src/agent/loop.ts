@@ -408,7 +408,9 @@ Each user turn may include ## Active browser tab (url/title/tabId/time) and ## P
 SEARCH, DON'T DUMP (this is how you stay fast on big apps):
 - Looking for ONE labelled thing? Go straight to it: get_interactive({filter:"Save"}) or find_text({text:"App content"}). find_text returns interactiveIndex on hits inside a control, so you can click_index immediately. Never list 100 controls to find one.
 - get_page defaults to mode:"main", which drops nav/header/footer. On consoles (Play Console, GSC, admin panels) the chrome is most of the page — mode:"full" is almost always the wrong call.
-- Reading a long document? get_page({filter:"keyword"}) greps it by line. That beats paging through it.
+- Reading a long document? get_page({filter:"keyword"}) greps it by line, and exclude:"…" strips boilerplate that repeats on every read. That beats paging through it.
+- Describe the control you want and let the filters do the work. get_interactive takes exclude (drop icon-ligature/nav noise), state:"enabled" (skip controls you cannot click yet — item.disabled marks them), requireLabel:true (skip unnamed icon buttons), and fields:["text"] (return only what you will read). get_links takes unique:true (nav is usually rendered two or three times) and origin:"internal". find_text takes clickableOnly:true so every hit is click-ready.
+- Prefer one precise call over a broad call plus paging. Narrowing costs nothing; a 100-item dump costs the same tokens on every subsequent turn.
 NOTHING IS EVER SILENTLY CUT — always read the envelope:
 - List results carry matched/total/offset/nextOffset/hasMore; text results carry totalChars/nextOffset/hasMore. When hasMore is true there IS more data: call the SAME tool again with offset:<nextOffset>, or narrow with filter/kind/region. Do not report a partial list as if it were complete, and do not restart the task from scratch.
 - A "_truncated" field means entries were dropped to fit the budget, not that they do not exist. Resume from its offset.

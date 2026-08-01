@@ -31,6 +31,23 @@ While fixing this we found a second, older bug: text extraction ran
 the whole page came back as one line. `blockAwareText()` now inserts newlines
 for block elements — which is also what makes line filtering possible.
 
+### 1b. …and the control list was mostly noise
+
+The same page returned 100 controls of which the useful ones were a handful.
+The rest were Material icon ligatures (`arrow_rightPodsumowanie`), the same nav
+destination rendered in a drawer *and* a header, and six unnamed `<img
+role=button>` entries. There was also no way to tell an enabled **Submit** from
+a disabled one, so a click could be spent on a dead control.
+
+Read tools now take a cherry-picking surface (full table in `docs/TOOLS.md`):
+`exclude` drops noise, `state:"enabled"` hides blocked controls, `requireLabel`
+drops unnamed icon buttons, `fields:["text"]` projects an entry down to what
+will actually be read, `unique` collapses duplicate links, and
+`clickableOnly` makes every `find_text` hit click-ready. Items report
+`disabled: true` (attribute, `aria-disabled`, or a disabled ancestor fieldset).
+
+None of this changes `item.i`, which stays absolute over the full scan.
+
 ### 2. Truncation was terminal, and it produced invalid JSON
 
 Tool results were capped by slicing the serialized JSON string. In the

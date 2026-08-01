@@ -120,6 +120,8 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     offset: z.number().int().min(0).max(5_000_000).optional(),
     /** Only return paragraphs containing this substring (case-insensitive). */
     filter: z.string().max(200).optional(),
+    /** Drop lines containing this substring — strips repeated boilerplate. */
+    exclude: z.string().max(200).optional(),
   }),
   z.object({ op: z.literal("page_digest") }),
   z.object({
@@ -127,7 +129,13 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     limit: z.number().int().positive().max(200).optional(),
     offset: z.number().int().min(0).max(10_000).optional(),
     filter: z.string().max(200).optional(),
+    exclude: z.string().max(200).optional(),
     region: z.enum(["any", "main", "nav"]).optional(),
+    /** Collapse links that share a href (nav repeated in a drawer + a header). */
+    unique: z.boolean().optional(),
+    /** `internal` = same origin as the page, `external` = off-site. */
+    origin: z.enum(["any", "internal", "external"]).optional(),
+    fields: z.array(z.enum(["text", "href", "region"])).max(3).optional(),
   }),
   z.object({ op: z.literal("click"), selector: z.string().min(1) }),
   z.object({
@@ -164,6 +172,10 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     offset: z.number().int().min(0).max(10_000).optional(),
     /** Chars of surrounding text to include per hit (0 = just the node text). */
     context: z.number().int().min(0).max(600).optional(),
+    /** Keep only hits that sit inside a control — every one is click_index-able. */
+    clickableOnly: z.boolean().optional(),
+    region: z.enum(["any", "main", "nav"]).optional(),
+    exclude: z.string().max(200).optional(),
   }),
   z.object({
     op: z.literal("get_interactive"),
@@ -172,10 +184,21 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     offset: z.number().int().min(0).max(10_000).optional(),
     /** Substring match (case-insensitive) over text/aria-label/name/placeholder/href. */
     filter: z.string().max(200).optional(),
+    /** Drop controls matching this substring — kills icon-ligature noise. */
+    exclude: z.string().max(200).optional(),
     /** Restrict to a control family. */
     kind: z.enum(["any", "link", "button", "input", "select"]).optional(),
     /** Restrict to page region — `main` drops nav/header/footer chrome. */
     region: z.enum(["any", "main", "nav"]).optional(),
+    /** `enabled` hides controls that cannot be clicked yet. */
+    state: z.enum(["any", "enabled", "disabled"]).optional(),
+    /** Drop controls with no accessible name (bare icon buttons). */
+    requireLabel: z.boolean().optional(),
+    /** Project each item down to these keys — `i` is always kept. */
+    fields: z
+      .array(z.enum(["tag", "kind", "region", "role", "text", "href", "type", "placeholder", "name", "title", "disabled"]))
+      .max(11)
+      .optional(),
   }),
   z.object({
     op: z.literal("press_key"),

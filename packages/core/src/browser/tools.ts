@@ -16,6 +16,11 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           maxChars: { type: "number" },
           offset: { type: "number", description: "Char offset — pass nextOffset to continue" },
           filter: { type: "string", description: "Keep only lines containing this substring" },
+          exclude: {
+            type: "string",
+            description:
+              "Drop lines containing this substring. Use it to strip boilerplate that repeats on every read (cookie banners, legal footers, icon-font ligatures).",
+          },
         },
         additionalProperties: false,
       },
@@ -35,14 +40,29 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_links",
       description:
-        "List links (text + href + region). filter matches text or href; region:\"main\" drops nav/footer links. Reply carries total/nextOffset — page with offset instead of re-listing.",
+        "List links (text + href + region). Narrow BEFORE you page: filter/exclude match text or href, region:\"main\" drops nav+footer, unique:true collapses the same href repeated in a drawer and a header, origin:\"internal\" hides off-site links, fields:[\"href\"] strips everything else. Reply carries total/nextOffset — page with offset instead of re-listing.",
       parameters: {
         type: "object",
         properties: {
           limit: { type: "number" },
           offset: { type: "number" },
-          filter: { type: "string", description: "Substring of link text or href" },
+          filter: { type: "string", description: "Keep links whose text or href contains this" },
+          exclude: { type: "string", description: "Drop links whose text or href contains this" },
           region: { type: "string", enum: ["any", "main", "nav"] },
+          unique: {
+            type: "boolean",
+            description: "Collapse duplicate hrefs — nav is usually rendered two or three times",
+          },
+          origin: {
+            type: "string",
+            enum: ["any", "internal", "external"],
+            description: "internal = same site as the current page",
+          },
+          fields: {
+            type: "array",
+            items: { type: "string", enum: ["text", "href", "region"] },
+            description: "Return only these keys per link, to cut the payload",
+          },
         },
         additionalProperties: false,
       },
@@ -53,7 +73,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping: filter:\"Save\" returns just the controls whose label/aria/name/placeholder/href matches. kind narrows to link|button|input|select; region:\"main\" drops nav/header/footer. item.i is an absolute handle into the full scan, so filtering and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
+        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping — describe the control you want and let the filters do the work: filter:\"Save\" matches label/aria/name/placeholder/href, exclude drops noise, kind narrows to link|button|input|select, region:\"main\" drops nav/header/footer, state:\"enabled\" hides controls that cannot be clicked yet, requireLabel:true hides bare icon buttons, and fields:[\"text\"] returns only the keys you will read. item.i is an absolute handle into the full scan, so filtering, projecting and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. item.disabled marks dead controls: clicking one wastes a turn. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
         properties: {
@@ -63,8 +83,44 @@ export const AGENT_TOOLS: ToolDefinition[] = [
             type: "string",
             description: "Substring of label/aria-label/name/placeholder/href — the fast path",
           },
+          exclude: {
+            type: "string",
+            description:
+              "Drop controls matching this substring. Good for icon-font ligatures and repeated nav labels that crowd out the control you want.",
+          },
           kind: { type: "string", enum: ["any", "link", "button", "input", "select"] },
           region: { type: "string", enum: ["any", "main", "nav"] },
+          state: {
+            type: "string",
+            enum: ["any", "enabled", "disabled"],
+            description:
+              "enabled = only controls you can actually act on right now; disabled = inspect what is blocked and why",
+          },
+          requireLabel: {
+            type: "boolean",
+            description: "Drop controls with no accessible name (unlabelled icon buttons)",
+          },
+          fields: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "tag",
+                "kind",
+                "region",
+                "role",
+                "text",
+                "href",
+                "type",
+                "placeholder",
+                "name",
+                "title",
+                "disabled",
+              ],
+            },
+            description:
+              "Return only these keys per control (i is always included). fields:[\"text\"] makes a 100-control listing tiny.",
+          },
           scope: { type: "string", enum: ["auto", "page", "dialog"] },
         },
         additionalProperties: false,
@@ -239,7 +295,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "find_text",
       description:
-        "Search visible text and get back an ACTIONABLE handle: each hit reports region plus interactiveIndex when it sits inside a control, so you can click_index({index:<interactiveIndex>}) straight away. Best way to locate one labelled thing on a huge page — cheaper than get_page. Carries total/nextOffset for paging; context:N adds surrounding chars.",
+        "Search visible text and get back an ACTIONABLE handle: each hit reports region plus interactiveIndex when it sits inside a control, so you can click_index({index:<interactiveIndex>}) straight away. Best way to locate one labelled thing on a huge page — cheaper than get_page. To go straight to a button, pass clickableOnly:true and every hit is click-ready. region:\"main\" ignores the same label repeated in the sidebar; exclude drops known-noisy matches. Carries total/nextOffset for paging; context:N adds surrounding chars.",
       parameters: {
         type: "object",
         properties: {
@@ -248,6 +304,12 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           limit: { type: "number" },
           offset: { type: "number" },
           context: { type: "number", description: "Extra chars of surrounding text per hit" },
+          clickableOnly: {
+            type: "boolean",
+            description: "Keep only hits inside a control — each one has an interactiveIndex",
+          },
+          region: { type: "string", enum: ["any", "main", "nav"] },
+          exclude: { type: "string", description: "Drop hits whose text contains this substring" },
         },
         required: ["text"],
         additionalProperties: false,
@@ -2087,6 +2149,23 @@ export function toolArgsToContentRequest(
   name: string,
   args: Record<string, unknown>,
 ): ContentRequest | null {
+  /** Accept an enum arg only when the model actually sent a member of it. */
+  const pick = <T extends string>(value: unknown, allowed: readonly T[]): T | undefined =>
+    typeof value === "string" && (allowed as readonly string[]).includes(value)
+      ? (value as T)
+      : undefined;
+  const str = (value: unknown): string | undefined =>
+    typeof value === "string" && value.length > 0 ? value : undefined;
+  const flag = (value: unknown): boolean | undefined => (value === true ? true : undefined);
+  const enumList = <T extends string>(value: unknown, allowed: readonly T[]): T[] | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    const kept = value.filter((v): v is T =>
+      typeof v === "string" && (allowed as readonly string[]).includes(v),
+    );
+    return kept.length ? kept : undefined;
+  };
+  const REGIONS = ["any", "main", "nav"] as const;
+
   switch (name) {
     case "get_page":
       return {
@@ -2100,7 +2179,8 @@ export function toolArgsToContentRequest(
             : undefined,
         maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
-        filter: typeof args.filter === "string" ? args.filter : undefined,
+        filter: str(args.filter),
+        exclude: str(args.exclude),
       };
     case "page_digest":
       return { op: "page_digest" };
@@ -2109,11 +2189,12 @@ export function toolArgsToContentRequest(
         op: "get_links",
         limit: typeof args.limit === "number" ? args.limit : 30,
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
-        filter: typeof args.filter === "string" ? args.filter : undefined,
-        region:
-          args.region === "main" || args.region === "nav" || args.region === "any"
-            ? args.region
-            : undefined,
+        filter: str(args.filter),
+        exclude: str(args.exclude),
+        region: pick(args.region, REGIONS),
+        unique: flag(args.unique),
+        origin: pick(args.origin, ["any", "internal", "external"] as const),
+        fields: enumList(args.fields, ["text", "href", "region"] as const),
       };
     case "click":
       if (typeof args.selector !== "string") return null;
@@ -2161,29 +2242,35 @@ export function toolArgsToContentRequest(
         limit: typeof args.limit === "number" ? args.limit : 20,
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
         context: typeof args.context === "number" ? Math.max(0, Math.floor(args.context)) : undefined,
+        clickableOnly: flag(args.clickableOnly),
+        region: pick(args.region, REGIONS),
+        exclude: str(args.exclude),
       };
     case "get_interactive":
       return {
         op: "get_interactive",
         limit: typeof args.limit === "number" ? args.limit : 80,
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
-        filter: typeof args.filter === "string" ? args.filter : undefined,
-        kind:
-          args.kind === "link" ||
-          args.kind === "button" ||
-          args.kind === "input" ||
-          args.kind === "select" ||
-          args.kind === "any"
-            ? args.kind
-            : undefined,
-        region:
-          args.region === "main" || args.region === "nav" || args.region === "any"
-            ? args.region
-            : undefined,
-        scope:
-          args.scope === "page" || args.scope === "dialog" || args.scope === "auto"
-            ? args.scope
-            : undefined,
+        filter: str(args.filter),
+        exclude: str(args.exclude),
+        kind: pick(args.kind, ["any", "link", "button", "input", "select"] as const),
+        region: pick(args.region, REGIONS),
+        state: pick(args.state, ["any", "enabled", "disabled"] as const),
+        requireLabel: flag(args.requireLabel),
+        fields: enumList(args.fields, [
+          "tag",
+          "kind",
+          "region",
+          "role",
+          "text",
+          "href",
+          "type",
+          "placeholder",
+          "name",
+          "title",
+          "disabled",
+        ] as const),
+        scope: pick(args.scope, ["auto", "page", "dialog"] as const),
       };
     case "press_key": {
       const key = args.key;
