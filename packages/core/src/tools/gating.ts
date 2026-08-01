@@ -116,7 +116,15 @@ export const TOOL_PACKS = {
     "mcp_list_tools",
     "mcp_call",
   ],
-  rag: ["rag_search", "rag_read_file", "rag_status", "list_attachments", "read_attachment"],
+  rag: [
+    "rag_search",
+    "rag_grep",
+    "rag_glob",
+    "rag_read_file",
+    "rag_status",
+    "list_attachments",
+    "read_attachment",
+  ],
   "page-ext": [
     "create_page_extension",
     "update_page_extension",

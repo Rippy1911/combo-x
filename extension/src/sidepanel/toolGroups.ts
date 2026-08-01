@@ -57,6 +57,8 @@ export const TOOL_GROUPS = {
   Data: [
     "parse_data",
     "rag_search",
+    "rag_grep",
+    "rag_glob",
     "rag_read_file",
     "rag_status",
     "list_attachments",

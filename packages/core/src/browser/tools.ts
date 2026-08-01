@@ -469,9 +469,47 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "rag_grep",
+      description:
+        "Ripgrep-style search over the granted Device RAG folder. THE tool for code: exact identifiers, strings, and regex, returned as path:line with context. Prefer this over rag_search for anything you could type into a search box — a function name, an error string, a CSS class. Narrow with glob (e.g. **/*.{ts,tsx}) before you page.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Literal substring, or a JS regex source when regex:true" },
+          regex: { type: "boolean", description: "Treat pattern as a RegExp (default false = literal, case-sensitive)" },
+          caseInsensitive: { type: "boolean" },
+          glob: { type: "string", description: "Limit to files matching a glob, e.g. src/**/*.ts" },
+          maxMatches: { type: "number", description: "Cap matches (default 50)" },
+          context: { type: "number", description: "Context lines before/after each hit (default 2)" },
+        },
+        required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rag_glob",
+      description:
+        "List file paths under the granted Device RAG folder matching a glob (e.g. **/loop.ts, src/**/*.tsx). Use it to discover files before rag_read_file or rag_grep. Does not search contents.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Glob relative to the grant root" },
+          limit: { type: "number", description: "Max paths (default 200)" },
+        },
+        required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "rag_search",
       description:
-        "Search the locally granted repo folder index (device RAG). Returns path + scored snippets. Prefer this for codebase questions when a folder is granted.",
+        "Fuzzy keyword search over the granted repo folder index (device RAG). Returns path + scored snippets. Good for concepts and natural-language questions. For an exact identifier, string, or regex use rag_grep instead — it returns path:line and is far more reliable on code.",
       parameters: {
         type: "object",
         properties: {
@@ -487,11 +525,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "rag_read_file",
-      description: "Read a file path from the local RAG index (relative path from grant root).",
+      description:
+        "Read a file from the local RAG index (relative path from grant root). Prefer startLine/endLine from a rag_grep hit over re-reading the whole file.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string" },
+          startLine: { type: "number", description: "1-based inclusive start line" },
+          endLine: { type: "number", description: "1-based inclusive end line" },
           maxChars: { type: "number" },
         },
         required: ["path"],

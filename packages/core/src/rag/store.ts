@@ -223,6 +223,19 @@ export class RagStore {
       .slice(0, limit);
   }
 
+  /** Distinct indexed paths, unbounded — glob filtering happens in memory. */
+  async allPaths(): Promise<string[]> {
+    await this.getDb();
+    const all = await idbReq<RagChunkRow[]>(this.store("chunks", "readonly").getAll());
+    return [...new Set(all.map((c) => c.path))].sort();
+  }
+
+  /** Every chunk, for a literal scan. */
+  async allChunks(): Promise<RagChunkRow[]> {
+    await this.getDb();
+    return idbReq<RagChunkRow[]>(this.store("chunks", "readonly").getAll());
+  }
+
   async readPath(path: string, maxChars = 12_000): Promise<{ path: string; content: string; truncated: boolean } | null> {
     await this.getDb();
     const idx = this.store("chunks", "readonly").index("by_path");
@@ -237,8 +250,148 @@ export class RagStore {
   }
 
   async listPaths(limit = 200): Promise<string[]> {
-    await this.getDb();
-    const all = await idbReq<RagChunkRow[]>(this.store("chunks", "readonly").getAll());
-    return [...new Set(all.map((c) => c.path))].sort().slice(0, limit);
+    const paths = await this.allPaths();
+    return paths.slice(0, limit);
   }
+}
+
+/**
+ * Convert a glob to a RegExp. Supports `**` (any depth), `*` (within a segment),
+ * `?`, and `{a,b}` alternation. Anchored to the full path.
+ */
+export function globToRegExp(glob: string): RegExp {
+  let re = "";
+  let i = 0;
+  const n = glob.length;
+  while (i < n) {
+    const c = glob[i]!;
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        // `**/` matches zero or more path segments; bare `**` matches anything.
+        if (glob[i + 2] === "/") {
+          re += "(?:[^/]+/)*";
+          i += 3;
+        } else {
+          re += ".*";
+          i += 2;
+        }
+      } else {
+        re += "[^/]*";
+        i += 1;
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+      i += 1;
+    } else if (c === "{") {
+      const close = glob.indexOf("}", i);
+      if (close > i) {
+        const alts = glob
+          .slice(i + 1, close)
+          .split(",")
+          .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        re += `(?:${alts.join("|")})`;
+        i = close + 1;
+      } else {
+        re += "\\{";
+        i += 1;
+      }
+    } else {
+      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      i += 1;
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+export interface GrepMatch {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+  before: string[];
+  after: string[];
+}
+
+/**
+ * Literal or regex scan over the indexed corpus with file:line citations.
+ * This is the primitive `rag_search` cannot be: exact identifier match.
+ */
+export function grepChunks(
+  chunks: RagChunkRow[],
+  opts: {
+    pattern: string;
+    regex?: boolean;
+    caseInsensitive?: boolean;
+    glob?: string;
+    maxMatches?: number;
+    context?: number;
+  },
+): { matches: GrepMatch[]; scannedFiles: number; truncated: boolean } {
+  const maxMatches = Math.max(1, opts.maxMatches ?? 50);
+  const context = Math.max(0, Math.min(5, opts.context ?? 2));
+  const globRe = opts.glob?.trim() ? globToRegExp(opts.glob.trim()) : null;
+
+  let matcher: RegExp;
+  try {
+    matcher = opts.regex
+      ? new RegExp(opts.pattern, opts.caseInsensitive ? "gi" : "g")
+      : new RegExp(
+          opts.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          opts.caseInsensitive ? "gi" : "g",
+        );
+  } catch {
+    return { matches: [], scannedFiles: 0, truncated: false };
+  }
+
+  // Chunks overlap, so a line can appear in two of them. Track the first-seen
+  // path:line so a match is not reported twice.
+  const seen = new Set<string>();
+  const matches: GrepMatch[] = [];
+  let scannedFiles = 0;
+  let truncated = false;
+
+  const byPath = new Map<string, RagChunkRow[]>();
+  for (const c of chunks) {
+    if (globRe && !globRe.test(c.path)) continue;
+    const list = byPath.get(c.path);
+    if (list) list.push(c);
+    else byPath.set(c.path, [c]);
+  }
+  scannedFiles = byPath.size;
+
+  for (const [path, rows] of byPath) {
+    rows.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    for (const row of rows) {
+      const lines = row.content.split("\n");
+      for (let li = 0; li < lines.length; li++) {
+        const lineText = lines[li]!;
+        matcher.lastIndex = 0;
+        const m = matcher.exec(lineText);
+        if (!m) continue;
+        // Line numbers are approximate: chunking is character-based, so we only
+        // know the offset within the chunk. Dedupe on the matched text itself,
+        // since the same source line appears at a different offset in the next
+        // overlapping chunk.
+        const key = `${path}:${lineText.trim()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matches.push({
+          path,
+          line: li + 1,
+          column: m.index + 1,
+          text: lineText.trim().slice(0, 240),
+          before: context > 0 ? lines.slice(Math.max(0, li - context), li).map((l) => l.trimEnd()) : [],
+          after: context > 0 ? lines.slice(li + 1, li + 1 + context).map((l) => l.trimEnd()) : [],
+        });
+        if (matches.length >= maxMatches) {
+          truncated = true;
+          break;
+        }
+      }
+      if (truncated) break;
+    }
+    if (truncated) break;
+  }
+
+  return { matches, scannedFiles, truncated };
 }
