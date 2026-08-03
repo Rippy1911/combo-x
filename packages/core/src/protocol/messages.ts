@@ -15,6 +15,7 @@ export const BrowserToolNameSchema = z.enum([
   "wait",
   "find_text",
   "get_interactive",
+  "list_form_fields",
   "press_key",
   "click_index",
   "type_index",
@@ -122,6 +123,8 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     filter: z.string().max(200).optional(),
     /** Drop lines containing this substring — strips repeated boilerplate. */
     exclude: z.string().max(200).optional(),
+    /** CSS selector — prune matching subtrees before extraction (chat sidebars, cookie walls). */
+    excludeSelector: z.string().max(300).optional(),
   }),
   z.object({ op: z.literal("page_digest") }),
   z.object({
@@ -176,6 +179,8 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     clickableOnly: z.boolean().optional(),
     region: z.enum(["any", "main", "nav"]).optional(),
     exclude: z.string().max(200).optional(),
+    /** CSS selector — prune matching subtrees before scanning (chat sidebars). */
+    excludeSelector: z.string().max(300).optional(),
   }),
   z.object({
     op: z.literal("get_interactive"),
@@ -199,6 +204,25 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
       .array(z.enum(["tag", "kind", "region", "role", "text", "href", "type", "placeholder", "name", "title", "disabled"]))
       .max(11)
       .optional(),
+    /** CSS selector — prune matching subtrees before scanning (chat sidebars). */
+    excludeSelector: z.string().max(300).optional(),
+    /**
+     * Row-scoping: keep only controls inside a row container that matches
+     * `selector` and/or contains `text`. Indices stay absolute (click_index-safe).
+     */
+    within: z
+      .object({
+        selector: z.string().max(300).optional(),
+        text: z.string().max(200).optional(),
+      })
+      .optional(),
+  }),
+  z.object({
+    op: z.literal("list_form_fields"),
+    limit: z.number().int().positive().max(200).optional(),
+    region: z.enum(["any", "main", "nav"]).optional(),
+    /** CSS selector — prune matching subtrees before scanning. */
+    excludeSelector: z.string().max(300).optional(),
   }),
   z.object({
     op: z.literal("press_key"),

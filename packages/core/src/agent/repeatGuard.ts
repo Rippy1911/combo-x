@@ -25,6 +25,31 @@ const POLLING_TOOLS = new Set([
   "list_tasks",
 ]);
 
+/**
+ * Read-only tools: they observe page state without changing it. A long streak
+ * of these with no click/type/navigation in between is the semantic version of
+ * the identical-call loop (observed 2026-08-03 on app.base44.com: ~12 varied
+ * read calls hunting for a field that did not exist, zero mutations — the
+ * identical-call guard never fired because args and results kept changing).
+ */
+const OBSERVATION_TOOLS = new Set([
+  "get_page",
+  "page_digest",
+  "get_interactive",
+  "find_text",
+  "query_all",
+  "extract",
+  "scrape_tables",
+  "get_links",
+  "scroll",
+  "screenshot",
+  "page_metrics",
+  "element_rect",
+  "list_form_fields",
+  "list_tabs",
+  "wait",
+]);
+
 export type RepeatVerdict =
   | { kind: "ok" }
   | { kind: "warn"; repeats: number; note: string }
@@ -106,6 +131,16 @@ export class RepeatGuard {
   private static readonly WARN_AT_REPEATS = 1;
   private static readonly BLOCK_AT_REPEATS = 1;
 
+  /**
+   * Semantic stuck guard: consecutive observation-only calls without an
+   * intervening mutation. `wait` inside the streak marks deliberate polling —
+   * warned but never blocked.
+   */
+  private observationStreak = 0;
+  private waitInStreak = false;
+  private static readonly STUCK_WARN_AT = 6;
+  private static readonly STUCK_BLOCK_AT = 10;
+
   private key(name: string, args: Record<string, unknown>): string {
     return `${name}#${canonicalize(args)}`;
   }
@@ -115,6 +150,24 @@ export class RepeatGuard {
    * the same result twice — the tool is then not run at all.
    */
   check(name: string, args: Record<string, unknown>): RepeatVerdict {
+    if (!OBSERVATION_TOOLS.has(name)) {
+      this.observationStreak = 0;
+      this.waitInStreak = false;
+    } else if (this.observationStreak >= RepeatGuard.STUCK_BLOCK_AT && !this.waitInStreak) {
+      return {
+        kind: "block",
+        repeats: this.observationStreak,
+        result: {
+          ok: false,
+          error: "stuck_loop_blocked",
+          observations: this.observationStreak,
+          hint:
+            `Refused: ${this.observationStreak} consecutive read-only calls with no click/type/navigation. ` +
+            `The page does not change by reading it again. Mutate (click_index/type_index), map the form with ` +
+            `list_form_fields, cut noise with within/excludeSelector, or report BLOCKED with what you tried.`,
+        },
+      };
+    }
     const entry = this.seen.get(this.key(name, args));
     if (!entry || entry.repeats < RepeatGuard.BLOCK_AT_REPEATS) return { kind: "ok" };
     const calls = entry.repeats + 1;
@@ -144,23 +197,48 @@ export class RepeatGuard {
     const prev = this.seen.get(key);
 
     // A changed result means the retry was productive — reset the streak.
+    let pairVerdict: RepeatVerdict = { kind: "ok" };
     if (!prev || prev.fingerprint !== fp) {
       this.seen.set(key, { repeats: 0, fingerprint: fp });
-      return { kind: "ok" };
+    } else {
+      const repeats = prev.repeats + 1;
+      this.seen.set(key, { repeats, fingerprint: fp });
+      if (repeats >= RepeatGuard.WARN_AT_REPEATS) {
+        pairVerdict = {
+          kind: "warn",
+          repeats,
+          note:
+            `Repeated call: ${name} with these exact arguments returned an identical result ${repeats + 1}× ` +
+            `— you learned nothing new. ${alternativesFor(name, args)}` +
+            (POLLING_TOOLS.has(name) ? " If you are waiting for the page to change, wait() first." : "") +
+            ` One more identical call will be refused.`,
+        };
+      }
     }
 
-    const repeats = prev.repeats + 1;
-    this.seen.set(key, { repeats, fingerprint: fp });
-    if (repeats < RepeatGuard.WARN_AT_REPEATS) return { kind: "ok" };
-    return {
-      kind: "warn",
-      repeats,
-      note:
-        `Repeated call: ${name} with these exact arguments returned an identical result ${repeats + 1}× ` +
-        `— you learned nothing new. ${alternativesFor(name, args)}` +
-        (POLLING_TOOLS.has(name) ? " If you are waiting for the page to change, wait() first." : "") +
-        ` One more identical call will be refused.`,
-    };
+    // Semantic stuck tracking (see OBSERVATION_TOOLS above).
+    if (OBSERVATION_TOOLS.has(name)) {
+      this.observationStreak += 1;
+      if (name === "wait") this.waitInStreak = true;
+    } else {
+      this.observationStreak = 0;
+      this.waitInStreak = false;
+    }
+
+    if (pairVerdict.kind === "warn") return pairVerdict;
+    if (OBSERVATION_TOOLS.has(name) && this.observationStreak >= RepeatGuard.STUCK_WARN_AT) {
+      return {
+        kind: "warn",
+        repeats: this.observationStreak,
+        note:
+          `${this.observationStreak} read-only observations in a row without a click/type/navigation. ` +
+          `If you are hunting for something that is not there, stop reading variants and report BLOCKED with ` +
+          `what you tried. To fill a form, list_form_fields maps it in one call; for noise, use ` +
+          `within/excludeSelector. If you are deliberately waiting for the page to change, keep using ` +
+          `wait() between reads (that never blocks).`,
+      };
+    }
+    return { kind: "ok" };
   }
 
   /** Attach a repeat nudge to an object result without hiding its payload. */

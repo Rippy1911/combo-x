@@ -3,9 +3,11 @@
  * run: the same navigate repeated four times against a silent redirect, and a
  * volatile task list sitting in front of the cached tool catalog.
  */
+import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, OpenRouterClient } from "../llm/openrouter.js";
 import { MemoryStore } from "../memory/store.js";
+import { TaskStore } from "../tasks/store.js";
 import type { BrowserBridge } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -146,6 +148,43 @@ describe("repeat-call guard inside the agent loop", () => {
       },
     });
     expect(navResult?.redirected).toBeUndefined();
+  });
+
+  it("stop-checkpoint: an abort surfaces open tasks in the done message", async () => {
+    // The 2026-08-03 Base44 run was stopped mid-grind and lost all progress
+    // state. Deterministic abort: signal is already aborted before the loop.
+    const sessionId = `s_${crypto.randomUUID()}`;
+    const tasks = new TaskStore(`t_${crypto.randomUUID()}`);
+    await tasks.put({
+      id: crypto.randomUUID(),
+      title: "Fill 46 meta rows",
+      status: "doing",
+      sessionId,
+    });
+    const agent = new AgentLoop(
+      mockLlm([{ content: "unused" }]),
+      stubBrowser(),
+      new MemoryStore({ dbName: `g_${crypto.randomUUID()}` }),
+    );
+
+    const controller = new AbortController();
+    controller.abort();
+    const events: Array<{ type: string; message?: string }> = [];
+    const result = await agent.run({
+      model: "mock",
+      approvalMode: "auto_all",
+      userMessage: "go",
+      sessionId,
+      tasks,
+      signal: controller.signal,
+      onEvent: (e) => events.push(e as { type: string; message?: string }),
+    });
+
+    expect(result.aborted).toBe(true);
+    const done = events.find((e) => e.type === "done");
+    expect(String(done?.message)).toContain("Stopped mid-run");
+    expect(String(done?.message)).toContain("Fill 46 meta rows");
+    expect(events.some((e) => e.type === "status" && /open tasks/.test(e.message ?? ""))).toBe(true);
   });
 });
 

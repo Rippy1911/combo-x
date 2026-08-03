@@ -8,7 +8,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab's text. Default mode=main strips nav/header/footer chrome (on app consoles the chrome is most of the page). Reply carries totalChars/nextOffset/hasMore — when hasMore, call again with offset:<nextOffset> instead of giving up. filter:\"word\" keeps only matching lines (grep a long doc). mode=full includes chrome; mode=structure = page_digest; mode=snippet = short main-only peek.",
+        "Read the active tab's text. Default mode=main strips nav/header/footer chrome (on app consoles the chrome is most of the page). Reply carries totalChars/nextOffset/hasMore — when hasMore, call again with offset:<nextOffset> instead of giving up. filter:\"word\" keeps only matching lines (grep a long doc). mode=full includes chrome; mode=structure = page_digest; mode=snippet = short main-only peek. excludeSelector:\"css\" prunes whole subtrees before extraction — the fix for a chat sidebar flooding the text.",
       parameters: {
         type: "object",
         properties: {
@@ -20,6 +20,11 @@ export const AGENT_TOOLS: ToolDefinition[] = [
             type: "string",
             description:
               "Drop lines containing this substring. Use it to strip boilerplate that repeats on every read (cookie banners, legal footers, icon-font ligatures).",
+          },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector — prune matching subtrees before extraction (chat sidebars, cookie walls). Invalid selectors are ignored.",
           },
         },
         additionalProperties: false,
@@ -73,7 +78,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping — describe the control you want and let the filters do the work: filter:\"Save\" matches label/aria/name/placeholder/href, exclude drops noise, kind narrows to link|button|input|select, region:\"main\" drops nav/header/footer, state:\"enabled\" hides controls that cannot be clicked yet, requireLabel:true hides bare icon buttons, and fields:[\"text\"] returns only the keys you will read. item.i is an absolute handle into the full scan, so filtering, projecting and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. item.disabled marks dead controls: clicking one wastes a turn. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
+        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping — describe the control you want and let the filters do the work: filter:\"Save\" matches label/aria/name/placeholder/href, exclude drops noise, kind narrows to link|button|input|select, region:\"main\" drops nav/header/footer, state:\"enabled\" hides controls that cannot be clicked yet, requireLabel:true hides bare icon buttons, and fields:[\"text\"] returns only the keys you will read. within:{text:\"row label\"} keeps only controls inside the matching row — the answer for unlabeled per-row icon buttons (pencil/edit in tables). item.i is an absolute handle into the full scan, so filtering, projecting and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. item.disabled marks dead controls: clicking one wastes a turn. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
         properties: {
@@ -122,6 +127,43 @@ export const AGENT_TOOLS: ToolDefinition[] = [
               "Return only these keys per control (i is always included). fields:[\"text\"] makes a 100-control listing tiny.",
           },
           scope: { type: "string", enum: ["auto", "page", "dialog"] },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector — prune matching subtrees before scanning (chat sidebars full of old messages).",
+          },
+          within: {
+            type: "object",
+            properties: {
+              selector: { type: "string", description: "CSS selector of the row/container" },
+              text: {
+                type: "string",
+                description: "Keep controls inside the row/container containing this text (case-insensitive)",
+              },
+            },
+            description:
+              "Row-scoping: within:{text:\"FaqPage\"} keeps only controls in that row — the fix for unlabeled per-row icon buttons. Indices stay absolute (click_index-safe).",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_form_fields",
+      description:
+        "One-call form inventory: every fillable control (input/textarea/select/contenteditable) with resolved label, type, region, hasValue, and the i handle for type_index where mappable. Answers 'is there a field for X?' in one call — use it before hunting inputs with get_interactive/query_all. Passwords never return a value (hasValue only).",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number" },
+          region: { type: "string", enum: ["any", "main", "nav"] },
+          excludeSelector: {
+            type: "string",
+            description: "CSS selector — prune matching subtrees before scanning",
+          },
         },
         additionalProperties: false,
       },
@@ -310,6 +352,11 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           },
           region: { type: "string", enum: ["any", "main", "nav"] },
           exclude: { type: "string", description: "Drop hits whose text contains this substring" },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector — prune matching subtrees before searching (e.g. a chat column that keeps matching your text).",
+          },
         },
         required: ["text"],
         additionalProperties: false,
@@ -2222,6 +2269,7 @@ export function toolArgsToContentRequest(
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
         filter: str(args.filter),
         exclude: str(args.exclude),
+        excludeSelector: str(args.excludeSelector),
       };
     case "page_digest":
       return { op: "page_digest" };
@@ -2286,6 +2334,7 @@ export function toolArgsToContentRequest(
         clickableOnly: flag(args.clickableOnly),
         region: pick(args.region, REGIONS),
         exclude: str(args.exclude),
+        excludeSelector: str(args.excludeSelector),
       };
     case "get_interactive":
       return {
@@ -2312,6 +2361,22 @@ export function toolArgsToContentRequest(
           "disabled",
         ] as const),
         scope: pick(args.scope, ["auto", "page", "dialog"] as const),
+        excludeSelector: str(args.excludeSelector),
+        within: (() => {
+          const w = args.within;
+          if (!w || typeof w !== "object" || Array.isArray(w)) return undefined;
+          const o = w as Record<string, unknown>;
+          const selector = str(o.selector);
+          const text = str(o.text);
+          return selector || text ? { selector, text } : undefined;
+        })(),
+      };
+    case "list_form_fields":
+      return {
+        op: "list_form_fields",
+        limit: typeof args.limit === "number" ? args.limit : 100,
+        region: pick(args.region, REGIONS),
+        excludeSelector: str(args.excludeSelector),
       };
     case "press_key": {
       const key = args.key;

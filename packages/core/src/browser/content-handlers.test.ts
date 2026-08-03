@@ -462,3 +462,139 @@ describe("handleContentRequest", () => {
     expect(data.seo.lang).toBe("en");
   });
 });
+
+/**
+ * The 2026-08-03 Base44 editor failure: a chat column flooded every read, and
+ * the per-row edit pencil was an unlabeled icon button nobody could address.
+ * excludeSelector prunes the chat subtree; within scopes to the row.
+ */
+describe("excludeSelector / within / list_form_fields", () => {
+  // Faithful to app.base44.com: the chat is a plain <div>, not an <aside>, so
+  // neither CHROME_SEL nor MAIN_SEL separates it from the workspace.
+  const FIXTURE = `
+    <div id="chat">
+      <p>chat message mentioning FaqPage and Description settings</p>
+      <button>Open chat</button>
+    </div>
+    <div id="workspace">
+      <input id="search" placeholder="Search pages..." />
+      <table id="meta">
+        <tr><td>FaqPage</td><td>Faq Page | HealthTree</td><td><button class="edit"></button></td></tr>
+        <tr><td>Cart</td><td>Cart | HealthTree</td><td><button class="edit"></button></td></tr>
+        <tr><td>Blog</td><td>Blog | HealthTree</td><td><button class="edit"></button></td></tr>
+      </table>
+      <form>
+        <label for="title">Title</label><input id="title" name="title" />
+        <label>Description <textarea name="desc"></textarea></label>
+        <input type="password" name="secret" value="hunter2" aria-label="API secret" />
+        <div contenteditable="true" aria-label="Body"></div>
+      </form>
+    </div>`;
+
+  it("find_text: chat column pollutes matches until excludeSelector prunes it", () => {
+    document.body.innerHTML = FIXTURE;
+    const polluted = handleContentRequest({ op: "find_text", text: "FaqPage" }, document);
+    const pollutedCount = (polluted.data as { count: number }).count;
+    expect(pollutedCount).toBeGreaterThanOrEqual(2); // chat <p> + table cell
+
+    const pruned = handleContentRequest(
+      { op: "find_text", text: "FaqPage", excludeSelector: "#chat" },
+      document,
+    );
+    const data = pruned.data as { count: number; matches: Array<{ text: string }> };
+    expect(data.count).toBe(1);
+    expect(data.matches[0]!.text).not.toMatch(/chat message/);
+  });
+
+  it("get_page: excludeSelector drops the chat text and says how much it pruned", () => {
+    document.body.innerHTML = FIXTURE;
+    const res = handleContentRequest({ op: "get_page", excludeSelector: "#chat" }, document);
+    const data = res.data as { text: string; hint?: string };
+    expect(data.text).not.toMatch(/chat message/);
+    expect(data.text).toContain("FaqPage");
+    expect(data.hint ?? "").toMatch(/Pruned \d+ chars matching excludeSelector/);
+  });
+
+  it("get_interactive within:{text} returns exactly the matching row's pencil, index stays absolute", () => {
+    document.body.innerHTML = FIXTURE;
+    const all = handleContentRequest({ op: "get_interactive", kind: "button" }, document);
+    const allItems = (all.data as { items: Array<{ i: number; text: string }> }).items;
+    // DOM order: Open chat, FaqPage pencil, Cart pencil, Blog pencil,
+    // contenteditable div (kind "button" where isContentEditable is unimplemented).
+    expect(allItems.length).toBe(5);
+
+    const row = handleContentRequest(
+      { op: "get_interactive", kind: "button", within: { text: "Cart" } },
+      document,
+    );
+    const data = row.data as { items: Array<{ i: number; text: string }>; hint?: string };
+    expect(data.items.length).toBe(1);
+    expect(data.items[0]!.i).toBe(allItems[2]!.i); // Cart pencil, absolute index
+    expect(data.hint ?? "").toMatch(/within scoping: 1 control/);
+
+    const blog = handleContentRequest(
+      { op: "get_interactive", kind: "button", within: { text: "Blog" } },
+      document,
+    );
+    expect((blog.data as { items: Array<{ i: number }> }).items[0]!.i).toBe(allItems[3]!.i);
+  });
+
+  it("get_interactive within:{selector} scopes by CSS, and reports empty matches honestly", () => {
+    document.body.innerHTML = FIXTURE;
+    const bySel = handleContentRequest(
+      { op: "get_interactive", kind: "button", within: { selector: "#meta tr:nth-child(3)" } },
+      document,
+    );
+    expect((bySel.data as { items: unknown[] }).items.length).toBe(1);
+
+    const none = handleContentRequest(
+      { op: "get_interactive", kind: "button", within: { text: "ZZZ-no-such-page" } },
+      document,
+    );
+    const data = none.data as { items: unknown[]; hint?: string };
+    expect(data.items.length).toBe(0);
+    expect(data.hint ?? "").toMatch(/within matched no controls/);
+  });
+
+  it("an invalid excludeSelector is a no-op, never a throw", () => {
+    document.body.innerHTML = FIXTURE;
+    const res = handleContentRequest(
+      { op: "find_text", text: "FaqPage", excludeSelector: "[[[" },
+      document,
+    );
+    expect(res.ok).toBe(true);
+    expect((res.data as { count: number }).count).toBeGreaterThanOrEqual(2);
+  });
+
+  it("list_form_fields resolves every labeling style and never leaks a password value", () => {
+    document.body.innerHTML = FIXTURE;
+    const res = handleContentRequest({ op: "list_form_fields" }, document);
+    expect(res.ok).toBe(true);
+    const data = res.data as {
+      count: number;
+      fields: Array<Record<string, unknown>>;
+      hint?: string;
+    };
+    expect(data.count).toBe(5);
+
+    const byName = (name: string) => data.fields.find((f) => f.name === name);
+    const search = data.fields.find((f) => f.placeholder === "Search pages...")!;
+
+    expect(search.label).toBe("Search pages...");
+    expect(typeof search.i).toBe("number"); // type_index-ready
+
+    expect(byName("title")!.label).toBe("Title"); // label[for]
+    expect(byName("desc")!.label).toBe("Description"); // wrapping <label>
+
+    const secret = byName("secret")!;
+    expect(secret.label).toBe("API secret"); // aria-label
+    expect(secret.type).toBe("password");
+    expect(secret.hasValue).toBe(true);
+    expect("value" in secret).toBe(false); // never leaks
+
+    const body = data.fields.find((f) => f.label === "Body")!;
+    expect(body.type).toBe("richtext");
+    expect(typeof body.i).toBe("number");
+    expect(data.hint ?? "").toMatch(/type_index-ready/);
+  });
+});

@@ -931,6 +931,31 @@ export class AgentLoop {
         }
       }
       runCtx.ephemeralTabIds = [];
+
+      // Stop-checkpoint: an abort must not silently lose task progress — the
+      // operator sees what was in flight and the agent can resume via list_tasks.
+      if (outcome.aborted && runCtx.tasks && runCtx.sessionId) {
+        try {
+          const open = (await runCtx.tasks.list({ sessionId: runCtx.sessionId })).filter(
+            (t) => t.status === "doing" || t.status === "todo" || t.status === "blocked",
+          );
+          if (open.length > 0) {
+            const doing = open.filter((t) => t.status === "doing").map((t) => t.title);
+            const rest = open.length - doing.length;
+            const note =
+              `Stopped mid-run — open tasks (${open.length}): ` +
+              [...doing.map((t) => `doing: ${t}`), ...(rest > 0 ? [`+${rest} todo/blocked`] : [])].join(
+                "; ",
+              ) +
+              `. Call list_tasks to resume.`;
+            emit({ type: "status", message: note });
+            outcome.doneMessage = `${outcome.doneMessage ?? outcome.finalText} · ${note}`;
+          }
+        } catch {
+          /* checkpoint is best-effort */
+        }
+      }
+
       emit({
         type: "done",
         message: outcome.doneMessage ?? outcome.finalText,

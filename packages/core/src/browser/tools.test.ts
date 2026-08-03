@@ -10,6 +10,7 @@ describe("tool helpers", () => {
         "get_page",
         "page_digest",
         "get_interactive",
+        "list_form_fields",
         "click_index",
         "type_index",
         "query_all",
