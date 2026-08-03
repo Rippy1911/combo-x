@@ -39,6 +39,27 @@ function shape(result: unknown, cap = 4_000): Shaped {
 }
 
 describe("truncateToolResultForLlm", () => {
+  it("preserves _repeat and dialogOpened when falling back to blob truncate", () => {
+    const out = JSON.parse(
+      truncateToolResultForLlm(
+        {
+          ok: true,
+          _repeat: "ACT NOW — read-only turns",
+          data: {
+            dialogOpened: false,
+            effect: "no_dialog",
+            text: "x".repeat(20_000),
+          },
+        },
+        800,
+      ),
+    ) as Record<string, unknown>;
+    expect(out.truncated).toBe(true);
+    expect(out._repeat).toMatch(/ACT NOW/);
+    expect(out.dialogOpened).toBe(false);
+    expect(out.effect).toBe("no_dialog");
+  });
+
   it("passes small results through unchanged", () => {
     const out = truncateToolResultForLlm({ ok: true, value: 1 }, 4_000);
     expect(JSON.parse(out)).toEqual({ ok: true, value: 1 });

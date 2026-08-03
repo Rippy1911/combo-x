@@ -152,7 +152,7 @@ When the limit is hit, the assistant message explains how to say "continue" or n
 
 ### Worker model
 
-Cheap secondary LLM (`workerModel`, default `google/gemini-3.5-flash` from `packages/core/src/models.ts`) handles:
+Cheap secondary LLM (`workerModel`, default `deepseek/deepseek-v4-flash-0731` from `packages/core/src/models.ts`) handles parse/approval only — the orchestrator runs every browser tool turn itself:
 
 - `parse_data` — structured JSON extraction from page text
 - `scrape_catalog` — per-page parse inside the catalog loop

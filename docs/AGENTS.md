@@ -153,7 +153,7 @@ See [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md#tool-control--auto-agent-creation
 | Role | Default constant | File |
 |------|------------------|------|
 | Orchestrator | `x-ai/grok-4.5` | `packages/core/src/models.ts` (`DEFAULT_MODEL`) |
-| Worker | `google/gemini-3.5-flash` | `DEFAULT_WORKER_MODEL` |
+| Worker | `deepseek/deepseek-v4-flash-0731` | `DEFAULT_WORKER_MODEL` (parse_data only — not a browser executor) |
 
 `normalizeModelId()` migrates legacy bad ids. Presets in `MODEL_PRESETS` for UI dropdowns.
 

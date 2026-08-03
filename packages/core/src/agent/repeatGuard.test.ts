@@ -93,77 +93,72 @@ describe("RepeatGuard", () => {
 });
 
 /**
- * Semantic stuck guard — the 2026-08-03 Base44 editor run made ~12 varied
- * read-only calls with zero mutations; the identical-call guard never fired
- * because args and results kept changing. Distinct args/results per call.
+ * Semantic stuck guard — counts observation *batches* (model turns), not each
+ * parallel tool. Field case 2026-08-03: batching 4 reads in one turn used to
+ * trip ACT NOW mid-batch and fight DEFAULT_SYSTEM advice.
  */
-describe("RepeatGuard stuck-loop guard", () => {
-  const read = (g: RepeatGuard, n: number, tool = "get_interactive") => {
-    for (let i = 0; i < n; i++) {
+describe("RepeatGuard stuck-loop guard (batch-aware)", () => {
+  const obsBatch = (g: RepeatGuard, tools: string[]) => {
+    for (const [i, tool] of tools.entries()) {
       g.check(tool, { round: i });
       g.record(tool, { round: i }, { ok: true, items: [i] });
     }
+    return g.finalizeObservationBatch(tools);
   };
 
-  it("warns with a directive on the 4th consecutive read-only call (varied args)", () => {
-    // 2026-08-03: operators kill a recon-looping agent by turn 5 — the warn
-    // must land before that, and read like an order, not a suggestion.
+  it("one parallel batch of many reads counts as a single turn (no ACT NOW)", () => {
     const g = new RepeatGuard();
-    let last: ReturnType<RepeatGuard["record"]> = { kind: "ok" };
-    for (let i = 0; i < 4; i++) {
-      g.check("get_interactive", { round: i });
-      last = g.record("get_interactive", { round: i }, { ok: true, items: [i] });
-    }
-    expect(last.kind).toBe("warn");
-    if (last.kind === "warn") expect(last.note).toMatch(/ACT NOW/);
-  });
-
-  it("a mutation resets the observation streak", () => {
-    const g = new RepeatGuard();
-    read(g, 3); // streak 3
-    g.check("click_index", { index: 3 });
-    g.record("click_index", { index: 3 }, { ok: true }); // reset
-    read(g, 3); // streak 3 again — still under the directive threshold
-    expect(g.check("get_page", {}).kind).toBe("ok");
-  });
-
-  it("blocks the 11th consecutive read-only call when no wait() was used", () => {
-    const g = new RepeatGuard();
-    read(g, 10);
-    const verdict = g.check("find_text", { text: "x" });
-    expect(verdict.kind).toBe("block");
-    if (verdict.kind === "block") {
-      expect(verdict.result.error).toBe("stuck_loop_blocked");
-      expect(String(verdict.result.hint)).toMatch(/list_form_fields|BLOCKED/);
-    }
-  });
-
-  it("the block resets the streak, so recovery reads (list_tabs) are allowed", () => {
-    // Field case 2026-08-03: the active tab changed mid-run; the agent's
-    // recovery move (list_tabs) is itself read-only and must not stay refused.
-    const g = new RepeatGuard();
-    read(g, 10);
-    expect(g.check("find_text", { text: "x" }).kind).toBe("block");
-    expect(g.check("list_tabs", {}).kind).toBe("ok");
-    const verdict = g.record("list_tabs", {}, { ok: true, tabs: [] });
+    const tools = ["get_interactive", "find_text", "page_digest", "list_form_fields"];
+    const verdict = obsBatch(g, tools);
     expect(verdict.kind).toBe("ok");
   });
 
-  it("wait() marks deliberate polling: warns but never blocks", () => {
+  it("warns with ACT NOW on the 3rd consecutive observation-only turn", () => {
     const g = new RepeatGuard();
-    let warned = false;
-    for (let i = 0; i < 12; i++) {
-      g.check("wait", { ms: 1000 + i });
-      if (g.record("wait", { ms: 1000 + i }, { ok: true, data: { waitedMs: 1000 + i } }).kind === "warn") {
-        warned = true;
-      }
-      g.check("get_page", { round: i });
-      if (g.record("get_page", { round: i }, { ok: true, text: `state ${i}` }).kind === "warn") {
-        warned = true;
-      }
+    expect(obsBatch(g, ["get_interactive"]).kind).toBe("ok");
+    expect(obsBatch(g, ["find_text", "page_digest"]).kind).toBe("ok");
+    const third = obsBatch(g, ["get_page"]);
+    expect(third.kind).toBe("warn");
+    if (third.kind === "warn") {
+      expect(third.note).toMatch(/ACT NOW/);
+      expect(third.note).toMatch(/read-only turns/);
     }
-    expect(warned).toBe(true);
-    expect(g.check("get_page", {}).kind).not.toBe("block");
+  });
+
+  it("a mutation batch resets the observation streak", () => {
+    const g = new RepeatGuard();
+    obsBatch(g, ["get_interactive"]);
+    obsBatch(g, ["find_text"]);
+    // click_index is not an observation tool — batch resets
+    g.check("click_index", { index: 3 });
+    g.record("click_index", { index: 3 }, { ok: true });
+    expect(g.finalizeObservationBatch(["click_index"]).kind).toBe("ok");
+    // two more obs turns — still under warn@3
+    expect(obsBatch(g, ["get_page"]).kind).toBe("ok");
+    expect(obsBatch(g, ["get_interactive"]).kind).toBe("ok");
+    expect(g.check("get_page", {}).kind).toBe("ok");
+  });
+
+  it("never hard-blocks on observation streak (paging / list compile stays allowed)", () => {
+    // 2026-08-03: stuck_loop_blocked mid get_page offset paging felt random — removed.
+    const g = new RepeatGuard();
+    for (let i = 0; i < 12; i++) {
+      g.check("get_page", { offset: i * 500 });
+      g.record("get_page", { offset: i * 500 }, { ok: true, text: `slice ${i}` });
+      g.finalizeObservationBatch(["get_page"]);
+    }
+    expect(g.check("get_page", { offset: 6000 }).kind).toBe("ok");
+  });
+
+  it("wait()-only batches do not inflate the ACT NOW streak", () => {
+    const g = new RepeatGuard();
+    for (let i = 0; i < 5; i++) {
+      g.check("wait", { ms: 1000 + i });
+      g.record("wait", { ms: 1000 + i }, { ok: true });
+      expect(g.finalizeObservationBatch(["wait"]).kind).toBe("ok");
+    }
+    // First real observation batch after waits still starts fresh
+    expect(obsBatch(g, ["get_page"]).kind).toBe("ok");
   });
 
   it("identical-call blocking still works alongside the streak guard", () => {

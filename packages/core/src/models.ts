@@ -4,8 +4,13 @@ import { resolveProvider } from "./llm/providers.js";
 
 export const DEFAULT_MODEL = "x-ai/grok-4.5";
 
-/** Cheap worker model for parse_data / structured extract. */
-export const DEFAULT_WORKER_MODEL = "google/gemini-3.5-flash";
+/**
+ * Cheap worker for parse_data / auto-approval only — NOT a browser "executor".
+ * The orchestrator runs every tool-calling turn itself; worker never clicks.
+ * Default aligned with DeepSeek Flash (prompt-cache friendly) so Settings that
+ * only change the orch model don't silently keep a second-provider hop.
+ */
+export const DEFAULT_WORKER_MODEL = "deepseek/deepseek-v4-flash-0731";
 
 /** Legacy bad default from Combo-X v0.1 — auto-migrate. */
 export const LEGACY_BAD_MODELS = new Set(["x-ai/grok-4.5-fast", "openrouter/x-ai/grok-4.5-fast"]);

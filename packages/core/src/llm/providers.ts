@@ -35,7 +35,7 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     openRouterServerTools: true,
     hint: "Default — many models + built-in web search",
     defaultOrchestratorModel: "x-ai/grok-4.5",
-    defaultWorkerModel: "google/gemini-3.5-flash",
+    defaultWorkerModel: "deepseek/deepseek-v4-flash-0731",
     defaultVisionModel: "x-ai/grok-4.5",
   },
   {

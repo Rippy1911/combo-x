@@ -10,3 +10,13 @@ describe("DEFAULT_SYSTEM Voice mode speech rule", () => {
     expect(DEFAULT_SYSTEM).toMatch(/save_rest_connector/);
   });
 });
+
+describe("DEFAULT_SYSTEM verify-before-claim (ns-agent discipline)", () => {
+  it("forbids claiming done without tool proof and documents runtime gates", () => {
+    expect(DEFAULT_SYSTEM).toMatch(/VERIFY BEFORE CLAIM/);
+    expect(DEFAULT_SYSTEM).toMatch(/dialogOpened:false/);
+    expect(DEFAULT_SYSTEM).toMatch(/VERIFY BEFORE DONE/);
+    expect(DEFAULT_SYSTEM).toMatch(/Never invent page content/);
+    expect(DEFAULT_SYSTEM).not.toMatch(/stuck_loop_blocked/);
+  });
+});
