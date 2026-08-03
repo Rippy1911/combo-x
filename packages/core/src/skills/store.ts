@@ -73,7 +73,7 @@ function idbReq<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /** Bump when a seed body/toolHints must refresh existing IDB rows. */
-export const SEED_REVISION = "v1.7.9";
+export const SEED_REVISION = "v1.9.2";
 
 /**
  * Playbook-only seeds (empty toolHints) rewritten when revision advances.
@@ -120,6 +120,40 @@ export function seedSkillDefinitions(): Omit<Skill, "id" | "createdAt" | "update
 - Secrets stay as vault labels — do not echo secret values
 - NEVER tell the user to load PR builds or about:debugging — just call ensure_github_connector`,
       tags: [...nowTag, "rest", "mcp"],
+      scope: "global",
+      toolHints: [...TOOL_PACKS.rest],
+    },
+    {
+      name: "ops-traces",
+      description:
+        "Read-only ops telemetry for the ns-agent service: daily conversations, agent actions, tool usage histograms, security gate events, token/cost summaries. Use when the operator asks about ns-agent activity, conversations, tool usage, gate blocks, or ops costs.",
+      body: `OPS TRACES PLAYBOOK (read-only ns-agent telemetry)
+
+SETUP (once):
+- The work vault recipe seeds the ns-agent-admin connector; if missing:
+  save_rest_connector({ id:"ns-agent-admin", baseUrl:"https://agent.nextsolutions.studio", authVaultLabel:"ns_agent_admin_key" })
+- If calls 401: ask the operator to paste the ops key into vault label ns_agent_admin_key (Settings → Vault) — never ask for the value in chat
+
+PRIMARY:
+- rest_request({ connectorId:"ns-agent-admin", method:"GET", path:"/v1/ops/summary", query:{ days:"1" } })
+  Returns JSON for the window: conversations (new/active, by channel), runs by channel,
+  tool usage histogram (name → count + errors), gate events (gate_type → outcome counts),
+  prompt/completion/cached tokens + cost_usd. "Yesterday" = days:1 — always state the window used.
+
+SECONDARY:
+- GET /v1/runs?limit=50 — recent run detail (model, latency_ms, tool_calls per run)
+- GET /v1/conversations — conversation list
+
+RULES:
+- Read-only — never POST/PATCH/DELETE on this connector
+- Never print or request secret values; vault label refs only
+- Summarize for the operator — do NOT dump raw JSON into chat
+
+KNOWN GAPS (state them plainly; do not fake the data):
+- ns-exec ExecAuditLog has no read endpoint yet — the ns-exec connector can only GET /health
+- The local Mac vault audit log is CLI-only (./bin/vault audit on the Mac) — not reachable from the extension
+- combo-x has no Discord REST tools — for report contents ask Combo on Discord/Telegram ns_ops_report instead`,
+      tags: [...nowTag, "ops", "rest", "ns-agent"],
       scope: "global",
       toolHints: [...TOOL_PACKS.rest],
     },

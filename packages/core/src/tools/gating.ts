@@ -250,6 +250,7 @@ const SKILL_NAME_PACK_HINTS: Record<string, readonly string[]> = {
   "combo-repo-ops": TOOL_PACKS.rest,
   "combo-ns-food": TOOL_PACKS.rest,
   "combo-openapi-call": TOOL_PACKS.rest,
+  "ops-traces": TOOL_PACKS.rest,
   // Playbook-only (dispatch_cursor_agent is ALWAYS_ON)
   "combo-self-improve": [],
 };

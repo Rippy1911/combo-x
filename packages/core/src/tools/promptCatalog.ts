@@ -17,10 +17,10 @@ import {
 
 const DEFAULT_SKILL_LIMIT = 40;
 
-/** Seed skill that unlocks each gated pack. */
-export const PACK_SKILL_NAMES: Record<ToolPackId, string> = {
+/** Seed skill(s) that unlock each gated pack. */
+export const PACK_SKILL_NAMES: Record<ToolPackId, string | string[]> = {
   scrape: "combo-scrape",
-  rest: "combo-rest",
+  rest: ["combo-rest", "ops-traces"],
   rag: "combo-rag",
   "page-ext": "combo-page-ext",
   media: "combo-media",
@@ -106,7 +106,8 @@ export function formatToolSchemaBlock(
       const tools = lockedByPack.get(pack);
       if (!tools?.length) continue;
       const skill = PACK_SKILL_NAMES[pack];
-      lines.push(`- ${pack} → ${skill}: ${tools.join(", ")}`);
+      const skillLabel = Array.isArray(skill) ? skill.join(" / ") : skill;
+      lines.push(`- ${pack} → ${skillLabel}: ${tools.join(", ")}`);
     }
     for (const name of lockedOther) {
       lines.push(`- ${name} [LOCKED until skill_read] — ${shortDesc(byName.get(name)!)}`);

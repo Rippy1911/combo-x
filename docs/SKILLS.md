@@ -2,12 +2,13 @@
 
 Playbooks unlocked via `skill_search` → `skill_read`. Local IDB only today — no Combo API until CloudClient + sign-in.
 
-## OOTB seeds (17)
+## OOTB seeds (18)
 
 | Skill | Unlocks | Notes |
 |-------|---------|--------|
 | `combo-scrape` | scrape pack | Catalog/PDP/login |
 | `combo-rest` | rest/mcp pack | Saved connectors |
+| `ops-traces` | rest/mcp pack | ns-agent ops telemetry (`/v1/ops/summary`); pairs with `ns-agent-admin` connector |
 | `combo-rag` | rag pack | Folder KB + attachments |
 | `combo-page-ext` | page-ext pack | MAIN-world userscripts |
 | `combo-media` | media pack | Screenshots / recording |
