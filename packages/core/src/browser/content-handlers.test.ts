@@ -569,6 +569,46 @@ describe("excludeSelector / within / list_form_fields", () => {
     expect(data.text).not.toMatch(/archived notice/);
   });
 
+  it("within ignores stray matches in big wrappers — innermost container wins", () => {
+    // Live case 2026-08-03: the row title also exists in a hidden pre-rendered
+    // dialog copy; the union used to widen the scope to the whole panel.
+    document.body.innerHTML = `
+      <section id="panel-copy" style="display:none">
+        <div>Title:Faq Page | HealthTree</div>
+        <button>Decoy save</button>
+      </section>
+      <table id="meta">
+        <tbody>
+          <tr><td>FaqPage</td><td>Faq Page | HealthTree</td><td><button aria-label="Edit"></button></td></tr>
+          <tr><td>Cart</td><td>Cart | HealthTree</td><td><button aria-label="Edit"></button></td></tr>
+        </tbody>
+      </table>`;
+    const res = handleContentRequest(
+      { op: "get_interactive", kind: "button", within: { text: "Faq Page | HealthTree" } },
+      document,
+    );
+    const data = res.data as { items: Array<{ i: number; text: string }>; hint?: string };
+    // Only the FaqPage row's Edit button — never the decoy in the section.
+    expect(data.items.length).toBe(1);
+    expect(data.items[0]!.text).toBe("Edit");
+  });
+
+  it("extract reads textContent/outerHTML as properties, not attributes", () => {
+    document.body.innerHTML = `
+      <table><tbody>
+        <tr><td>FaqPage</td><td>Faq Page | HealthTree</td></tr>
+        <tr><td>Cart</td><td>Cart | HealthTree</td></tr>
+      </tbody></table>`;
+    const res = handleContentRequest(
+      { op: "extract", selector: "tbody tr", attribute: "textContent" },
+      document,
+    );
+    const values = (res.data as { values: Array<string | null> }).values;
+    expect(values[0]).toContain("FaqPage");
+    expect(values[1]).toContain("Cart");
+    expect(values.every((v) => v != null)).toBe(true);
+  });
+
   it("an invalid excludeSelector is a no-op, never a throw", () => {
     document.body.innerHTML = FIXTURE;
     const res = handleContentRequest(

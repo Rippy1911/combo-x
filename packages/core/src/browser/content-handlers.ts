@@ -63,9 +63,14 @@ function regionOf(el: Element, mainRoot: HTMLElement | null): "main" | "nav" {
   return "main";
 }
 
-/** Row-ish containers used by get_interactive `within` scoping. */
-const ROW_CONTAINER_SEL =
-  'tr, [role="row"], li, [role="listitem"], article, section, fieldset, dd, [class*="row"], [class*="Row"]';
+/**
+ * `within` tiers: real table/list rows beat generic wrappers. A stray text
+ * match inside a pre-rendered dialog copy (section/div) must not widen the
+ * scope when an actual `<tr>`/`[role=row]`/`li` also matches (field case
+ * 2026-08-03: 128 controls "inside the row").
+ */
+const ROW_TIER1_SEL = 'tr, [role="row"], li, [role="listitem"]';
+const ROW_TIER2_SEL = 'article, section, fieldset, dd, [class*="row"], [class*="Row"]';
 
 /**
  * Validate a caller-supplied CSS selector for subtree pruning. Invalid
@@ -488,8 +493,17 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
       }
       case "extract": {
         const nodes = Array.from(doc.querySelectorAll(request.selector)).slice(0, 50);
+        // textContent/outerHTML/value are DOM properties, not attributes —
+        // getAttribute() returns null for them (burned three calls in the field).
+        const PROP_ATTRS = new Set(["textContent", "innerText", "innerHTML", "outerHTML", "value"]);
         const values = nodes.map((n) => {
-          if (request.attribute) return n.getAttribute(request.attribute);
+          if (request.attribute) {
+            if (PROP_ATTRS.has(request.attribute)) {
+              const v = (n as unknown as Record<string, unknown>)[request.attribute];
+              return typeof v === "string" ? v.trim().slice(0, 500) : null;
+            }
+            return n.getAttribute(request.attribute);
+          }
           return (n.textContent ?? "").trim().slice(0, 500);
         });
         return { ok: true, data: { values } };
@@ -643,9 +657,11 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const withinText = request.within?.text?.trim().toLowerCase() ?? "";
         let withinIdx: Set<number> | null = null;
         if (withinSel || withinText) {
-          const containers = new Set<Element>();
+          const selectorHits = new Set<Element>();
+          const tier1 = new Set<Element>();
+          const tier2 = new Set<Element>();
           if (withinSel) {
-            for (const el of Array.from(doc.querySelectorAll(withinSel))) containers.add(el);
+            for (const el of Array.from(doc.querySelectorAll(withinSel))) selectorHits.add(el);
           }
           if (withinText && doc.body) {
             const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
@@ -655,11 +671,19 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
               guard += 1;
               if ((node.textContent ?? "").toLowerCase().includes(withinText)) {
                 const host = node.parentElement;
-                if (host) containers.add(host.closest(ROW_CONTAINER_SEL) ?? host);
+                if (host) {
+                  const t1 = host.closest(ROW_TIER1_SEL);
+                  if (t1) tier1.add(t1);
+                  else tier2.add(host.closest(ROW_TIER2_SEL) ?? host);
+                }
               }
               node = walker.nextNode();
             }
           }
+          // Real rows win over generic wrappers; selector hits always count.
+          // Innermost dedupe drops wrappers that contain another match.
+          const pool = [...selectorHits, ...(tier1.size ? tier1 : tier2)];
+          const containers = pool.filter((c) => !pool.some((o) => o !== c && c.contains(o)));
           withinIdx = new Set<number>();
           collected.els.forEach((el, idx) => {
             for (const c of containers) {
