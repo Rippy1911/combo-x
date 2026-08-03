@@ -142,7 +142,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
               },
             },
             description:
-              "Row-scoping: within:{text:\"FaqPage\"} keeps only controls in that row — the fix for unlabeled per-row icon buttons. Indices stay absolute (click_index-safe).",
+              "Row-scoping: within:{text:\"FaqPage\"} keeps only controls in that row — the fix for unlabeled per-row icon buttons. Indices stay absolute (click_index-safe). text matches rows CONTAINING it: for colliding names (Blog vs BlogArticle) anchor on a longer unique string from the row, e.g. its current title.",
           },
         },
         additionalProperties: false,
@@ -154,7 +154,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "list_form_fields",
       description:
-        "One-call form inventory: every fillable control (input/textarea/select/contenteditable) with resolved label, type, region, hasValue, and the i handle for type_index where mappable. Answers 'is there a field for X?' in one call — use it before hunting inputs with get_interactive/query_all. Passwords never return a value (hasValue only).",
+        "One-call form inventory: every fillable control (input/textarea/select/contenteditable) with resolved label, type, region, hasValue, and the i handle for type_index where mappable. Answers 'is there a field for X?' in one call — use it before hunting inputs with get_interactive/query_all, and inside a freshly opened dialog to learn its fields before filling. Passwords never return a value (hasValue only).",
       parameters: {
         type: "object",
         properties: {

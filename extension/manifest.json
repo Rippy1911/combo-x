@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Combo-X",
   "description": "Local-first browser agent — BYOK, vault, sessions, scrape/export, approvals.",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1VhJsK7cNcf/9iGadvftWC4KBW8O5VrjJB4DCak24azuapM7NXoQVmMMXtNxM2qS4m+YytEsAqXEbWWffmwXCqAfxJ/acHgdxlbaF1eDX/HICqGVR1RIiyFhY4DmuEB0G68TjvfD6b6hs2O5KycxeWEcjOlgENJSP5j534Zv9swlKXrpPMJlbhxhhGhkjquNo/6WoEnAv7ebpmZDj+t1aTEXP6NV/uRrq9ja4tfkXGogKJbZcc7HS8oO3tHBE0WZOZWDcKmGcPXIBCOt1FzfVNuVcMjPuCK8SBw2RknLTMobJrefZNWfdE7215iFaw0hWgrNxyO4gTV8uFyy/SIJ0wIDAQAB",
   "icons": {
     "16": "public/icon-16.png",

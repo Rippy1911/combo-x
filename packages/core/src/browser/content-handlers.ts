@@ -94,7 +94,22 @@ function pruneFromClone(clone: HTMLElement, pruneSel: string | null): number {
 }
 
 function stripNonText(root: HTMLElement): void {
-  for (const sel of ["script", "style", "noscript", "svg", "template"]) {
+  for (const sel of [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "template",
+    // Collapsed panels (e.g. a hidden chat column) still pollute text reads —
+    // their markup stays in the DOM when hidden. Skip [hidden] and inline
+    // display:none/visibility:hidden subtrees. aria-hidden is deliberately
+    // NOT stripped: apps aria-hide the whole root behind open modals.
+    "[hidden]",
+    '[style*="display: none"]',
+    '[style*="display:none"]',
+    '[style*="visibility: hidden"]',
+    '[style*="visibility:hidden"]',
+  ]) {
     for (const n of Array.from(root.querySelectorAll(sel))) n.remove();
   }
 }

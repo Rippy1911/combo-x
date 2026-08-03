@@ -556,6 +556,19 @@ describe("excludeSelector / within / list_form_fields", () => {
     expect(data.hint ?? "").toMatch(/within matched no controls/);
   });
 
+  it("hidden subtrees ([hidden] / inline display:none) do not pollute get_page text", () => {
+    document.body.innerHTML = `
+      <div id="chat" hidden><p>chat message mentioning FaqPage</p></div>
+      <div id="old" style="display: none"><p>archived notice about Cart</p></div>
+      <div id="workspace"><p>FaqPage row</p><p>Cart row</p></div>`;
+    const res = handleContentRequest({ op: "get_page" }, document);
+    const data = res.data as { text: string };
+    expect(data.text).toContain("FaqPage row");
+    expect(data.text).toContain("Cart row");
+    expect(data.text).not.toMatch(/chat message/);
+    expect(data.text).not.toMatch(/archived notice/);
+  });
+
   it("an invalid excludeSelector is a no-op, never a throw", () => {
     document.body.innerHTML = FIXTURE;
     const res = handleContentRequest(
