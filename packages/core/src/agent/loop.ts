@@ -106,6 +106,7 @@ import {
   emptyRunEvidence,
   MAX_VERIFY_NUDGES,
   noteToolEvidence,
+  unfinishedCloseoutNote,
   verifyBeforeDoneSignals,
   type RunEvidence,
 } from "./loopQuality.js";
@@ -1099,34 +1100,56 @@ export class AgentLoop {
         // Verify-before-done: empty tool_calls used to finish even with open
         // doing-tasks or unverified mutations — the main hallucination surface
         // vs ns-agent (which never claims success without a tool envelope).
-        if (runCtx.evidence.verifyNudges < MAX_VERIFY_NUDGES) {
-          let openTitles: string[] = [];
-          if (runCtx.tasks && runCtx.sessionId) {
-            try {
-              openTitles = (await runCtx.tasks.list({ sessionId: runCtx.sessionId }))
-                .filter((t) => t.status === "doing" || t.status === "todo" || t.status === "blocked")
-                .map((t) => t.title);
-            } catch {
-              /* best-effort */
+        let openTitles: string[] = [];
+        let openTasks: Array<{ id: string; title: string; status: string }> = [];
+        if (runCtx.tasks && runCtx.sessionId) {
+          try {
+            openTasks = (await runCtx.tasks.list({ sessionId: runCtx.sessionId }))
+              .filter((t) => t.status === "doing" || t.status === "todo")
+              .map((t) => ({ id: t.id, title: t.title, status: t.status }));
+            openTitles = openTasks.map((t) => t.title);
+          } catch {
+            /* best-effort */
+          }
+        }
+        const signals = verifyBeforeDoneSignals({
+          evidence: runCtx.evidence,
+          openTaskTitles: openTitles,
+        });
+        if (signals.length > 0 && runCtx.evidence.verifyNudges < MAX_VERIFY_NUDGES) {
+          runCtx.evidence.verifyNudges += 1;
+          messages.push({ role: "assistant", content: finalText });
+          emit({ type: "assistant_delta", message: finalText });
+          void logUsage({ kind: "message", role: "assistant" });
+          // system role — not user (pr-agent: avoid polluting session as operator text)
+          messages.push({ role: "system", content: buildVerifyNudge(signals) });
+          emit({
+            type: "status",
+            message: `Verify-before-done gate (${runCtx.evidence.verifyNudges}/${MAX_VERIFY_NUDGES}): continuing — ${signals[0]}`,
+          });
+          continue;
+        }
+        if (signals.length > 0) {
+          // Nudges exhausted — do not leave doing/todo as if work finished.
+          if (runCtx.tasks && openTasks.length > 0) {
+            for (const t of openTasks) {
+              try {
+                await runCtx.tasks.put({
+                  id: t.id,
+                  title: t.title,
+                  status: "blocked",
+                  note: `Auto-blocked: verify-before-done exhausted with unfinished signals (${signals[0]})`,
+                });
+              } catch {
+                /* best-effort */
+              }
             }
           }
-          const signals = verifyBeforeDoneSignals({
-            evidence: runCtx.evidence,
-            openTaskTitles: openTitles,
+          finalText = `${finalText}${unfinishedCloseoutNote(signals)}`;
+          emit({
+            type: "status",
+            message: `Verify-before-done exhausted — marked ${openTasks.length} task(s) blocked; closeout is UNVERIFIED`,
           });
-          if (signals.length > 0) {
-            runCtx.evidence.verifyNudges += 1;
-            messages.push({ role: "assistant", content: finalText });
-            emit({ type: "assistant_delta", message: finalText });
-            void logUsage({ kind: "message", role: "assistant" });
-            const nudge = buildVerifyNudge(signals);
-            messages.push({ role: "user", content: nudge });
-            emit({
-              type: "status",
-              message: `Verify-before-done gate (${runCtx.evidence.verifyNudges}/${MAX_VERIFY_NUDGES}): continuing — ${signals[0]}`,
-            });
-            continue;
-          }
         }
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });

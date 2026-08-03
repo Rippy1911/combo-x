@@ -31,8 +31,12 @@ export type RunEvidence = {
   mutationsOk: number;
   /** True once any observation tool succeeded after the latest mutation. */
   obsAfterMutation: boolean;
-  /** Clicks that reported dialogOpened:false (often a miss on modal UIs). */
-  silentClicks: number;
+  /**
+   * Unresolved clicks that reported dialogOpened:false. Cleared only by a later
+   * click with dialogOpened:true — a random get_page must not erase the miss
+   * (pr-agent / ns-agent review on combo-x#23).
+   */
+  unresolvedSilentClicks: number;
 };
 
 export function emptyRunEvidence(): RunEvidence {
@@ -40,7 +44,7 @@ export function emptyRunEvidence(): RunEvidence {
     verifyNudges: 0,
     mutationsOk: 0,
     obsAfterMutation: true,
-    silentClicks: 0,
+    unresolvedSilentClicks: 0,
   };
 }
 
@@ -71,7 +75,9 @@ export function noteToolEvidence(ev: RunEvidence, name: string, result: unknown)
     ev.mutationsOk += 1;
     ev.obsAfterMutation = false;
     if (name === "click" || name === "click_index") {
-      if (dialogOpenedFlag(result) === false) ev.silentClicks += 1;
+      const opened = dialogOpenedFlag(result);
+      if (opened === false) ev.unresolvedSilentClicks += 1;
+      else if (opened === true) ev.unresolvedSilentClicks = 0;
     }
     return;
   }
@@ -104,9 +110,9 @@ export function verifyBeforeDoneSignals(opts: {
       "You mutated the page (click/type/navigate) but never re-read to verify the effect",
     );
   }
-  if (opts.evidence.silentClicks > 0 && !opts.evidence.obsAfterMutation) {
+  if (opts.evidence.unresolvedSilentClicks > 0) {
     signals.push(
-      `${opts.evidence.silentClicks} click(s) reported dialogOpened:false with no follow-up re-scan — treat as miss until proven`,
+      `${opts.evidence.unresolvedSilentClicks} click(s) reported dialogOpened:false still unresolved — re-scan and retry until dialogOpened:true, or report the miss`,
     );
   }
   return signals;
@@ -115,6 +121,7 @@ export function verifyBeforeDoneSignals(opts: {
 export function buildVerifyNudge(signals: string[]): string {
   return (
     `## Runtime gate — VERIFY BEFORE DONE\n` +
+    `(This is NOT the user. Obey and continue with tools.)\n` +
     `You stopped without tool calls, but unfinished-work signals remain:\n` +
     signals.map((s) => `- ${s}`).join("\n") +
     `\n\nDo ONE of the following now with tools (not prose alone):\n` +
@@ -122,5 +129,14 @@ export function buildVerifyNudge(signals: string[]): string {
     `2. Act (click_index / type_index / Save) if you already know the target, OR\n` +
     `3. update_task to blocked/cancelled with a concrete blocker — never invent "done".\n` +
     `Empty tool results mean not found. Never claim saves/translations/completions without a tool result in THIS run that proves it.`
+  );
+}
+
+/** Honest closeout line when the gate gave up but work is still unfinished. */
+export function unfinishedCloseoutNote(signals: string[]): string {
+  return (
+    `\n\n— UNVERIFIED closeout — open work remains after verify-before-done nudges:\n` +
+    signals.map((s) => `• ${s}`).join("\n") +
+    `\nTasks left open were marked blocked so the board stays honest.`
   );
 }
