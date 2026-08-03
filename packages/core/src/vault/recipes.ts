@@ -8,6 +8,7 @@ import {
   anatomeRestTemplate,
   githubRestTemplate,
   ideaforgeRestTemplate,
+  nsAgentAdminRestTemplate,
   nsExecRestTemplate,
   nsFoodRestTemplate,
   uploadsRestTemplate,
@@ -46,11 +47,12 @@ export const VAULT_RECIPES: Record<VaultRecipeId, VaultRecipe> = {
   work: {
     id: "work",
     name: "work",
-    description: "Work: IdeaForge, GitHub, ns-exec; project RAG stays a local folder grant",
+    description: "Work: IdeaForge, GitHub, ns-exec, ns-agent ops; project RAG stays a local folder grant",
     secretLabels: [
       "ideaforge_shared_api_key",
       "github_token",
       "ns_exec_token",
+      "ns_agent_admin_key",
     ],
     notes: [
       {
@@ -62,6 +64,7 @@ export const VAULT_RECIPES: Record<VaultRecipeId, VaultRecipe> = {
       { ...ideaforgeRestTemplate({ vaultId }), vaultId },
       { ...githubRestTemplate({ vaultLabel: "github_token" }), vaultId },
       { ...nsExecRestTemplate({ vaultId }), vaultId },
+      { ...nsAgentAdminRestTemplate({ vaultId }), vaultId },
     ],
   },
 };

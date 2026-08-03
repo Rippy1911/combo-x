@@ -21,6 +21,7 @@ const EXPECTED_SEED_NAMES = [
   "combo-openapi-call",
   "combo-repo-ops",
   "combo-self-improve",
+  "ops-traces",
 ] as const;
 
 const PLAYBOOK_ONLY = new Set([
@@ -37,7 +38,7 @@ const PLAYBOOK_ONLY = new Set([
 ]);
 
 describe("SkillStore", () => {
-  it("seeds eighteen packs on empty db (unique names)", async () => {
+  it("seeds nineteen packs on empty db (unique names)", async () => {
     const defs = seedSkillDefinitions();
     expect(defs.map((d) => d.name).sort()).toEqual([...EXPECTED_SEED_NAMES].sort());
     expect(new Set(defs.map((d) => d.name)).size).toBe(EXPECTED_SEED_NAMES.length);
@@ -57,6 +58,7 @@ describe("SkillStore", () => {
     }
     expect(byName.get("combo-openapi-call")?.toolHints).toEqual([...TOOL_PACKS.rest]);
     expect(byName.get("combo-ns-food")?.toolHints).toEqual([...TOOL_PACKS.rest]);
+    expect(byName.get("ops-traces")?.toolHints).toEqual([...TOOL_PACKS.rest]);
   });
 
   it("upserts missing seed skills on existing db", async () => {

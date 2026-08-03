@@ -154,3 +154,38 @@ export function nsExecRestTemplate(opts?: { vaultId?: string }): RestConnector {
     ],
   };
 }
+
+/** ns-agent admin ops API (read-only telemetry) — Bearer ops key in vault label `ns_agent_admin_key`. */
+export function nsAgentAdminRestTemplate(opts?: { vaultId?: string }): RestConnector {
+  return {
+    id: "ns-agent-admin",
+    kind: "rest",
+    name: "NS Agent Admin",
+    baseUrl: "https://agent.nextsolutions.studio",
+    headers: {
+      Authorization: { vaultLabel: "ns_agent_admin_key" },
+      Accept: "application/json",
+    },
+    vaultId: opts?.vaultId,
+    tools: [
+      {
+        name: "ops_summary",
+        method: "GET",
+        path: "/v1/ops/summary",
+        description: "Ops summary ?days=N (conversations, runs, tool usage, gate events, tokens/cost)",
+      },
+      {
+        name: "runs",
+        method: "GET",
+        path: "/v1/runs",
+        description: "Recent runs ?limit= (model, latency_ms, tool_calls per run)",
+      },
+      {
+        name: "conversations",
+        method: "GET",
+        path: "/v1/conversations",
+        description: "Conversation list",
+      },
+    ],
+  };
+}

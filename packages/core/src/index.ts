@@ -398,6 +398,7 @@ export {
   anatomeRestTemplate,
   ideaforgeRestTemplate,
   nsExecRestTemplate,
+  nsAgentAdminRestTemplate,
 } from "./connectors/templates.js";
 export {
   ensureGithubRestConnector,
