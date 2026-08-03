@@ -136,6 +136,17 @@ describe("RepeatGuard stuck-loop guard", () => {
     }
   });
 
+  it("the block resets the streak, so recovery reads (list_tabs) are allowed", () => {
+    // Field case 2026-08-03: the active tab changed mid-run; the agent's
+    // recovery move (list_tabs) is itself read-only and must not stay refused.
+    const g = new RepeatGuard();
+    read(g, 10);
+    expect(g.check("find_text", { text: "x" }).kind).toBe("block");
+    expect(g.check("list_tabs", {}).kind).toBe("ok");
+    const verdict = g.record("list_tabs", {}, { ok: true, tabs: [] });
+    expect(verdict.kind).toBe("ok");
+  });
+
   it("wait() marks deliberate polling: warns but never blocks", () => {
     const g = new RepeatGuard();
     let warned = false;

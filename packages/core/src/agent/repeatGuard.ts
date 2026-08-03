@@ -154,17 +154,23 @@ export class RepeatGuard {
       this.observationStreak = 0;
       this.waitInStreak = false;
     } else if (this.observationStreak >= RepeatGuard.STUCK_BLOCK_AT && !this.waitInStreak) {
+      // The refusal IS the intervention — reset so recovery reads (list_tabs to
+      // find a lost tab, a scoped re-read) are not themselves refused next.
+      const observations = this.observationStreak;
+      this.observationStreak = 0;
+      this.waitInStreak = false;
       return {
         kind: "block",
-        repeats: this.observationStreak,
+        repeats: observations,
         result: {
           ok: false,
           error: "stuck_loop_blocked",
-          observations: this.observationStreak,
+          observations,
           hint:
-            `Refused: ${this.observationStreak} consecutive read-only calls with no click/type/navigation. ` +
+            `Refused: ${observations} consecutive read-only calls with no click/type/navigation. ` +
             `The page does not change by reading it again. Mutate (click_index/type_index), map the form with ` +
-            `list_form_fields, cut noise with within/excludeSelector, or report BLOCKED with what you tried.`,
+            `list_form_fields, cut noise with within/excludeSelector, or report BLOCKED with what you tried. ` +
+            `Wrong tab? list_tabs then activate_tab or navigate back — this refusal reset the streak.`,
         },
       };
     }
