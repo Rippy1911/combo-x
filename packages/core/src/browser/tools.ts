@@ -8,7 +8,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_page",
       description:
-        "Read the active tab's text. Default mode=main strips nav/header/footer chrome (on app consoles the chrome is most of the page). Reply carries totalChars/nextOffset/hasMore — when hasMore, call again with offset:<nextOffset> instead of giving up. filter:\"word\" keeps only matching lines (grep a long doc). mode=full includes chrome; mode=structure = page_digest; mode=snippet = short main-only peek.",
+        "Read the active tab's text. Default mode=main strips nav/header/footer chrome (on app consoles the chrome is most of the page). Reply carries totalChars/nextOffset/hasMore — when hasMore, call again with offset:<nextOffset> instead of giving up. filter:\"word\" keeps only matching lines (grep a long doc). excludeSelector:\"aside,[data-testid=chat-panel]\" prunes noisy CSS subtrees (chat sidebars, cookie walls) before extraction. mode=full includes chrome; mode=structure = page_digest; mode=snippet = short main-only peek.",
       parameters: {
         type: "object",
         properties: {
@@ -20,6 +20,11 @@ export const AGENT_TOOLS: ToolDefinition[] = [
             type: "string",
             description:
               "Drop lines containing this substring. Use it to strip boilerplate that repeats on every read (cookie banners, legal footers, icon-font ligatures).",
+          },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector (comma list ok) — prune matching subtrees before reading. Example: aside,[data-testid='chat-panel'] for a chat column.",
           },
         },
         additionalProperties: false,
@@ -73,7 +78,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "get_interactive",
       description:
-        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK instead of dumping — describe the control you want and let the filters do the work: filter:\"Save\" matches label/aria/name/placeholder/href, exclude drops noise, kind narrows to link|button|input|select, region:\"main\" drops nav/header/footer, state:\"enabled\" hides controls that cannot be clicked yet, requireLabel:true hides bare icon buttons, and fields:[\"text\"] returns only the keys you will read. item.i is an absolute handle into the full scan, so filtering, projecting and paging never break click_index. Reply carries matched/total/nextOffset/regionCounts — when hasMore, page with offset. item.disabled marks dead controls: clicking one wastes a turn. Default scope=auto scopes to the topmost dialog/menu/portal (ignoring rows-per-page listboxes); scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
+        "Indexed list of controls; act with click_index/type_index using item.i. CHERRY-PICK: filter:\"Save\", kind, region:\"main\", state:\"enabled\", requireLabel, fields:[\"text\"], excludeSelector:\"aside\" (drop chat/cookie chrome), within:{text:\"FaqPage\"} (row scope — the unlabeled pencil in the row containing FaqPage). item.i is an absolute handle into the full scan, so filtering/within/paging never break click_index. Reply carries matched/total/nextOffset/regionCounts. Default scope=auto scopes to the topmost dialog/menu; scope=page forces the full document. Stuck in a menu? press_key Escape then scope:\"page\". Check item.type before type_index (never free-text into type=time).",
       parameters: {
         type: "object",
         properties: {
@@ -122,6 +127,61 @@ export const AGENT_TOOLS: ToolDefinition[] = [
               "Return only these keys per control (i is always included). fields:[\"text\"] makes a 100-control listing tiny.",
           },
           scope: { type: "string", enum: ["auto", "page", "dialog"] },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector (comma list ok) — drop controls inside matching subtrees. Example: aside,[data-testid='chat-panel'].",
+          },
+          within: {
+            type: "object",
+            description:
+              "Row scope after the full scan. Example: within:{text:\"FaqPage\"} → the pencil in that table row; item.i stays click_index-ready.",
+            properties: {
+              selector: {
+                type: "string",
+                description: "Keep controls whose row container matches this CSS selector",
+              },
+              text: {
+                type: "string",
+                description:
+                  "Keep controls whose row/list container contains this substring (case-insensitive)",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_form_fields",
+      description:
+        "Inventory of fillable fields on the page (input/textarea/select/contenteditable) with resolved labels — one call for \"what can I fill in?\". Returns {i,tag,type,label,name,placeholder,region,disabled,hasValue}; i is the same absolute handle as get_interactive so type_index works directly. Password fields report hasValue only (never the value). Same scope/region/exclude/excludeSelector/within as get_interactive. Example: list_form_fields({excludeSelector:\"aside\"}) after opening an inline editor.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number" },
+          offset: { type: "number" },
+          filter: { type: "string", description: "Substring of label/name/placeholder/type" },
+          exclude: { type: "string" },
+          region: { type: "string", enum: ["any", "main", "nav"] },
+          state: { type: "string", enum: ["any", "enabled", "disabled"] },
+          scope: { type: "string", enum: ["auto", "page", "dialog"] },
+          excludeSelector: {
+            type: "string",
+            description: "CSS selector — drop fields inside matching subtrees",
+          },
+          within: {
+            type: "object",
+            properties: {
+              selector: { type: "string" },
+              text: { type: "string" },
+            },
+            additionalProperties: false,
+          },
         },
         additionalProperties: false,
       },
@@ -295,7 +355,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: "find_text",
       description:
-        "Search visible text and get back an ACTIONABLE handle: each hit reports region plus interactiveIndex when it sits inside a control, so you can click_index({index:<interactiveIndex>}) straight away. Best way to locate one labelled thing on a huge page — cheaper than get_page. To go straight to a button, pass clickableOnly:true and every hit is click-ready. region:\"main\" ignores the same label repeated in the sidebar; exclude drops known-noisy matches. Carries total/nextOffset for paging; context:N adds surrounding chars.",
+        "Search visible text and get back an ACTIONABLE handle: each hit reports region plus interactiveIndex when it sits inside a control, so you can click_index({index:<interactiveIndex>}) straight away. Best way to locate one labelled thing on a huge page — cheaper than get_page. clickableOnly:true keeps only click-ready hits. region:\"main\" ignores sidebar repeats; excludeSelector:\"aside\" drops chat-column noise (substring exclude cannot). Carries total/nextOffset for paging; context:N adds surrounding chars.",
       parameters: {
         type: "object",
         properties: {
@@ -310,6 +370,11 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           },
           region: { type: "string", enum: ["any", "main", "nav"] },
           exclude: { type: "string", description: "Drop hits whose text contains this substring" },
+          excludeSelector: {
+            type: "string",
+            description:
+              "CSS selector (comma list ok) — skip hits inside matching subtrees. Example: aside,[data-testid='chat-panel'].",
+          },
         },
         required: ["text"],
         additionalProperties: false,
@@ -2206,6 +2271,16 @@ export function toolArgsToContentRequest(
     return kept.length ? kept : undefined;
   };
   const REGIONS = ["any", "main", "nav"] as const;
+  const withinArg = (
+    value: unknown,
+  ): { selector?: string; text?: string } | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const obj = value as Record<string, unknown>;
+    const selector = str(obj.selector);
+    const text = str(obj.text);
+    if (!selector && !text) return undefined;
+    return { ...(selector ? { selector } : {}), ...(text ? { text } : {}) };
+  };
 
   switch (name) {
     case "get_page":
@@ -2222,6 +2297,7 @@ export function toolArgsToContentRequest(
         offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
         filter: str(args.filter),
         exclude: str(args.exclude),
+        excludeSelector: str(args.excludeSelector),
       };
     case "page_digest":
       return { op: "page_digest" };
@@ -2286,6 +2362,7 @@ export function toolArgsToContentRequest(
         clickableOnly: flag(args.clickableOnly),
         region: pick(args.region, REGIONS),
         exclude: str(args.exclude),
+        excludeSelector: str(args.excludeSelector),
       };
     case "get_interactive":
       return {
@@ -2312,6 +2389,21 @@ export function toolArgsToContentRequest(
           "disabled",
         ] as const),
         scope: pick(args.scope, ["auto", "page", "dialog"] as const),
+        excludeSelector: str(args.excludeSelector),
+        within: withinArg(args.within),
+      };
+    case "list_form_fields":
+      return {
+        op: "list_form_fields",
+        limit: typeof args.limit === "number" ? args.limit : 80,
+        offset: typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : undefined,
+        filter: str(args.filter),
+        exclude: str(args.exclude),
+        region: pick(args.region, REGIONS),
+        state: pick(args.state, ["any", "enabled", "disabled"] as const),
+        scope: pick(args.scope, ["auto", "page", "dialog"] as const),
+        excludeSelector: str(args.excludeSelector),
+        within: withinArg(args.within),
       };
     case "press_key": {
       const key = args.key;

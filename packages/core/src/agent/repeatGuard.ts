@@ -7,10 +7,17 @@
  * Nothing in the loop noticed that the call was identical AND the outcome was
  * identical, so there was no pressure to change approach.
  *
- * Policy: the first repeat is annotated (the model usually self-corrects), the
- * second is refused with concrete alternatives. Only *identical args producing
- * an identical result* count — legitimately re-polling a changing page (a
- * loading spinner, a queue) never trips the guard.
+ * Follow-up (Base44 meta-tags table, 2026-08-03): ~12 consecutive *different*
+ * read-only calls with zero mutations also burned the budget. The identical-
+ * call guard stayed silent because args varied. Semantic stuck tracking below
+ * catches that class: observation streak with no mutation and no URL change.
+ *
+ * Policy: the first identical repeat is annotated (the model usually
+ * self-corrects), the second is refused with concrete alternatives. Only
+ * *identical args producing an identical result* count for that path —
+ * legitimately re-polling a changing page (a loading spinner, a queue) never
+ * trips it. Separately, ≥6 observations without a mutation/URL change warn;
+ * ≥9 block.
  */
 
 /** Tools whose whole purpose is to re-observe changing state. */
@@ -19,11 +26,46 @@ const POLLING_TOOLS = new Set([
   "get_page",
   "page_digest",
   "get_interactive",
+  "list_form_fields",
   "screenshot",
   "list_tabs",
   "page_metrics",
   "list_tasks",
 ]);
+
+/** Read-only tools that do not change the page (semantic stuck streak). */
+export const OBSERVATION_TOOLS = new Set([
+  "get_page",
+  "page_digest",
+  "get_interactive",
+  "list_form_fields",
+  "find_text",
+  "query_all",
+  "extract",
+  "scrape_tables",
+  "get_links",
+  "scroll",
+  "wait",
+  "screenshot",
+  "screenshot_viewport",
+  "screenshot_element",
+  "screenshot_full",
+]);
+
+/** Tools that mutate the page or navigate — reset the observation streak. */
+export const MUTATION_TOOLS = new Set([
+  "click",
+  "click_index",
+  "type_text",
+  "type_index",
+  "press_key",
+  "navigate",
+  "open_tab",
+  "go_back",
+]);
+
+const STUCK_WARN_AT = 6;
+const STUCK_BLOCK_AT = 9;
 
 export type RepeatVerdict =
   | { kind: "ok" }
@@ -67,13 +109,13 @@ function alternativesFor(name: string, args: Record<string, unknown>): string {
       return (
         `Reading the same page again returns the same bytes. Change the query instead: ` +
         `get_page({filter:"<keyword>"}) to grep it, get_page({offset:<nextOffset>}) to continue, ` +
-        `or page_digest / find_text to locate the part you need.`
+        `excludeSelector to drop chat/cookie chrome, or page_digest / find_text to locate the part you need.`
       );
     case "get_interactive":
       return (
         `The control list has not changed. Narrow it instead: ` +
-        `get_interactive({filter:"<label>"}), kind:"button", or region:"main". ` +
-        `If you expected an overlay, press_key Escape first, or scope:"page".`
+        `get_interactive({filter:"<label>"}), within:{text:"<row>"}, excludeSelector:"aside", ` +
+        `kind:"button", or region:"main". If you expected an overlay, press_key Escape first, or scope:"page".`
       );
     case "click_index":
     case "click":
@@ -82,7 +124,10 @@ function alternativesFor(name: string, args: Record<string, unknown>): string {
         `Re-read controls (get_interactive({filter:"…"})), scroll to it, or try the dialog scope.`
       );
     case "find_text":
-      return `Same query, same misses. Try a shorter distinctive substring, or get_page({filter:"…"}).`;
+      return (
+        `Same query, same misses. Try a shorter distinctive substring, excludeSelector:"aside", ` +
+        `or get_page({filter:"…"}).`
+      );
     default:
       return (
         `Identical arguments return an identical result. Change the arguments, use a different tool, ` +
@@ -91,8 +136,32 @@ function alternativesFor(name: string, args: Record<string, unknown>): string {
   }
 }
 
+function stuckHint(streak: number): string {
+  return (
+    `${streak} observations without changing anything — either mutate (click/type), ` +
+    `switch tool (list_form_fields for forms, scrape_tables for tables, within/excludeSelector to cut noise), ` +
+    `or report BLOCKED with what you tried.`
+  );
+}
+
+/** Pull a page URL out of a tool result when present. */
+export function extractResultUrl(result: unknown): string | undefined {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+  const obj = result as Record<string, unknown>;
+  if (typeof obj.url === "string" && obj.url) return obj.url;
+  const data = obj.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const u = (data as Record<string, unknown>).url;
+    if (typeof u === "string" && u) return u;
+  }
+  return undefined;
+}
+
 export class RepeatGuard {
   private readonly seen = new Map<string, Entry>();
+  /** Consecutive observation-only calls with no mutation and no URL change. */
+  private observationStreak = 0;
+  private lastObservationUrl: string | undefined;
 
   /**
    * Thresholds are in *duplicate outcomes*, so the timeline reads:
@@ -110,11 +179,30 @@ export class RepeatGuard {
     return `${name}#${canonicalize(args)}`;
   }
 
+  /** Current observation-only streak (for tests / stop checkpoint). */
+  getObservationStreak(): number {
+    return this.observationStreak;
+  }
+
   /**
    * Called before executing. Returns `block` once this exact call has produced
-   * the same result twice — the tool is then not run at all.
+   * the same result twice — the tool is then not run at all. Also blocks when
+   * the observation streak has already reached STUCK_BLOCK_AT.
    */
   check(name: string, args: Record<string, unknown>): RepeatVerdict {
+    if (OBSERVATION_TOOLS.has(name) && this.observationStreak >= STUCK_BLOCK_AT) {
+      return {
+        kind: "block",
+        repeats: this.observationStreak,
+        result: {
+          ok: false,
+          error: "observation_stuck_blocked",
+          repeats: this.observationStreak,
+          hint: stuckHint(this.observationStreak),
+        },
+      };
+    }
+
     const entry = this.seen.get(this.key(name, args));
     if (!entry || entry.repeats < RepeatGuard.BLOCK_AT_REPEATS) return { kind: "ok" };
     const calls = entry.repeats + 1;
@@ -134,9 +222,32 @@ export class RepeatGuard {
 
   /**
    * Record an outcome. Returns `warn` when the call+result pair just repeated,
-   * so the caller can attach a nudge to the (still valid) result.
+   * or when the observation streak hits the stuck threshold, so the caller can
+   * attach a nudge to the (still valid) result.
    */
   record(name: string, args: Record<string, unknown>, result: unknown): RepeatVerdict {
+    let stuckWarn: RepeatVerdict | null = null;
+    if (MUTATION_TOOLS.has(name)) {
+      this.observationStreak = 0;
+      this.lastObservationUrl = undefined;
+    } else if (OBSERVATION_TOOLS.has(name)) {
+      const url = extractResultUrl(result);
+      if (url && this.lastObservationUrl && url !== this.lastObservationUrl) {
+        // Page changed under us — polling a redirect/loading URL is productive.
+        this.observationStreak = 1;
+      } else {
+        this.observationStreak += 1;
+      }
+      if (url) this.lastObservationUrl = url;
+      if (this.observationStreak >= STUCK_WARN_AT) {
+        stuckWarn = {
+          kind: "warn",
+          repeats: this.observationStreak,
+          note: stuckHint(this.observationStreak),
+        };
+      }
+    }
+
     // Re-polling a mutating surface is normal; only flag it when the *result*
     // is byte-identical, which means nothing was learned.
     const key = this.key(name, args);
@@ -146,12 +257,12 @@ export class RepeatGuard {
     // A changed result means the retry was productive — reset the streak.
     if (!prev || prev.fingerprint !== fp) {
       this.seen.set(key, { repeats: 0, fingerprint: fp });
-      return { kind: "ok" };
+      return stuckWarn ?? { kind: "ok" };
     }
 
     const repeats = prev.repeats + 1;
     this.seen.set(key, { repeats, fingerprint: fp });
-    if (repeats < RepeatGuard.WARN_AT_REPEATS) return { kind: "ok" };
+    if (repeats < RepeatGuard.WARN_AT_REPEATS) return stuckWarn ?? { kind: "ok" };
     return {
       kind: "warn",
       repeats,

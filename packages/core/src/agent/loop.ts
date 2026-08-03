@@ -100,7 +100,8 @@ import {
   type AgentBudgetMode,
 } from "./budget.js";
 import { PageTemplateCache } from "./pageTemplateCache.js";
-import { annotateRedirect, RepeatGuard } from "./repeatGuard.js";
+import { annotateRedirect, MUTATION_TOOLS, RepeatGuard } from "./repeatGuard.js";
+import { taskProgress } from "../tasks/store.js";
 import {
   leanHistory,
   truncateToolResultForLlm,
@@ -443,6 +444,9 @@ For interaction prefer get_interactive → click_index / type_index (Nanobrowser
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
 SEARCH, DON'T DUMP (this is how you stay fast on big apps):
 - Looking for ONE labelled thing? Go straight to it: get_interactive({filter:"Save"}) or find_text({text:"App content"}). find_text returns interactiveIndex on hits inside a control, so you can click_index immediately. Never list 100 controls to find one.
+- Unlabeled icon in a table row? get_interactive({within:{text:"FaqPage"}}) — item.i stays absolute for click_index.
+- Chat column / cookie wall flooding reads? excludeSelector:"aside,[data-testid='chat-panel']" on get_page / find_text / get_interactive.
+- "What can I fill in?" → list_form_fields (labels + type_index handles; passwords never leak values).
 - get_page defaults to mode:"main", which drops nav/header/footer. On consoles (Play Console, GSC, admin panels) the chrome is most of the page — mode:"full" is almost always the wrong call.
 - Reading a long document? get_page({filter:"keyword"}) greps it by line, and exclude:"…" strips boilerplate that repeats on every read. That beats paging through it.
 - Describe the control you want and let the filters do the work. get_interactive takes exclude (drop icon-ligature/nav noise), state:"enabled" (skip controls you cannot click yet — item.disabled marks them), requireLabel:true (skip unnamed icon buttons), and fields:["text"] (return only what you will read). get_links takes unique:true (nav is usually rendered two or three times) and origin:"internal". find_text takes clickableOnly:true so every hit is click-ready.
@@ -453,6 +457,7 @@ NOTHING IS EVER SILENTLY CUT — always read the envelope:
 - item.i from get_interactive is an absolute handle into the full scan — filtering and paging never invalidate it, so click_index({index:i}) always hits the control you saw.
 DON'T REPEAT YOURSELF:
 - Identical arguments return an identical result. If a call yields nothing useful, change the arguments or the tool — a third identical call is refused outright.
+- A streak of read-only observations with no click/type/navigate also trips a stuck guard — mutate, switch tool (list_form_fields / scrape_tables / within / excludeSelector), or report BLOCKED.
 - navigate reports redirected:true + requestedUrl when you did not land where you asked. That path is gated or renamed: reach the page through its on-page link instead of retrying the URL.
 - If two different approaches both fail, stop and tell the user what blocked you. That is a better answer than burning the step budget.
 For current facts / news use web_search (or OpenRouter built-in web search when enabled); use web_fetch or navigate for full pages. Prefer web_search over inventing URLs.
@@ -636,6 +641,8 @@ interface RunContext {
   boundTabId?: number;
   /** Detects identical call+result pairs and refuses the third one. */
   repeatGuard?: RepeatGuard;
+  /** Short description of the last mutating tool call (stop-checkpoint). */
+  lastMutation?: string;
 }
 
 export class AgentLoop {
@@ -931,14 +938,30 @@ export class AgentLoop {
         }
       }
       runCtx.ephemeralTabIds = [];
+
+      let finalText = outcome.finalText;
+      let doneMessage = outcome.doneMessage ?? outcome.finalText;
+      if (outcome.aborted) {
+        const checkpoint = await this.buildStopCheckpoint(runCtx);
+        if (checkpoint) {
+          finalText = checkpoint;
+          doneMessage = checkpoint;
+          messages.push({ role: "assistant", content: checkpoint });
+          emit({ type: "assistant_delta", message: checkpoint });
+        } else if (!finalText.trim()) {
+          finalText = "Stopped.";
+          doneMessage = "Stopped.";
+        }
+      }
+
       emit({
         type: "done",
-        message: outcome.doneMessage ?? outcome.finalText,
+        message: doneMessage,
         usage,
       });
       return {
         messages,
-        finalText: outcome.finalText,
+        finalText,
         steps,
         usage,
         aborted: outcome.aborted,
@@ -1401,6 +1424,26 @@ export class AgentLoop {
       return formatOpenTasksBlock(rows, sessionId);
     } catch {
       return "";
+    }
+  }
+
+  /**
+   * On abort/stop: one visible transcript line summarizing open tasks + last mutation.
+   * Returns null when there is nothing useful to say (no todo/doing tasks).
+   */
+  private async buildStopCheckpoint(runCtx: RunContext): Promise<string | null> {
+    if (!runCtx.tasks) return null;
+    try {
+      const rows = await runCtx.tasks.list(
+        runCtx.sessionId ? { sessionId: runCtx.sessionId } : {},
+      );
+      const open = rows.filter((t) => t.status === "todo" || t.status === "doing");
+      if (!open.length) return null;
+      const { done, total } = taskProgress(rows);
+      const last = runCtx.lastMutation?.trim() || "none";
+      return `Stopped. Tasks: ${done}/${total} done; last action: ${last}.`;
+    } catch {
+      return null;
     }
   }
 
@@ -3083,6 +3126,17 @@ export class AgentLoop {
         }
       }
 
+      if (runCtx && MUTATION_TOOLS.has(name)) {
+        const ok =
+          !result ||
+          typeof result !== "object" ||
+          Array.isArray(result) ||
+          (result as { ok?: boolean }).ok !== false;
+        if (ok) {
+          runCtx.lastMutation = describeMutation(name, args);
+        }
+      }
+
       const repeat = runCtx?.repeatGuard?.record(name, args, result);
       if (repeat?.kind === "warn") {
         result = RepeatGuard.annotate(result, repeat.note);
@@ -4521,5 +4575,33 @@ export class AgentLoop {
         ? (args.arguments as Record<string, unknown>)
         : {};
     return mcpCall(conn, String(args.tool ?? ""), toolArgs, connectors.getSecret);
+  }
+}
+
+/** Short human label for the last mutating tool (stop-checkpoint). */
+function describeMutation(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case "click_index":
+      return `clicked index ${String(args.index ?? "?")}`;
+    case "type_index": {
+      const text = typeof args.text === "string" ? args.text.trim() : "";
+      const preview = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+      return preview
+        ? `typed into index ${String(args.index ?? "?")}: ${preview}`
+        : `typed into index ${String(args.index ?? "?")}`;
+    }
+    case "click":
+      return `clicked ${String(args.selector ?? "element")}`;
+    case "type_text":
+      return `typed into ${String(args.selector ?? "field")}`;
+    case "press_key":
+      return `pressed ${String(args.key ?? "key")}`;
+    case "navigate":
+    case "open_tab":
+      return `navigated to ${String(args.url ?? "url")}`;
+    case "go_back":
+      return "went back";
+    default:
+      return name;
   }
 }
