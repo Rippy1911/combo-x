@@ -341,6 +341,7 @@ const TOOLS_MIGRATE_FLAG = "combo_x_tools_migrate_v169";
 const TOOLS_MIGRATE_ADD = [
   "parse_data",
   "get_interactive",
+  "list_form_fields",
   "rag_search",
   "list_attachments",
   "save_view",

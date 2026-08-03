@@ -25,8 +25,89 @@ const CHROME_SEL =
 const MAIN_SEL =
   'main, [role="main"], article, #main, #content, #main-content, .main-content, [class*="page-content"]';
 
+/**
+ * Row / list / section containers used by `within` scoping — find the pencil in
+ * the table row that contains "FaqPage" without rescanning the whole page.
+ */
+const ROW_CONTAINER_SEL =
+  'tr, [role="row"], li, [role="listitem"], article, section, fieldset';
+
 /** Upper bound on elements scanned per get_interactive call (paging needs a total). */
 const INTERACTIVE_SCAN_CAP = 600;
+
+/** True when `el` is inside (or is) a match for the CSS excludeSelector. */
+function matchesExcludeSelector(el: Element | null, excludeSelector?: string): boolean {
+  const sel = excludeSelector?.trim();
+  if (!el || !sel) return false;
+  try {
+    return el.closest(sel) != null;
+  } catch {
+    return false;
+  }
+}
+
+/** Clone-and-remove helper for text extraction paths. */
+function pruneExcluded(root: HTMLElement, excludeSelector?: string): number {
+  const sel = excludeSelector?.trim();
+  if (!sel) return 0;
+  let removed = 0;
+  try {
+    for (const n of Array.from(root.querySelectorAll(sel))) {
+      removed += (n.textContent ?? "").length;
+      n.remove();
+    }
+  } catch {
+    /* invalid selector — ignore */
+  }
+  return removed;
+}
+
+/**
+ * Row containers that contain a descendant text node matching `needle`
+ * (case-insensitive substring). Used by `within.text`.
+ */
+function rowContainersMatchingText(doc: Document, needle: string): Set<Element> {
+  const out = new Set<Element>();
+  const lower = needle.toLowerCase();
+  const root = doc.body ?? doc;
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const raw = (node.textContent ?? "").trim();
+    if (raw.length > 0 && raw.toLowerCase().includes(lower)) {
+      const parent = node.parentElement;
+      const row = parent?.closest(ROW_CONTAINER_SEL) ?? null;
+      if (row) out.add(row);
+    }
+    node = walker.nextNode();
+  }
+  return out;
+}
+
+/** Post-scan `within` filter — never renumbers absolute interactive indices. */
+function matchesWithin(
+  el: HTMLElement,
+  within: { selector?: string; text?: string } | undefined,
+  textRows: Set<Element> | null,
+): boolean {
+  if (!within) return true;
+  const hasSel = !!within.selector?.trim();
+  const hasText = !!within.text?.trim();
+  if (!hasSel && !hasText) return true;
+  const row = el.closest(ROW_CONTAINER_SEL);
+  if (!row) return false;
+  if (hasSel) {
+    try {
+      if (!row.matches(within.selector!.trim())) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (hasText) {
+    if (!textRows || !textRows.has(row)) return false;
+  }
+  return true;
+}
 
 /**
  * The interactive map keyed off `document` survives client-side navigation in a
@@ -114,13 +195,17 @@ function blockAwareText(root: HTMLElement): string {
  * Text of the primary content region with site chrome removed.
  * Returns the chrome char count so the caller can tell the agent what it skipped.
  */
-function mainText(doc: Document): { text: string; region: string; chromeChars: number } {
+function mainText(
+  doc: Document,
+  excludeSelector?: string,
+): { text: string; region: string; chromeChars: number; excludedChars: number } {
   const body = doc.body;
-  if (!body) return { text: "", region: "none", chromeChars: 0 };
+  if (!body) return { text: "", region: "none", chromeChars: 0, excludedChars: 0 };
   const mainRoot = findMainRoot(doc);
   const source = mainRoot ?? body;
   const clone = source.cloneNode(true) as HTMLElement;
   stripNonText(clone);
+  const excludedChars = pruneExcluded(clone, excludeSelector);
 
   let chromeChars = 0;
   for (const n of Array.from(clone.querySelectorAll(CHROME_SEL))) {
@@ -132,6 +217,7 @@ function mainText(doc: Document): { text: string; region: string; chromeChars: n
     text: normalizeText(blockAwareText(clone)),
     region: mainRoot ? mainRoot.tagName.toLowerCase() : "body-minus-chrome",
     chromeChars,
+    excludedChars,
   };
 }
 
@@ -299,8 +385,22 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
 
         const useMain = mode === "main" || mode === "snippet";
         const extracted = useMain
-          ? mainText(doc)
-          : { text: visibleText(doc), region: "body", chromeChars: 0 };
+          ? mainText(doc, request.excludeSelector)
+          : (() => {
+              const body = doc.body;
+              if (!body) {
+                return { text: "", region: "body", chromeChars: 0, excludedChars: 0 };
+              }
+              const clone = body.cloneNode(true) as HTMLElement;
+              stripNonText(clone);
+              const excludedChars = pruneExcluded(clone, request.excludeSelector);
+              return {
+                text: normalizeText(blockAwareText(clone)),
+                region: "body",
+                chromeChars: 0,
+                excludedChars,
+              };
+            })();
 
         let text = extracted.text;
         let filterMatched: number | undefined;
@@ -319,6 +419,22 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const cap = mode === "snippet" ? Math.min(maxChars, 2_500) : maxChars;
         const win = windowText(text, request.offset ?? 0, cap);
 
+        const hints: string[] = [];
+        if (win.hasMore) {
+          hints.push(
+            `Showing chars ${win.offset}–${win.offset + win.slice.length} of ${win.totalChars}. Continue with get_page({offset:${win.nextOffset}${mode !== "main" ? `, mode:"${mode}"` : ""}}) or narrow with get_page({filter:"…"}).`,
+          );
+        } else if (useMain && extracted.chromeChars > 0) {
+          hints.push(
+            `Skipped ${extracted.chromeChars} chars of nav/header/footer chrome. Use mode:"full" if you need it.`,
+          );
+        }
+        if (extracted.excludedChars > 0 && request.excludeSelector) {
+          hints.push(
+            `Pruned excludeSelector subtrees (~${extracted.excludedChars} chars).`,
+          );
+        }
+
         return {
           ok: true,
           data: {
@@ -328,6 +444,12 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             mode,
             region: extracted.region,
             chromeSkippedChars: extracted.chromeChars || undefined,
+            ...(request.excludeSelector
+              ? {
+                  excludeSelector: request.excludeSelector,
+                  excludedSubtreeChars: extracted.excludedChars || undefined,
+                }
+              : {}),
             ...(filterMatched != null
               ? { filter: request.filter, filterMatchedLines: filterMatched }
               : {}),
@@ -339,11 +461,7 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             nextOffset: win.nextOffset,
             hasMore: win.hasMore,
             truncated: win.hasMore,
-            hint: win.hasMore
-              ? `Showing chars ${win.offset}–${win.offset + win.slice.length} of ${win.totalChars}. Continue with get_page({offset:${win.nextOffset}${mode !== "main" ? `, mode:"${mode}"` : ""}}) or narrow with get_page({filter:"…"}).`
-              : useMain && extracted.chromeChars > 0
-                ? `Skipped ${extracted.chromeChars} chars of nav/header/footer chrome. Use mode:"full" if you need it.`
-                : undefined,
+            hint: hints.filter(Boolean).join(" ") || undefined,
           },
         };
       }
@@ -495,6 +613,10 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           const raw = (node.textContent ?? "").trim();
           if (raw.length > 1 && raw.toLowerCase().includes(needle)) {
             const parent = node.parentElement;
+            if (matchesExcludeSelector(parent, request.excludeSelector)) {
+              node = walker.nextNode();
+              continue;
+            }
             const host = (parent?.closest(INTERACTIVE_SEL) as HTMLElement | null) ?? null;
             const mapIdx = host ? map.indexOf(host) : -1;
             const body =
@@ -572,6 +694,9 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const wantKind = request.kind ?? "any";
         const wantState = request.state ?? "any";
         let wantRegion = request.region ?? "any";
+        const within = request.within;
+        const textRows =
+          within?.text?.trim() ? rowContainersMatchingText(doc, within.text.trim()) : null;
 
         const byKindAndFilter = all
           .filter((it) => wantKind === "any" || it.kind === wantKind)
@@ -580,13 +705,19 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           )
           .filter((it) => !request.requireLabel || it.text.length > 0)
           .filter((it) => !needle || interactiveHaystack(it).includes(needle))
-          .filter((it) => !banned || !interactiveHaystack(it).includes(banned));
+          .filter((it) => !banned || !interactiveHaystack(it).includes(banned))
+          .filter((it) => !matchesExcludeSelector(collected.els[it.i] ?? null, request.excludeSelector))
+          .filter((it) => {
+            const el = collected.els[it.i];
+            return el ? matchesWithin(el, within, textRows) : false;
+          });
 
         // Adaptive default: on console-style pages the nav alone exceeds any
         // sane limit. When the caller did not choose, prefer main content and
         // say so — rather than silently handing back 100 sidebar links.
+        // Skip auto-region when the caller already narrowed with within/excludeSelector.
         let regionAuto = false;
-        if (request.region == null && !needle) {
+        if (request.region == null && !needle && !within && !request.excludeSelector) {
           const mainOnly = byKindAndFilter.filter((it) => it.region === "main");
           if (byKindAndFilter.length > limit && mainOnly.length > 0 && mainOnly.length < byKindAndFilter.length) {
             wantRegion = "main";
@@ -609,6 +740,11 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             `Auto-scoped to main content (${matched.length} of ${byKindAndFilter.length} controls; ${navCount} nav/header/footer controls hidden). Pass region:"any" or region:"nav" to see them.`,
           );
         }
+        if (within && matched.length) {
+          hints.push(
+            `within scoped to ${matched.length} control(s) in matching row/list containers; item.i stays absolute for click_index.`,
+          );
+        }
         if (nextOffset != null) {
           hints.push(
             `Showing ${items.length} of ${matched.length}. Page with get_interactive({offset:${nextOffset}}) or jump straight to one with get_interactive({filter:"<label>"}).`,
@@ -616,7 +752,12 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         }
         if (needle && !matched.length) {
           hints.push(
-            `No control matches "${request.filter}". Try a shorter substring, region:"any", state:"any", or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
+            `No control matches "${request.filter}". Try a shorter substring, region:"any", state:"any", within:{text:"…"}, or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
+          );
+        }
+        if (within && !matched.length) {
+          hints.push(
+            `within matched no controls. Check the row text/selector, or drop within and use filter/excludeSelector.`,
           );
         }
         const disabledHidden =
@@ -649,6 +790,83 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             /** dialog = open modal/menu/sheet; page = full document */
             scope: collected.scope,
             hint: hints.filter(Boolean).join(" ") || undefined,
+          },
+        };
+      }
+      case "list_form_fields": {
+        const limit = request.limit ?? 80;
+        const offset = request.offset ?? 0;
+        const scopeMode = request.scope ?? "auto";
+        if (scopeMode === "dialog" && !findTopModal(doc)) {
+          return {
+            ok: false,
+            error: "no open dialog/menu to scope to; use scope=auto or scope=page",
+          };
+        }
+
+        const collected = collectInteractive(doc, INTERACTIVE_SCAN_CAP, scopeMode);
+        interactiveMaps.set(doc, collected.els);
+        const mainRoot = findMainRoot(doc);
+        const within = request.within;
+        const textRows =
+          within?.text?.trim() ? rowContainersMatchingText(doc, within.text.trim()) : null;
+        const needle = request.filter?.trim().toLowerCase() ?? "";
+        const banned = request.exclude?.trim().toLowerCase() ?? "";
+        const wantState = request.state ?? "any";
+        const wantRegion = request.region ?? "any";
+
+        type FormField = {
+          i: number;
+          tag: string;
+          type: string;
+          label: string;
+          name?: string;
+          placeholder?: string;
+          region: "main" | "nav";
+          disabled?: boolean;
+          hasValue: boolean;
+        };
+
+        const all: FormField[] = [];
+        for (let index = 0; index < collected.els.length; index++) {
+          const el = collected.els[index]!;
+          if (!isFormFieldEl(el)) continue;
+          if (matchesExcludeSelector(el, request.excludeSelector)) continue;
+          if (!matchesWithin(el, within, textRows)) continue;
+          const region = regionOf(el, mainRoot);
+          if (wantRegion !== "any" && region !== wantRegion) continue;
+          const disabled = isDisabled(el);
+          if (wantState === "enabled" && disabled) continue;
+          if (wantState === "disabled" && !disabled) continue;
+          const field = describeFormField(el, index, mainRoot);
+          const hay = [field.label, field.name, field.placeholder, field.type, field.tag]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          if (needle && !hay.includes(needle)) continue;
+          if (banned && hay.includes(banned)) continue;
+          all.push(field);
+        }
+
+        const items = all.slice(offset, offset + limit);
+        const nextOffset = offset + items.length < all.length ? offset + items.length : null;
+        return {
+          ok: true,
+          data: {
+            fields: items,
+            count: items.length,
+            matched: all.length,
+            total: collected.els.length,
+            offset,
+            nextOffset,
+            hasMore: nextOffset != null,
+            scope: collected.scope,
+            hint:
+              nextOffset != null
+                ? `Showing ${items.length} of ${all.length} fields. Page with list_form_fields({offset:${nextOffset}}). type_index({index:i}) uses the same handles.`
+                : all.length
+                  ? "type_index({index:i}) types into a field; password fields report hasValue only (never the value)."
+                  : 'No fillable fields visible. Click an edit control first (get_interactive({within:{text:"…"}})), then list_form_fields again.',
           },
         };
       }
@@ -891,6 +1109,128 @@ function interactiveHaystack(it: InteractiveItem): string {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+const NON_FILLABLE_INPUT_TYPES = new Set([
+  "button",
+  "submit",
+  "reset",
+  "image",
+  "hidden",
+]);
+
+/** Fillable controls for list_form_fields (subset of the interactive map). */
+function isFormFieldEl(el: HTMLElement): boolean {
+  if (el.tagName === "TEXTAREA" || el.tagName === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  if (el.tagName === "INPUT") {
+    return !NON_FILLABLE_INPUT_TYPES.has(resolveInputType(el as HTMLInputElement));
+  }
+  return false;
+}
+
+function resolveFieldLabel(el: HTMLElement): string {
+  const doc = el.ownerDocument;
+  const id = el.id?.trim();
+  if (id) {
+    try {
+      const esc =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(id)
+          : id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const byFor = doc.querySelector(`label[for="${esc}"]`);
+      const t = (byFor?.textContent ?? "").trim().replace(/\s+/g, " ");
+      if (t) return t.slice(0, 120);
+    } catch {
+      /* ignore */
+    }
+  }
+  const wrap = el.closest("label");
+  if (wrap) {
+    const clone = wrap.cloneNode(true) as HTMLElement;
+    for (const nested of Array.from(
+      clone.querySelectorAll("input, textarea, select, button"),
+    )) {
+      nested.remove();
+    }
+    const t = (clone.textContent ?? "").trim().replace(/\s+/g, " ");
+    if (t) return t.slice(0, 120);
+  }
+  const aria = el.getAttribute("aria-label")?.trim();
+  if (aria) return aria.slice(0, 120);
+  const labelledBy = el.getAttribute("aria-labelledby")?.trim();
+  if (labelledBy) {
+    const parts = labelledBy
+      .split(/\s+/)
+      .map((ref) => (doc.getElementById(ref)?.textContent ?? "").trim().replace(/\s+/g, " "))
+      .filter(Boolean);
+    if (parts.length) return parts.join(" ").slice(0, 120);
+  }
+  // Nearest preceding label-ish text (dt/th/label/span) in the same row/container.
+  let sib: Element | null = el.previousElementSibling;
+  for (let i = 0; i < 4 && sib; i++, sib = sib.previousElementSibling) {
+    const tag = sib.tagName;
+    if (tag === "LABEL" || tag === "TH" || tag === "DT" || tag === "SPAN" || tag === "DIV") {
+      if (sib.querySelector(INTERACTIVE_SEL)) continue;
+      const t = (sib.textContent ?? "").trim().replace(/\s+/g, " ");
+      if (t && t.length < 80) return t.slice(0, 120);
+    }
+  }
+  const row = el.closest("td, th, [role='cell'], [role='gridcell']");
+  const prevCell = row?.previousElementSibling;
+  if (prevCell && (prevCell.tagName === "TH" || prevCell.tagName === "TD")) {
+    const t = (prevCell.textContent ?? "").trim().replace(/\s+/g, " ");
+    if (t && t.length < 80) return t.slice(0, 120);
+  }
+  return "";
+}
+
+function fieldHasValue(el: HTMLElement): boolean {
+  if (isInputEl(el) || isTextAreaEl(el)) return (el.value ?? "").length > 0;
+  if (el.tagName === "SELECT") {
+    const sel = el as HTMLSelectElement;
+    return (sel.value ?? "").length > 0;
+  }
+  if (el.isContentEditable) return (el.textContent ?? "").trim().length > 0;
+  return false;
+}
+
+function describeFormField(
+  el: HTMLElement,
+  index: number,
+  mainRoot: HTMLElement | null,
+): {
+  i: number;
+  tag: string;
+  type: string;
+  label: string;
+  name?: string;
+  placeholder?: string;
+  region: "main" | "nav";
+  disabled?: boolean;
+  hasValue: boolean;
+} {
+  const type = isInputEl(el)
+    ? resolveInputType(el)
+    : el.tagName === "TEXTAREA"
+      ? "textarea"
+      : el.tagName === "SELECT"
+        ? "select"
+        : el.isContentEditable
+          ? "contenteditable"
+          : el.tagName.toLowerCase();
+  return {
+    i: index,
+    tag: el.tagName.toLowerCase(),
+    type,
+    label: resolveFieldLabel(el),
+    name: el.getAttribute("name") ?? undefined,
+    placeholder:
+      isInputEl(el) || isTextAreaEl(el) ? el.placeholder || undefined : undefined,
+    region: regionOf(el, mainRoot),
+    disabled: isDisabled(el) || undefined,
+    hasValue: fieldHasValue(el),
+  };
 }
 
 /** Inputs that accept free-text titles (not temporal/numeric constrained types). */

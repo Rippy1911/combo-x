@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, OpenRouterClient } from "../llm/openrouter.js";
 import { MemoryStore } from "../memory/store.js";
+import { TaskStore } from "../tasks/store.js";
 import type { BrowserBridge } from "./loop.js";
 import { AgentLoop } from "./loop.js";
 
@@ -146,6 +147,118 @@ describe("repeat-call guard inside the agent loop", () => {
       },
     });
     expect(navResult?.redirected).toBeUndefined();
+  });
+});
+
+describe("stop checkpoint on abort", () => {
+  it("appends a task summary when stopping with open todo/doing tasks", async () => {
+    const tasks = new TaskStore(`tasks_${crypto.randomUUID()}`);
+    const sessionId = "sess-stop";
+    await tasks.put({
+      id: "t1",
+      title: "Edit FaqPage meta",
+      status: "doing",
+      sessionId,
+      note: "saved FaqPage",
+    });
+    await tasks.put({
+      id: "t2",
+      title: "Edit Row3 meta",
+      status: "todo",
+      sessionId,
+    });
+
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [
+          { id: "1", name: "click_index", args: JSON.stringify({ index: 2 }) },
+        ],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "2", name: "get_page", args: "{}" }],
+      },
+      { content: "should not reach" },
+    ]);
+    const runContent = vi.fn(async (req: { op?: string }) => {
+      if (req.op === "click_index") return { ok: true, data: { clickedIndex: 2 } };
+      return { ok: true, data: { title: "t", url: "https://app.test/x", text: "x" } };
+    });
+    const browser = stubBrowser({ runContent });
+    const agent = new AgentLoop(llm, browser, new MemoryStore({ dbName: `g_${crypto.randomUUID()}` }));
+    const controller = new AbortController();
+
+    // Abort after the first tool turn completes (mutation recorded), before the next model call.
+    let toolTurns = 0;
+    const result = await agent.run({
+      model: "mock",
+      approvalMode: "auto_all",
+      userMessage: "edit meta tags",
+      sessionId,
+      tasks,
+      signal: controller.signal,
+      maxSteps: 8,
+      onEvent: (e) => {
+        if (e.type === "tool_result") {
+          toolTurns += 1;
+          if (toolTurns >= 1) controller.abort();
+        }
+      },
+    });
+
+    expect(result.aborted).toBe(true);
+    expect(result.finalText).toMatch(/^Stopped\. Tasks: 0\/2 done; last action:/);
+    expect(result.finalText).toMatch(/clicked index 2/);
+  });
+});
+
+describe("semantic stuck guard inside the agent loop", () => {
+  it("warns after 6 read-only calls and resets on a click", async () => {
+    const runContent = vi.fn(async (req: { op?: string }) => {
+      if (req.op === "click_index") return { ok: true, data: { clickedIndex: 0 } };
+      return { ok: true, data: { title: "t", url: "https://app.test/meta", text: "x", items: [] } };
+    });
+    const browser = stubBrowser({ runContent });
+
+    const reads = Array.from({ length: 6 }, (_, i) => ({
+      id: `r${i}`,
+      name: "get_page",
+      args: JSON.stringify({ filter: `noise-${i}` }),
+    }));
+    const llm = mockLlm([
+      { content: null, toolCalls: reads.slice(0, 3) },
+      { content: null, toolCalls: reads.slice(3, 6) },
+      {
+        content: null,
+        toolCalls: [{ id: "click", name: "click_index", args: JSON.stringify({ index: 0 }) }],
+      },
+      {
+        content: null,
+        toolCalls: [{ id: "after", name: "get_page", args: JSON.stringify({ filter: "after" }) }],
+      },
+      { content: "done" },
+    ]);
+    const agent = new AgentLoop(llm, browser, new MemoryStore({ dbName: `g_${crypto.randomUUID()}` }));
+
+    const results: Array<{ tool?: string; result: unknown }> = [];
+    await agent.run({
+      model: "mock",
+      approvalMode: "auto_all",
+      userMessage: "edit rows",
+      maxSteps: 12,
+      onEvent: (e) => {
+        if (e.type === "tool_result") results.push({ tool: e.tool, result: e.result });
+      },
+    });
+
+    const readResults = results.filter((r) => r.tool === "get_page");
+    const sixth = readResults[5]?.result as { _repeat?: string };
+    expect(sixth?._repeat).toMatch(/observations without changing anything/);
+
+    const afterClick = results.filter((r) => r.tool === "get_page").slice(6);
+    expect(afterClick.length).toBeGreaterThanOrEqual(1);
+    expect((afterClick[0]?.result as { _repeat?: string })?._repeat).toBeUndefined();
   });
 });
 

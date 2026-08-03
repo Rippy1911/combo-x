@@ -92,6 +92,60 @@ describe("RepeatGuard", () => {
   });
 });
 
+describe("semantic observation stuck guard", () => {
+  it("warns at 6 consecutive observations with varied args", () => {
+    const g = new RepeatGuard();
+    let last: ReturnType<RepeatGuard["record"]> = { kind: "ok" };
+    for (let i = 0; i < 6; i++) {
+      last = g.record("get_page", { filter: `x${i}` }, { ok: true, data: { text: `t${i}` } });
+    }
+    expect(last.kind).toBe("warn");
+    if (last.kind === "warn") {
+      expect(last.note).toMatch(/6 observations without changing anything/);
+      expect(last.note).toMatch(/list_form_fields|within|excludeSelector/);
+    }
+    expect(g.getObservationStreak()).toBe(6);
+  });
+
+  it("blocks the 9th observation before it runs", () => {
+    const g = new RepeatGuard();
+    for (let i = 0; i < 9; i++) {
+      g.record("find_text", { text: `q${i}` }, { ok: true, matches: [] });
+    }
+    expect(g.getObservationStreak()).toBe(9);
+    const verdict = g.check("get_interactive", { filter: "Save" });
+    expect(verdict.kind).toBe("block");
+    if (verdict.kind === "block") {
+      expect(verdict.result.error).toBe("observation_stuck_blocked");
+    }
+  });
+
+  it("resets the streak on a mutation", () => {
+    const g = new RepeatGuard();
+    for (let i = 0; i < 6; i++) {
+      g.record("get_interactive", { filter: `f${i}` }, { ok: true, items: [] });
+    }
+    expect(g.getObservationStreak()).toBe(6);
+    g.record("click_index", { index: 3 }, { ok: true, clickedIndex: 3 });
+    expect(g.getObservationStreak()).toBe(0);
+    expect(g.record("get_page", {}, { ok: true, data: { text: "x" } }).kind).toBe("ok");
+  });
+
+  it("does not trip when the observed URL is changing", () => {
+    const g = new RepeatGuard();
+    for (let i = 0; i < 8; i++) {
+      const verdict = g.record(
+        "get_page",
+        { offset: i },
+        { ok: true, data: { text: "loading", url: `https://app.test/step/${i}` } },
+      );
+      expect(verdict.kind).toBe("ok");
+    }
+    expect(g.check("get_page", {}).kind).toBe("ok");
+    expect(g.getObservationStreak()).toBe(1);
+  });
+});
+
 describe("annotateRedirect", () => {
   it("flags a silent redirect and names both URLs", () => {
     const out = annotateRedirect(

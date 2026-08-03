@@ -346,6 +346,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   page_digest: "browser",
   get_links: "browser",
   get_interactive: "browser",
+  list_form_fields: "browser",
   press_key: "browser",
   click_index: "browser",
   type_index: "browser",

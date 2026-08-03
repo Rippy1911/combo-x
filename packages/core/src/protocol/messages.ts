@@ -15,6 +15,7 @@ export const BrowserToolNameSchema = z.enum([
   "wait",
   "find_text",
   "get_interactive",
+  "list_form_fields",
   "press_key",
   "click_index",
   "type_index",
@@ -122,6 +123,8 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     filter: z.string().max(200).optional(),
     /** Drop lines containing this substring — strips repeated boilerplate. */
     exclude: z.string().max(200).optional(),
+    /** Prune matching CSS subtrees before extraction (chat sidebars, cookie walls). */
+    excludeSelector: z.string().max(500).optional(),
   }),
   z.object({ op: z.literal("page_digest") }),
   z.object({
@@ -176,6 +179,8 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     clickableOnly: z.boolean().optional(),
     region: z.enum(["any", "main", "nav"]).optional(),
     exclude: z.string().max(200).optional(),
+    /** Skip hits inside matching CSS subtrees (chat sidebars, cookie walls). */
+    excludeSelector: z.string().max(500).optional(),
   }),
   z.object({
     op: z.literal("get_interactive"),
@@ -198,6 +203,35 @@ export const ContentRequestSchema = z.discriminatedUnion("op", [
     fields: z
       .array(z.enum(["tag", "kind", "region", "role", "text", "href", "type", "placeholder", "name", "title", "disabled"]))
       .max(11)
+      .optional(),
+    /** Drop controls inside matching CSS subtrees (chat sidebars, cookie walls). */
+    excludeSelector: z.string().max(500).optional(),
+    /**
+     * Post-scan row scope: keep controls whose row container matches selector
+     * and/or contains text (e.g. the pencil in the row containing "FaqPage").
+     */
+    within: z
+      .object({
+        selector: z.string().max(500).optional(),
+        text: z.string().max(200).optional(),
+      })
+      .optional(),
+  }),
+  z.object({
+    op: z.literal("list_form_fields"),
+    limit: z.number().int().positive().max(120).optional(),
+    scope: z.enum(["auto", "page", "dialog"]).optional(),
+    offset: z.number().int().min(0).max(10_000).optional(),
+    filter: z.string().max(200).optional(),
+    exclude: z.string().max(200).optional(),
+    region: z.enum(["any", "main", "nav"]).optional(),
+    state: z.enum(["any", "enabled", "disabled"]).optional(),
+    excludeSelector: z.string().max(500).optional(),
+    within: z
+      .object({
+        selector: z.string().max(500).optional(),
+        text: z.string().max(200).optional(),
+      })
       .optional(),
   }),
   z.object({
