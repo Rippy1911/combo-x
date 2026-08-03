@@ -755,6 +755,16 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         if (disabledHidden > 0) {
           hints.push(`${disabledHidden} disabled control(s) hidden by state:"enabled".`);
         }
+        if (matched.length >= 20) {
+          const counts = new Map<string, number>();
+          for (const it of matched) counts.set(it.text, (counts.get(it.text) ?? 0) + 1);
+          const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+          if (top && top[1] >= matched.length * 0.8) {
+            hints.push(
+              `${top[1]} of ${matched.length} items share the text "${top[0]}" — disambiguate by row with within:{text:"<unique row text>"}, or shrink with fields:["text"].`,
+            );
+          }
+        }
         if (!all.length) {
           hints.push(
             "No interactive elements found. Close overlays (press_key Escape), hard-refresh the tab, or reload the extension.",
@@ -877,6 +887,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         }
         const el = map[request.index];
         if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
+        if (!el.isConnected) {
+          return {
+            ok: false,
+            error:
+              "element_detached — the page re-rendered after your last get_interactive and this handle is stale; the click would go nowhere. Re-scan get_interactive({filter:\"…\"}) and click the fresh index.",
+          };
+        }
         el.click();
         return { ok: true, data: { clickedIndex: request.index, tag: el.tagName.toLowerCase() } };
       }
@@ -1660,6 +1677,26 @@ function visibleText(doc: Document, pruneSel: string | null = null): string {
 export async function waitMs(ms: number): Promise<void> {
   const capped = Math.min(Math.max(0, ms), 10_000);
   await new Promise((r) => setTimeout(r, capped));
+}
+
+/**
+ * Post-click effect probe — the content script calls this after a short
+ * settle delay so clicks stop being silent no-ops (field case 2026-08-03:
+ * click_index "ok" with no dialog, twice, no signal either way).
+ */
+export function postClickState(doc: Document): Record<string, unknown> {
+  const modal = findTopModal(doc);
+  if (modal) {
+    return {
+      dialogOpened: true,
+      topModal: modal.tagName.toLowerCase(),
+      hint: "A dialog/menu opened — re-read with get_interactive (default scope=auto scopes into it).",
+    };
+  }
+  return {
+    dialogOpened: false,
+    hint: "No dialog/menu appeared after the click — the control may act inline, or the click missed (re-scan get_interactive and retry the fresh index).",
+  };
 }
 
 /**

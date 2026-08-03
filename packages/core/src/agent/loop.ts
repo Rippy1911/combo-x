@@ -479,7 +479,8 @@ Voice mode / Azure Speech:
 - Never create Azure Speech STT/TTS REST connectors. Tell the user to use Voice Test Speech (any browser) or Voice Start (Chrome/Edge; mic/wake needs offscreen).
 Rules:
 - Prefer page_digest over full get_page dumps.
-- Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
+- Independent reads belong in ONE turn — batch several get_interactive/extract/find_text/page_digest calls together (consecutive non-sensitive tools run in parallel). Two batched turns beat six serial ones. Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
+- If you have enough to act (click/fill/save), act now — another confirming read changes nothing. Reads never change the page; a click is also your best probe (its result reports dialogOpened).
 - Prefer skill_read + tools / rag / memories over inventing facts.
 - A tool result with error "aborted" / "The operation was aborted" is NOT a finding about the page — wait, refocus the tab, retry once, then tell the user.
 - After click/navigate, wait briefly then re-read.
@@ -1502,7 +1503,10 @@ export class AgentLoop {
 
     emit({
       type: "status",
-      message: `Vision worker (${runCtx.visionSettings.visionWorkerModel}) — orchestrator lacks vision (${cap.source})`,
+      message:
+        cap.source === "unknown"
+          ? `Vision worker (${runCtx.visionSettings.visionWorkerModel}) — orchestrator model not in the vision registry; set a Vision override in Settings to skip this hop`
+          : `Vision worker (${runCtx.visionSettings.visionWorkerModel}) — orchestrator lacks vision (${cap.source})`,
     });
     const critique = await this.runVisionWorker(pending, runCtx, emit, onUsage, logUsage);
     messages.push({

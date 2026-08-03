@@ -54,6 +54,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", hint: "cheap", vision: true, providers: ["openai"] },
   // Moonshot / Kimi
   { id: "kimi-k3", label: "Kimi K3", hint: "Moonshot · frontier", vision: true, providers: ["moonshot", "openrouter"] },
+  { id: "kimi-k3-max", label: "Kimi K3 Max", hint: "Moonshot · frontier", vision: true, providers: ["moonshot", "openrouter"] },
   { id: "kimi-k2.6", label: "Kimi K2.6", hint: "Moonshot", vision: true, providers: ["moonshot", "openrouter"] },
   { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", hint: "Moonshot · coding", providers: ["moonshot"] },
   {

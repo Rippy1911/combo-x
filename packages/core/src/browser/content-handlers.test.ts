@@ -556,6 +556,50 @@ describe("excludeSelector / within / list_form_fields", () => {
     expect(data.hint ?? "").toMatch(/within matched no controls/);
   });
 
+  it("click_index on a detached (stale) handle errors element_detached instead of a silent no-op", () => {
+    // Field case 2026-08-03 (twice): click_index "ok", nothing happened.
+    document.body.innerHTML = `
+      <table><tbody>
+        <tr><td>FaqPage</td><td><button aria-label="Edit"></button></td></tr>
+        <tr><td>Cart</td><td><button aria-label="Edit"></button></td></tr>
+      </tbody></table>`;
+    const scan = handleContentRequest({ op: "get_interactive", kind: "button" }, document);
+    const items = (scan.data as { items: Array<{ i: number }> }).items;
+    expect(items.length).toBe(2);
+
+    // React re-render replaces the first row's button — the handle is now stale.
+    document.querySelector("button")!.remove();
+
+    const res = handleContentRequest({ op: "click_index", index: items[0]!.i }, document);
+    expect(res.ok).toBe(false);
+    expect((res as { error?: string }).error).toMatch(/element_detached/);
+    expect(String((res as { error?: string }).error)).toMatch(/re-scan/i);
+  });
+
+  it("postClickState reports dialogOpened true/false after a settle", async () => {
+    const { postClickState } = await import("./content-handlers.js");
+    document.body.innerHTML = `<div>No dialogs here</div>`;
+    expect(postClickState(document).dialogOpened).toBe(false);
+
+    document.body.innerHTML = `<div role="dialog"><p>Edit meta tags</p><input /><button>Save</button></div>`;
+    const state = postClickState(document);
+    expect(state.dialogOpened).toBe(true);
+    expect(String(state.hint)).toMatch(/get_interactive/);
+  });
+
+  it("get_interactive warns when most items share one identical text", () => {
+    // 46 identical "Edit" buttons on the meta panel — the dump needs a disambiguation hint.
+    const rows = Array.from(
+      { length: 30 },
+      (_, i) => `<tr><td>Page${i}</td><td><button aria-label="Edit"></button></td></tr>`,
+    ).join("");
+    document.body.innerHTML = `<table><tbody>${rows}</tbody></table>`;
+    const res = handleContentRequest({ op: "get_interactive", kind: "button" }, document);
+    const data = res.data as { items: unknown[]; hint?: string };
+    expect(data.items.length).toBe(30);
+    expect(data.hint ?? "").toMatch(/share the text "Edit"/);
+  });
+
   it("hidden subtrees ([hidden] / inline display:none) do not pollute get_page text", () => {
     document.body.innerHTML = `
       <div id="chat" hidden><p>chat message mentioning FaqPage</p></div>

@@ -192,7 +192,8 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "click_index",
-      description: "Click interactive element by index from the last get_interactive on this page.",
+      description:
+        "Click interactive element by index from the last get_interactive on this page. Errors element_detached when the page re-rendered and the handle went stale (re-scan, don't retry). The reply reports dialogOpened — if false, the control may act inline or the click missed.",
       parameters: {
         type: "object",
         properties: { index: { type: "number" } },
