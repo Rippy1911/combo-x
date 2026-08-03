@@ -134,11 +134,13 @@ export class RepeatGuard {
   /**
    * Semantic stuck guard: consecutive observation-only calls without an
    * intervening mutation. `wait` inside the streak marks deliberate polling —
-   * warned but never blocked.
+   * warned but never blocked. Warn fires EARLY (4) with a directive tone —
+   * field evidence (2026-08-03, 5 runs) shows operators kill a recon-looping
+   * agent by turn 5, before a soft warn at 6 ever lands.
    */
   private observationStreak = 0;
   private waitInStreak = false;
-  private static readonly STUCK_WARN_AT = 6;
+  private static readonly STUCK_WARN_AT = 4;
   private static readonly STUCK_BLOCK_AT = 10;
 
   private key(name: string, args: Record<string, unknown>): string {
@@ -237,11 +239,11 @@ export class RepeatGuard {
         kind: "warn",
         repeats: this.observationStreak,
         note:
-          `${this.observationStreak} read-only observations in a row without a click/type/navigation. ` +
-          `If you are hunting for something that is not there, stop reading variants and report BLOCKED with ` +
-          `what you tried. To fill a form, list_form_fields maps it in one call; for noise, use ` +
-          `within/excludeSelector. If you are deliberately waiting for the page to change, keep using ` +
-          `wait() between reads (that never blocks).`,
+          `ACT NOW — you have made ${this.observationStreak} read-only calls with zero clicks/types/navigation. ` +
+          `Pick the most plausible control and click it (the result reports dialogOpened — a wrong click is cheap and ` +
+          `teaches more than another read), or map the form with list_form_fields, or scope with within:{text:"…"}. ` +
+          `Do NOT take another broad read. If nothing is clickable for your goal, tell the user exactly what is ` +
+          `blocking you instead of reading on. (Deliberately waiting? keep using wait() — that never blocks.)`,
       };
     }
     return { kind: "ok" };

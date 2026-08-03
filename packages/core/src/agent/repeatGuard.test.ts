@@ -105,23 +105,25 @@ describe("RepeatGuard stuck-loop guard", () => {
     }
   };
 
-  it("warns on the 6th consecutive read-only call with varied args", () => {
+  it("warns with a directive on the 4th consecutive read-only call (varied args)", () => {
+    // 2026-08-03: operators kill a recon-looping agent by turn 5 — the warn
+    // must land before that, and read like an order, not a suggestion.
     const g = new RepeatGuard();
     let last: ReturnType<RepeatGuard["record"]> = { kind: "ok" };
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 4; i++) {
       g.check("get_interactive", { round: i });
       last = g.record("get_interactive", { round: i }, { ok: true, items: [i] });
     }
     expect(last.kind).toBe("warn");
-    if (last.kind === "warn") expect(last.note).toMatch(/read-only observations/);
+    if (last.kind === "warn") expect(last.note).toMatch(/ACT NOW/);
   });
 
   it("a mutation resets the observation streak", () => {
     const g = new RepeatGuard();
-    read(g, 5); // streak 5
+    read(g, 3); // streak 3
     g.check("click_index", { index: 3 });
     g.record("click_index", { index: 3 }, { ok: true }); // reset
-    read(g, 5); // streak 5 again — still quiet
+    read(g, 3); // streak 3 again — still under the directive threshold
     expect(g.check("get_page", {}).kind).toBe("ok");
   });
 
