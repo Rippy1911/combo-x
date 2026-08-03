@@ -11,6 +11,11 @@
  * second is refused with concrete alternatives. Only *identical args producing
  * an identical result* count — legitimately re-polling a changing page (a
  * loading spinner, a queue) never trips the guard.
+ *
+ * Semantic stuck guard (2026-08-03): counts observation-only *model turns*
+ * (batches), not each parallel read inside a turn — DEFAULT_SYSTEM tells the
+ * model to batch reads; counting each tool fought that advice and stamped
+ * ACT NOW mid-batch.
  */
 
 /** Tools whose whole purpose is to re-observe changing state. */
@@ -27,10 +32,11 @@ const POLLING_TOOLS = new Set([
 
 /**
  * Read-only tools: they observe page state without changing it. A long streak
- * of these with no click/type/navigation in between is the semantic version of
- * the identical-call loop (observed 2026-08-03 on app.base44.com: ~12 varied
- * read calls hunting for a field that did not exist, zero mutations — the
- * identical-call guard never fired because args and results kept changing).
+ * of observation-only *turns* with no click/type/navigation in between is the
+ * semantic version of the identical-call loop (observed 2026-08-03 on
+ * app.base44.com: ~12 varied read calls hunting for a field that did not
+ * exist, zero mutations — the identical-call guard never fired because args
+ * and results kept changing).
  */
 const OBSERVATION_TOOLS = new Set([
   "get_page",
@@ -49,6 +55,10 @@ const OBSERVATION_TOOLS = new Set([
   "list_tabs",
   "wait",
 ]);
+
+export function isObservationTool(name: string): boolean {
+  return OBSERVATION_TOOLS.has(name);
+}
 
 export type RepeatVerdict =
   | { kind: "ok" }
@@ -132,16 +142,16 @@ export class RepeatGuard {
   private static readonly BLOCK_AT_REPEATS = 1;
 
   /**
-   * Semantic stuck guard: consecutive observation-only calls without an
-   * intervening mutation. `wait` inside the streak marks deliberate polling —
-   * warned but never blocked. Warn fires EARLY (4) with a directive tone —
-   * field evidence (2026-08-03, 5 runs) shows operators kill a recon-looping
-   * agent by turn 5, before a soft warn at 6 ever lands.
+   * Semantic stuck guard: consecutive observation-only *batches* (one model
+   * turn of parallel reads = +1) without an intervening mutation. `wait` inside
+   * the streak marks deliberate polling — warned but never blocked.
+   *
+   * Warn fires at 3 observation-only turns (operators kill ~turn 5). Block at 8.
    */
-  private observationStreak = 0;
+  private observationBatches = 0;
   private waitInStreak = false;
-  private static readonly STUCK_WARN_AT = 4;
-  private static readonly STUCK_BLOCK_AT = 10;
+  private static readonly STUCK_WARN_AT = 3;
+  private static readonly STUCK_BLOCK_AT = 8;
 
   private key(name: string, args: Record<string, unknown>): string {
     return `${name}#${canonicalize(args)}`;
@@ -150,16 +160,17 @@ export class RepeatGuard {
   /**
    * Called before executing. Returns `block` once this exact call has produced
    * the same result twice — the tool is then not run at all.
+   * Also refuses when observation-only batches hit the hard ceiling.
    */
   check(name: string, args: Record<string, unknown>): RepeatVerdict {
     if (!OBSERVATION_TOOLS.has(name)) {
-      this.observationStreak = 0;
+      this.observationBatches = 0;
       this.waitInStreak = false;
-    } else if (this.observationStreak >= RepeatGuard.STUCK_BLOCK_AT && !this.waitInStreak) {
+    } else if (this.observationBatches >= RepeatGuard.STUCK_BLOCK_AT && !this.waitInStreak) {
       // The refusal IS the intervention — reset so recovery reads (list_tabs to
       // find a lost tab, a scoped re-read) are not themselves refused next.
-      const observations = this.observationStreak;
-      this.observationStreak = 0;
+      const observations = this.observationBatches;
+      this.observationBatches = 0;
       this.waitInStreak = false;
       return {
         kind: "block",
@@ -169,7 +180,7 @@ export class RepeatGuard {
           error: "stuck_loop_blocked",
           observations,
           hint:
-            `Refused: ${observations} consecutive read-only calls with no click/type/navigation. ` +
+            `Refused: ${observations} consecutive read-only turns with no click/type/navigation. ` +
             `The page does not change by reading it again. Mutate (click_index/type_index), map the form with ` +
             `list_form_fields, cut noise with within/excludeSelector, or report BLOCKED with what you tried. ` +
             `Wrong tab? list_tabs then activate_tab or navigate back — this refusal reset the streak.`,
@@ -194,8 +205,8 @@ export class RepeatGuard {
   }
 
   /**
-   * Record an outcome. Returns `warn` when the call+result pair just repeated,
-   * so the caller can attach a nudge to the (still valid) result.
+   * Record an outcome for the identical-call guard only.
+   * Observation-batch streak is updated via {@link finalizeObservationBatch}.
    */
   record(name: string, args: Record<string, unknown>, result: unknown): RepeatVerdict {
     // Re-polling a mutating surface is normal; only flag it when the *result*
@@ -204,42 +215,48 @@ export class RepeatGuard {
     const fp = fingerprint(result);
     const prev = this.seen.get(key);
 
-    // A changed result means the retry was productive — reset the streak.
-    let pairVerdict: RepeatVerdict = { kind: "ok" };
     if (!prev || prev.fingerprint !== fp) {
       this.seen.set(key, { repeats: 0, fingerprint: fp });
-    } else {
-      const repeats = prev.repeats + 1;
-      this.seen.set(key, { repeats, fingerprint: fp });
-      if (repeats >= RepeatGuard.WARN_AT_REPEATS) {
-        pairVerdict = {
-          kind: "warn",
-          repeats,
-          note:
-            `Repeated call: ${name} with these exact arguments returned an identical result ${repeats + 1}× ` +
-            `— you learned nothing new. ${alternativesFor(name, args)}` +
-            (POLLING_TOOLS.has(name) ? " If you are waiting for the page to change, wait() first." : "") +
-            ` One more identical call will be refused.`,
-        };
-      }
+      return { kind: "ok" };
     }
-
-    // Semantic stuck tracking (see OBSERVATION_TOOLS above).
-    if (OBSERVATION_TOOLS.has(name)) {
-      this.observationStreak += 1;
-      if (name === "wait") this.waitInStreak = true;
-    } else {
-      this.observationStreak = 0;
-      this.waitInStreak = false;
-    }
-
-    if (pairVerdict.kind === "warn") return pairVerdict;
-    if (OBSERVATION_TOOLS.has(name) && this.observationStreak >= RepeatGuard.STUCK_WARN_AT) {
+    const repeats = prev.repeats + 1;
+    this.seen.set(key, { repeats, fingerprint: fp });
+    if (repeats >= RepeatGuard.WARN_AT_REPEATS) {
       return {
         kind: "warn",
-        repeats: this.observationStreak,
+        repeats,
         note:
-          `ACT NOW — you have made ${this.observationStreak} read-only calls with zero clicks/types/navigation. ` +
+          `Repeated call: ${name} with these exact arguments returned an identical result ${repeats + 1}× ` +
+          `— you learned nothing new. ${alternativesFor(name, args)}` +
+          (POLLING_TOOLS.has(name) ? " If you are waiting for the page to change, wait() first." : "") +
+          ` One more identical call will be refused.`,
+      };
+    }
+    return { kind: "ok" };
+  }
+
+  /**
+   * Call once per executed tool batch (parallel non-sensitive tools, or one
+   * sensitive tool). Counts +1 for an observation-only batch; resets on any
+   * mutation. Returns warn to annotate onto the last tool result in the batch.
+   */
+  finalizeObservationBatch(toolNames: string[]): RepeatVerdict {
+    if (toolNames.length === 0) return { kind: "ok" };
+    const allObservation = toolNames.every((n) => OBSERVATION_TOOLS.has(n));
+    if (!allObservation) {
+      this.observationBatches = 0;
+      this.waitInStreak = false;
+      return { kind: "ok" };
+    }
+    this.observationBatches += 1;
+    if (toolNames.some((n) => n === "wait")) this.waitInStreak = true;
+    if (this.observationBatches >= RepeatGuard.STUCK_WARN_AT) {
+      return {
+        kind: "warn",
+        repeats: this.observationBatches,
+        note:
+          `ACT NOW — ${this.observationBatches} read-only turns with zero clicks/types/navigation. ` +
+          `Batching more reads in the next turn still counts as recon. ` +
           `Pick the most plausible control and click it (the result reports dialogOpened — a wrong click is cheap and ` +
           `teaches more than another read), or map the form with list_form_fields, or scope with within:{text:"…"}. ` +
           `Do NOT take another broad read. If nothing is clickable for your goal, tell the user exactly what is ` +

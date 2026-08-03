@@ -1695,7 +1695,11 @@ export function postClickState(doc: Document): Record<string, unknown> {
   }
   return {
     dialogOpened: false,
-    hint: "No dialog/menu appeared after the click — the control may act inline, or the click missed (re-scan get_interactive and retry the fresh index).",
+    effect: "no_dialog",
+    hint:
+      "No dialog/menu appeared after the click — treat as a MISS unless you expected an in-page toggle. " +
+      "Do NOT claim the action succeeded. Re-scan get_interactive({filter:…}) for a fresh index, retry once, " +
+      "then report the blocker if it still fails.",
   };
 }
 

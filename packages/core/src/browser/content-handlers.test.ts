@@ -579,7 +579,10 @@ describe("excludeSelector / within / list_form_fields", () => {
   it("postClickState reports dialogOpened true/false after a settle", async () => {
     const { postClickState } = await import("./content-handlers.js");
     document.body.innerHTML = `<div>No dialogs here</div>`;
-    expect(postClickState(document).dialogOpened).toBe(false);
+    const miss = postClickState(document);
+    expect(miss.dialogOpened).toBe(false);
+    expect(miss.effect).toBe("no_dialog");
+    expect(String(miss.hint)).toMatch(/MISS|Do NOT claim/i);
 
     document.body.innerHTML = `<div role="dialog"><p>Edit meta tags</p><input /><button>Save</button></div>`;
     const state = postClickState(document);

@@ -121,6 +121,55 @@ describe("AgentLoop", () => {
     expect(events).toContain("done");
   });
 
+  it("verify-before-done continues when open doing-tasks remain", async () => {
+    // Model tries to finish after one read while a doing-task is still open —
+    // runtime injects a gate nudge; model must take another turn.
+    const llm = mockLlm([
+      {
+        content: null,
+        toolCalls: [{ id: "1", name: "get_page", args: "{}" }],
+      },
+      { content: "All meta tags translated." },
+      { content: "Blocked: still need to edit rows — open task remains." },
+    ]);
+    const sessionId = `sess_${crypto.randomUUID()}`;
+    const tasks = {
+      list: vi.fn(async () => [
+        {
+          id: "t1",
+          title: "Translate FaqPage meta",
+          status: "doing" as const,
+          sortOrder: 0,
+          sessionId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]),
+      put: vi.fn(),
+      reorder: vi.fn(),
+    };
+    const statuses: string[] = [];
+    const agent = new AgentLoop(
+      llm,
+      stubBrowser(),
+      new MemoryStore({ dbName: `agent_${crypto.randomUUID()}` }),
+    );
+    const result = await agent.run({
+      model: "mock-orch",
+      userMessage: "translate meta tags",
+      sessionId,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tasks: tasks as any,
+      onEvent: (e) => {
+        if (e.type === "status") statuses.push(e.message ?? "");
+      },
+    });
+    expect(statuses.some((m) => /Verify-before-done gate/i.test(m))).toBe(true);
+    expect(result.finalText).toMatch(/Blocked|open task/i);
+    expect(result.steps).toBeGreaterThanOrEqual(3);
+    expect((llm.chatStreaming as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("budget mode rewrites bare get_page to page_digest", async () => {
     const llm = mockLlm([
       {

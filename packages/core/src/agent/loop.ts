@@ -102,6 +102,14 @@ import {
 import { PageTemplateCache } from "./pageTemplateCache.js";
 import { annotateRedirect, RepeatGuard } from "./repeatGuard.js";
 import {
+  buildVerifyNudge,
+  emptyRunEvidence,
+  MAX_VERIFY_NUDGES,
+  noteToolEvidence,
+  verifyBeforeDoneSignals,
+  type RunEvidence,
+} from "./loopQuality.js";
+import {
   leanHistory,
   truncateToolResultForLlm,
   compressHistory,
@@ -441,6 +449,13 @@ export const DEFAULT_SYSTEM = `You are Combo-X, a local-first browser agent (orc
 Browser navigation: ALWAYS prefer navigate (same tab). Use open_tab ONLY with newTab:true when you truly need a second page in parallel (e.g. compare two PDPs). Ephemeral new tabs are auto-closed at end of turn unless keepOpen:true — still prefer navigate. Use list_tabs + activate_tab to reuse existing tabs; close_tab when done with a keepOpen tab.
 For interaction prefer get_interactive → click_index / type_index (Nanobrowser-style indices) over guessing CSS. After opening a modal/floating editor, call get_interactive again — it scopes to the topmost dialog OR high-z portal (scope=dialog) so Save/Plan title are indexed (not calendar buttons behind). Ephemeral pagination listboxes (rows-per-page 5/10/25…) are ignored; if still stuck, press_key Escape then get_interactive({scope:"page"}). Never type_index free text into type=time. For passwords use type_index/type_text/login with text="{vault:label}" — Combo resolves vault refs before typing (never invent or ask the user to re-paste secrets). page_digest includes seo.* (meta/canonical/robots/JSON-LD) for indexing checks; skill_read combo-seo-check for SERP/GSC playbook.
 Each user turn may include ## Active browser tab (url/title/tabId/time) and ## Picked element(s) — treat those as ground truth for where the user is and what they pointed at; act on the picked element before exploring elsewhere.
+VERIFY BEFORE CLAIM (critical — same discipline as ns-agent):
+- NEVER tell the user work is done / saved / translated / completed unless a tool result in THIS run proves it (click with dialogOpened:true or verified inline change, type + re-read, update_task only after that proof).
+- Empty / zero-match tool results mean not found — say that. Do not invent controls, fields, row counts, or page text.
+- dialogOpened:false or effect:"no_dialog" after a click = miss until you re-scan and prove otherwise. Do not narrate success from the click "ok" alone.
+- Runtime fields _repeat, stuck_loop_blocked, redirected, hasMore/nextOffset are orders — obey them; do not take another broad read to "be sure".
+- After CONTEXT AUTO-COMPRESSED: list_tasks + re-verify with tools; never trust compressed memory of completion.
+- The runtime may inject "## Runtime gate — VERIFY BEFORE DONE" — that is not the user; answer it with tools or an honest blocker.
 SEARCH, DON'T DUMP (this is how you stay fast on big apps):
 - Looking for ONE labelled thing? Go straight to it: get_interactive({filter:"Save"}) or find_text({text:"App content"}). find_text returns interactiveIndex on hits inside a control, so you can click_index immediately. Never list 100 controls to find one.
 - get_page defaults to mode:"main", which drops nav/header/footer. On consoles (Play Console, GSC, admin panels) the chrome is most of the page — mode:"full" is almost always the wrong call.
@@ -479,13 +494,13 @@ Voice mode / Azure Speech:
 - Never create Azure Speech STT/TTS REST connectors. Tell the user to use Voice Test Speech (any browser) or Voice Start (Chrome/Edge; mic/wake needs offscreen).
 Rules:
 - Prefer page_digest over full get_page dumps.
-- Independent reads belong in ONE turn — batch several get_interactive/extract/find_text/page_digest calls together (consecutive non-sensitive tools run in parallel). Two batched turns beat six serial ones. Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns.
+- Independent reads belong in ONE turn — batch several get_interactive/extract/find_text/page_digest calls together (consecutive non-sensitive tools run in parallel). Two batched turns beat six serial ones. Multi-tab compare: list_tabs once, then ONE turn with several page_digest / tight extract calls in parallel — not serial get_page dumps across turns. One observation batch per turn is fine; do not spend many turns only reading.
 - If you have enough to act (click/fill/save), act now — another confirming read changes nothing. Reads never change the page; a click is also your best probe (its result reports dialogOpened).
 - Prefer skill_read + tools / rag / memories over inventing facts.
 - A tool result with error "aborted" / "The operation was aborted" is NOT a finding about the page — wait, refocus the tab, retry once, then tell the user.
-- After click/navigate, wait briefly then re-read.
+- After click/navigate, wait briefly then re-read to verify — then you may claim the effect.
 - Never invent page content — use tools.
-- Be concise in the final answer.`;
+- Be concise in the final answer.`
 
 const PARSE_SYSTEM = `You extract structured data from untrusted page text.
 Reply with ONLY valid JSON: {"rows":[...],"notes":"optional short note"}.
@@ -637,6 +652,8 @@ interface RunContext {
   boundTabId?: number;
   /** Detects identical call+result pairs and refuses the third one. */
   repeatGuard?: RepeatGuard;
+  /** Per-run evidence for verify-before-done (mutations, silent clicks). */
+  evidence: RunEvidence;
 }
 
 export class AgentLoop {
@@ -909,6 +926,7 @@ export class AgentLoop {
       ephemeralTabIds: [],
       boundTabId: options.boundTabId,
       repeatGuard: new RepeatGuard(),
+      evidence: emptyRunEvidence(),
     };
     // Point rebuild at runCtx so unlocks sync both arrays.
     runCtx.rebuildTools = () => {
@@ -1078,6 +1096,38 @@ export class AgentLoop {
 
       if (result.toolCalls.length === 0) {
         finalText = result.content ?? "";
+        // Verify-before-done: empty tool_calls used to finish even with open
+        // doing-tasks or unverified mutations — the main hallucination surface
+        // vs ns-agent (which never claims success without a tool envelope).
+        if (runCtx.evidence.verifyNudges < MAX_VERIFY_NUDGES) {
+          let openTitles: string[] = [];
+          if (runCtx.tasks && runCtx.sessionId) {
+            try {
+              openTitles = (await runCtx.tasks.list({ sessionId: runCtx.sessionId }))
+                .filter((t) => t.status === "doing" || t.status === "todo" || t.status === "blocked")
+                .map((t) => t.title);
+            } catch {
+              /* best-effort */
+            }
+          }
+          const signals = verifyBeforeDoneSignals({
+            evidence: runCtx.evidence,
+            openTaskTitles: openTitles,
+          });
+          if (signals.length > 0) {
+            runCtx.evidence.verifyNudges += 1;
+            messages.push({ role: "assistant", content: finalText });
+            emit({ type: "assistant_delta", message: finalText });
+            void logUsage({ kind: "message", role: "assistant" });
+            const nudge = buildVerifyNudge(signals);
+            messages.push({ role: "user", content: nudge });
+            emit({
+              type: "status",
+              message: `Verify-before-done gate (${runCtx.evidence.verifyNudges}/${MAX_VERIFY_NUDGES}): continuing — ${signals[0]}`,
+            });
+            continue;
+          }
+        }
         messages.push({ role: "assistant", content: finalText });
         emit({ type: "assistant_delta", message: finalText });
         void logUsage({ kind: "message", role: "assistant" });
@@ -1185,6 +1235,17 @@ export class AgentLoop {
 
       // Sensitive tools stay sequential; consecutive non-sensitive run in parallel.
       // Push tool messages in original tool_call order after each batch.
+      // Stuck streak counts batches (turns of reads), not each parallel tool.
+      const finishBatch = (rows: Array<{ call: ToolCall; aborted: false; result: unknown }>) => {
+        const names = rows.map((r) => r.call.function.name);
+        const stuck = runCtx.repeatGuard?.finalizeObservationBatch(names);
+        if (stuck?.kind === "warn" && rows.length > 0) {
+          const last = rows[rows.length - 1]!;
+          last.result = RepeatGuard.annotate(last.result, stuck.note);
+        }
+        for (const row of rows) pushToolMessage(row.call, row.result);
+      };
+
       let callIdx = 0;
       while (callIdx < result.toolCalls.length) {
         if (options.signal?.aborted) {
@@ -1206,7 +1267,7 @@ export class AgentLoop {
               doneMessage: "aborted",
             });
           }
-          pushToolMessage(row.call, row.result);
+          finishBatch([{ call: row.call, aborted: false, result: row.result }]);
           callIdx += 1;
           continue;
         }
@@ -1219,6 +1280,7 @@ export class AgentLoop {
           callIdx += 1;
         }
         const batchResults = await Promise.all(batch.map((c) => prepareAndRun(c)));
+        const okRows: Array<{ call: ToolCall; aborted: false; result: unknown }> = [];
         for (const row of batchResults) {
           if (row.aborted) {
             return finishRun({
@@ -1228,8 +1290,9 @@ export class AgentLoop {
               doneMessage: "aborted",
             });
           }
-          pushToolMessage(row.call, row.result);
+          okRows.push({ call: row.call, aborted: false, result: row.result });
         }
+        finishBatch(okRows);
       }
     }
 
@@ -3116,6 +3179,7 @@ export class AgentLoop {
       if (repeat?.kind === "warn") {
         result = RepeatGuard.annotate(result, repeat.note);
       }
+      if (runCtx) noteToolEvidence(runCtx.evidence, name, result);
 
       emit({
         type: "tool_result",

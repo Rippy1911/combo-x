@@ -201,6 +201,44 @@ function buildListHint(site: ListSite, shown: number, dropped: number): string {
 }
 
 /**
+ * Fields the agent must still see after a hard truncate — `_repeat` / dialog
+ * probes / paging cursors used to vanish inside the blob preview and the model
+ * kept reconning as if the runtime never spoke.
+ */
+const CRITICAL_ENVELOPE_KEYS = [
+  "_repeat",
+  "redirected",
+  "requestedUrl",
+  "ok",
+  "error",
+  "hint",
+  "dialogOpened",
+  "hasMore",
+  "nextOffset",
+  "matched",
+  "total",
+  "offset",
+  "totalChars",
+  "effect",
+] as const;
+
+/** Pull runtime-critical keys from a tool result (top-level + `data`). */
+export function extractCriticalEnvelope(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of CRITICAL_ENVELOPE_KEYS) {
+    if (k in obj && obj[k] !== undefined) out[k] = obj[k];
+  }
+  const data = obj.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const d = data as Record<string, unknown>;
+    for (const k of CRITICAL_ENVELOPE_KEYS) {
+      if (k in d && out[k] === undefined && d[k] !== undefined) out[k] = d[k];
+    }
+  }
+  return out;
+}
+
+/**
  * Cap a mid-loop tool result for the LLM `messages[]` row.
  * Full payload still goes to UI via tool_result events — this only shrinks the
  * prompt replayed on every subsequent model turn.
@@ -226,8 +264,13 @@ export function truncateToolResultForLlm(result: unknown, maxChars: number): str
   let text = typeof plain === "string" ? plain : JSON.stringify(plain);
   text = scrubDataUrls(text);
   if (text.length <= cap) return text;
+  const critical =
+    typeof plain !== "string" && plain && typeof plain === "object" && !Array.isArray(plain)
+      ? extractCriticalEnvelope(plain as Record<string, unknown>)
+      : {};
   // Leave room for the envelope keys so the stored string stays near `cap`.
-  const previewBudget = Math.max(128, cap - 220);
+  const criticalJson = JSON.stringify(critical);
+  const previewBudget = Math.max(96, cap - 280 - criticalJson.length);
   const preview = text.length > previewBudget ? `${text.slice(0, previewBudget)}…` : text;
   return JSON.stringify({
     truncated: true,
@@ -235,6 +278,7 @@ export function truncateToolResultForLlm(result: unknown, maxChars: number): str
     hint:
       "Result was too large and is cut mid-way. Re-read a narrower slice " +
       "(get_page offset/filter, get_interactive filter/region, find_text) rather than repeating this call.",
+    ...critical,
     preview,
   });
 }
