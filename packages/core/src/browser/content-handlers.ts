@@ -63,8 +63,58 @@ function regionOf(el: Element, mainRoot: HTMLElement | null): "main" | "nav" {
   return "main";
 }
 
+/**
+ * `within` tiers: real table/list rows beat generic wrappers. A stray text
+ * match inside a pre-rendered dialog copy (section/div) must not widen the
+ * scope when an actual `<tr>`/`[role=row]`/`li` also matches (field case
+ * 2026-08-03: 128 controls "inside the row").
+ */
+const ROW_TIER1_SEL = 'tr, [role="row"], li, [role="listitem"]';
+const ROW_TIER2_SEL = 'article, section, fieldset, dd, [class*="row"], [class*="Row"]';
+
+/**
+ * Validate a caller-supplied CSS selector for subtree pruning. Invalid
+ * selectors become a no-op — a tool call must never throw on bad input.
+ */
+function safePruneSelector(doc: Document, raw: string | undefined): string | null {
+  const sel = raw?.trim();
+  if (!sel) return null;
+  try {
+    doc.querySelector(sel);
+    return sel;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove matching subtrees from a cloned root; returns pruned char count. */
+function pruneFromClone(clone: HTMLElement, pruneSel: string | null): number {
+  if (!pruneSel) return 0;
+  let chars = 0;
+  for (const n of Array.from(clone.querySelectorAll(pruneSel))) {
+    chars += (n.textContent ?? "").length;
+    n.remove();
+  }
+  return chars;
+}
+
 function stripNonText(root: HTMLElement): void {
-  for (const sel of ["script", "style", "noscript", "svg", "template"]) {
+  for (const sel of [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "template",
+    // Collapsed panels (e.g. a hidden chat column) still pollute text reads —
+    // their markup stays in the DOM when hidden. Skip [hidden] and inline
+    // display:none/visibility:hidden subtrees. aria-hidden is deliberately
+    // NOT stripped: apps aria-hide the whole root behind open modals.
+    "[hidden]",
+    '[style*="display: none"]',
+    '[style*="display:none"]',
+    '[style*="visibility: hidden"]',
+    '[style*="visibility:hidden"]',
+  ]) {
     for (const n of Array.from(root.querySelectorAll(sel))) n.remove();
   }
 }
@@ -114,14 +164,18 @@ function blockAwareText(root: HTMLElement): string {
  * Text of the primary content region with site chrome removed.
  * Returns the chrome char count so the caller can tell the agent what it skipped.
  */
-function mainText(doc: Document): { text: string; region: string; chromeChars: number } {
+function mainText(
+  doc: Document,
+  pruneSel: string | null = null,
+): { text: string; region: string; chromeChars: number; prunedChars: number } {
   const body = doc.body;
-  if (!body) return { text: "", region: "none", chromeChars: 0 };
+  if (!body) return { text: "", region: "none", chromeChars: 0, prunedChars: 0 };
   const mainRoot = findMainRoot(doc);
   const source = mainRoot ?? body;
   const clone = source.cloneNode(true) as HTMLElement;
   stripNonText(clone);
 
+  const prunedChars = pruneFromClone(clone, pruneSel);
   let chromeChars = 0;
   for (const n of Array.from(clone.querySelectorAll(CHROME_SEL))) {
     chromeChars += (n.textContent ?? "").length;
@@ -132,6 +186,7 @@ function mainText(doc: Document): { text: string; region: string; chromeChars: n
     text: normalizeText(blockAwareText(clone)),
     region: mainRoot ? mainRoot.tagName.toLowerCase() : "body-minus-chrome",
     chromeChars,
+    prunedChars,
   };
 }
 
@@ -297,10 +352,11 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           return { ok: true, data: pageDigest(doc) };
         }
 
+        const pruneSel = safePruneSelector(doc, request.excludeSelector);
         const useMain = mode === "main" || mode === "snippet";
         const extracted = useMain
-          ? mainText(doc)
-          : { text: visibleText(doc), region: "body", chromeChars: 0 };
+          ? mainText(doc, pruneSel)
+          : { text: visibleText(doc, pruneSel), region: "body", chromeChars: 0, prunedChars: 0 };
 
         let text = extracted.text;
         let filterMatched: number | undefined;
@@ -341,9 +397,16 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             truncated: win.hasMore,
             hint: win.hasMore
               ? `Showing chars ${win.offset}–${win.offset + win.slice.length} of ${win.totalChars}. Continue with get_page({offset:${win.nextOffset}${mode !== "main" ? `, mode:"${mode}"` : ""}}) or narrow with get_page({filter:"…"}).`
-              : useMain && extracted.chromeChars > 0
-                ? `Skipped ${extracted.chromeChars} chars of nav/header/footer chrome. Use mode:"full" if you need it.`
-                : undefined,
+              : [
+                  useMain && extracted.chromeChars > 0
+                    ? `Skipped ${extracted.chromeChars} chars of nav/header/footer chrome. Use mode:"full" if you need it.`
+                    : null,
+                  extracted.prunedChars > 0
+                    ? `Pruned ${extracted.prunedChars} chars matching excludeSelector.`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" ") || undefined,
           },
         };
       }
@@ -430,8 +493,17 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
       }
       case "extract": {
         const nodes = Array.from(doc.querySelectorAll(request.selector)).slice(0, 50);
+        // textContent/outerHTML/value are DOM properties, not attributes —
+        // getAttribute() returns null for them (burned three calls in the field).
+        const PROP_ATTRS = new Set(["textContent", "innerText", "innerHTML", "outerHTML", "value"]);
         const values = nodes.map((n) => {
-          if (request.attribute) return n.getAttribute(request.attribute);
+          if (request.attribute) {
+            if (PROP_ATTRS.has(request.attribute)) {
+              const v = (n as unknown as Record<string, unknown>)[request.attribute];
+              return typeof v === "string" ? v.trim().slice(0, 500) : null;
+            }
+            return n.getAttribute(request.attribute);
+          }
           return (n.textContent ?? "").trim().slice(0, 500);
         });
         return { ok: true, data: { values } };
@@ -488,6 +560,7 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         };
         const banned = request.exclude?.trim().toLowerCase() ?? "";
         const wantRegion = request.region ?? "any";
+        const pruneSel = safePruneSelector(doc, request.excludeSelector);
         const all: Hit[] = [];
         const walker = doc.createTreeWalker(doc.body ?? doc, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
@@ -505,7 +578,8 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             const keep =
               (!request.clickableOnly || mapIdx >= 0) &&
               (wantRegion === "any" || region === wantRegion) &&
-              (!banned || !body.toLowerCase().includes(banned));
+              (!banned || !body.toLowerCase().includes(banned)) &&
+              (!pruneSel || !parent?.closest(pruneSel));
             if (keep) {
               all.push({
                 index: all.length,
@@ -572,6 +646,54 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         const wantKind = request.kind ?? "any";
         const wantState = request.state ?? "any";
         let wantRegion = request.region ?? "any";
+        const pruneSel = safePruneSelector(doc, request.excludeSelector);
+
+        // Row-scoping: keep controls inside a container matching within.selector
+        // and/or containing within.text. Post-scan filtering keeps `i` absolute,
+        // so click_index stays valid.
+        const withinSel = request.within?.selector
+          ? safePruneSelector(doc, request.within.selector)
+          : null;
+        const withinText = request.within?.text?.trim().toLowerCase() ?? "";
+        let withinIdx: Set<number> | null = null;
+        if (withinSel || withinText) {
+          const selectorHits = new Set<Element>();
+          const tier1 = new Set<Element>();
+          const tier2 = new Set<Element>();
+          if (withinSel) {
+            for (const el of Array.from(doc.querySelectorAll(withinSel))) selectorHits.add(el);
+          }
+          if (withinText && doc.body) {
+            const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+            let node = walker.nextNode();
+            let guard = 0;
+            while (node && guard < 8000) {
+              guard += 1;
+              if ((node.textContent ?? "").toLowerCase().includes(withinText)) {
+                const host = node.parentElement;
+                if (host) {
+                  const t1 = host.closest(ROW_TIER1_SEL);
+                  if (t1) tier1.add(t1);
+                  else tier2.add(host.closest(ROW_TIER2_SEL) ?? host);
+                }
+              }
+              node = walker.nextNode();
+            }
+          }
+          // Real rows win over generic wrappers; selector hits always count.
+          // Innermost dedupe drops wrappers that contain another match.
+          const pool = [...selectorHits, ...(tier1.size ? tier1 : tier2)];
+          const containers = pool.filter((c) => !pool.some((o) => o !== c && c.contains(o)));
+          withinIdx = new Set<number>();
+          collected.els.forEach((el, idx) => {
+            for (const c of containers) {
+              if (c === el || c.contains(el)) {
+                withinIdx!.add(idx);
+                break;
+              }
+            }
+          });
+        }
 
         const byKindAndFilter = all
           .filter((it) => wantKind === "any" || it.kind === wantKind)
@@ -580,7 +702,9 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
           )
           .filter((it) => !request.requireLabel || it.text.length > 0)
           .filter((it) => !needle || interactiveHaystack(it).includes(needle))
-          .filter((it) => !banned || !interactiveHaystack(it).includes(banned));
+          .filter((it) => !banned || !interactiveHaystack(it).includes(banned))
+          .filter((it) => !pruneSel || !collected.els[it.i]?.closest(pruneSel))
+          .filter((it) => !withinIdx || withinIdx.has(it.i));
 
         // Adaptive default: on console-style pages the nav alone exceeds any
         // sane limit. When the caller did not choose, prefer main content and
@@ -619,10 +743,27 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             `No control matches "${request.filter}". Try a shorter substring, region:"any", state:"any", or find_text({text:"…"}) which reports a clickable interactiveIndex.`,
           );
         }
+        if (withinIdx) {
+          hints.push(
+            withinIdx.size > 0
+              ? `within scoping: ${withinIdx.size} control(s) sit inside the matching row/container(s) — indices stay absolute for click_index.`
+              : `within matched no controls — check the exact row text (must match the cell) or selector, or drop within.`,
+          );
+        }
         const disabledHidden =
           wantState === "enabled" ? all.filter((it) => it.disabled).length : 0;
         if (disabledHidden > 0) {
           hints.push(`${disabledHidden} disabled control(s) hidden by state:"enabled".`);
+        }
+        if (matched.length >= 20) {
+          const counts = new Map<string, number>();
+          for (const it of matched) counts.set(it.text, (counts.get(it.text) ?? 0) + 1);
+          const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+          if (top && top[1] >= matched.length * 0.8) {
+            hints.push(
+              `${top[1]} of ${matched.length} items share the text "${top[0]}" — disambiguate by row with within:{text:"<unique row text>"}, or shrink with fields:["text"].`,
+            );
+          }
         }
         if (!all.length) {
           hints.push(
@@ -649,6 +790,62 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
             /** dialog = open modal/menu/sheet; page = full document */
             scope: collected.scope,
             hint: hints.filter(Boolean).join(" ") || undefined,
+          },
+        };
+      }
+      case "list_form_fields": {
+        const limit = request.limit ?? 100;
+        const pruneSel = safePruneSelector(doc, request.excludeSelector);
+        const wantRegion = request.region ?? "any";
+        const mainRoot = findMainRoot(doc);
+
+        // Refresh the interactive map so returned `i` handles work with type_index.
+        let map = liveInteractiveMap(doc);
+        let mapRefreshed = false;
+        if (!map?.length) {
+          map = collectInteractive(doc, INTERACTIVE_SCAN_CAP, "page").els;
+          interactiveMaps.set(doc, map);
+          mapRefreshed = true;
+        }
+
+        const raw = Array.from(doc.querySelectorAll(FORM_FIELD_SEL)) as HTMLElement[];
+        const fields: Array<Record<string, unknown>> = [];
+        let total = 0;
+        for (const el of raw) {
+          if (!isVisible(el)) continue;
+          if (pruneSel && el.closest(pruneSel)) continue;
+          const region = regionOf(el, mainRoot);
+          if (wantRegion !== "any" && region !== wantRegion) continue;
+          total += 1;
+          if (fields.length >= limit) continue;
+          const type = formFieldType(el);
+          const isPassword = type === "password";
+          const value = formFieldValue(el);
+          const mapIdx = map.indexOf(el);
+          fields.push({
+            ...(mapIdx >= 0 ? { i: mapIdx } : {}),
+            tag: el.tagName.toLowerCase(),
+            type,
+            label: formFieldLabel(el, doc),
+            name: el.getAttribute("name") ?? undefined,
+            placeholder: el.getAttribute("placeholder") ?? undefined,
+            region,
+            disabled: isDisabled(el) || undefined,
+            hasValue: value.length > 0,
+            ...(isPassword ? {} : { value: value.slice(0, 80) || undefined }),
+            ...(mapIdx < 0 ? { unmapped: true } : {}),
+          });
+        }
+        return {
+          ok: true,
+          data: {
+            fields,
+            count: fields.length,
+            total,
+            mapRefreshed: mapRefreshed || undefined,
+            hint: fields.length
+              ? "Rows carrying i are type_index-ready: type_index({index:<i>, text:\"…\"}). Passwords never return a value (hasValue only)."
+              : "No form fields visible — inputs may appear after a click (inline editors) or live in an iframe.",
           },
         };
       }
@@ -690,6 +887,13 @@ export function handleContentRequest(request: ContentRequest, doc: Document = do
         }
         const el = map[request.index];
         if (!el) return { ok: false, error: `no interactive at index ${request.index}` };
+        if (!el.isConnected) {
+          return {
+            ok: false,
+            error:
+              "element_detached — the page re-rendered after your last get_interactive and this handle is stale; the click would go nowhere. Re-scan get_interactive({filter:\"…\"}) and click the fresh index.",
+          };
+        }
         el.click();
         return { ok: true, data: { clickedIndex: request.index, tag: el.tagName.toLowerCase() } };
       }
@@ -891,6 +1095,76 @@ function interactiveHaystack(it: InteractiveItem): string {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+/** Fillable controls surfaced by list_form_fields. */
+const FORM_FIELD_SEL =
+  'input:not([type="hidden"]), textarea, select, [contenteditable="true"], [contenteditable=""]';
+
+function formFieldType(el: HTMLElement): string {
+  if (el.tagName === "TEXTAREA") return "textarea";
+  if (el.tagName === "SELECT") return "select";
+  // Attribute check too — jsdom does not always implement isContentEditable.
+  if (el.isContentEditable || el.hasAttribute("contenteditable")) return "richtext";
+  return resolveInputType(el as HTMLInputElement);
+}
+
+function formFieldValue(el: HTMLElement): string {
+  if (el.tagName === "SELECT") {
+    const sel = el as HTMLSelectElement;
+    return (sel.selectedOptions?.[0]?.textContent ?? sel.value ?? "").trim();
+  }
+  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+    return ((el as HTMLInputElement).value ?? "").trim();
+  }
+  return (el.textContent ?? "").trim();
+}
+
+/**
+ * Best-effort accessible label for a form control: label[for], wrapping
+ * <label>, aria-label, aria-labelledby, a label-ish previous sibling, then
+ * placeholder/name as the fallback identity.
+ */
+function formFieldLabel(el: HTMLElement, doc: Document): string | undefined {
+  const clean = (raw: string | null | undefined): string | undefined => {
+    const t = (raw ?? "").replace(/\s+/g, " ").trim();
+    return t ? t.slice(0, 80) : undefined;
+  };
+  if (el.id) {
+    const safeId =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(el.id)
+        : el.id.replace(/["\\]/g, "");
+    try {
+      const t = clean(doc.querySelector(`label[for="${safeId}"]`)?.textContent);
+      if (t) return t;
+    } catch {
+      /* fall through to the next strategy */
+    }
+  }
+  const wrap = el.closest("label");
+  if (wrap) {
+    const t = clean(wrap.textContent);
+    if (t) return t;
+  }
+  const aria = clean(el.getAttribute("aria-label"));
+  if (aria) return aria;
+  const labelledBy = el.getAttribute("aria-labelledby");
+  if (labelledBy) {
+    const t = clean(
+      labelledBy
+        .split(/\s+/)
+        .map((id) => doc.getElementById(id)?.textContent ?? "")
+        .join(" "),
+    );
+    if (t) return t;
+  }
+  const sib = el.previousElementSibling;
+  if (sib && /^(LABEL|SPAN|DIV|P)$/.test(sib.tagName)) {
+    const t = clean(sib.textContent);
+    if (t) return t;
+  }
+  return clean(el.getAttribute("placeholder")) ?? clean(el.getAttribute("name"));
 }
 
 /** Inputs that accept free-text titles (not temporal/numeric constrained types). */
@@ -1390,11 +1664,12 @@ function isVisible(el: HTMLElement): boolean {
   return true;
 }
 
-function visibleText(doc: Document): string {
+function visibleText(doc: Document, pruneSel: string | null = null): string {
   const body = doc.body;
   if (!body) return "";
   const clone = body.cloneNode(true) as HTMLElement;
   stripNonText(clone);
+  pruneFromClone(clone, pruneSel);
   return normalizeText(blockAwareText(clone));
 }
 
@@ -1402,6 +1677,26 @@ function visibleText(doc: Document): string {
 export async function waitMs(ms: number): Promise<void> {
   const capped = Math.min(Math.max(0, ms), 10_000);
   await new Promise((r) => setTimeout(r, capped));
+}
+
+/**
+ * Post-click effect probe — the content script calls this after a short
+ * settle delay so clicks stop being silent no-ops (field case 2026-08-03:
+ * click_index "ok" with no dialog, twice, no signal either way).
+ */
+export function postClickState(doc: Document): Record<string, unknown> {
+  const modal = findTopModal(doc);
+  if (modal) {
+    return {
+      dialogOpened: true,
+      topModal: modal.tagName.toLowerCase(),
+      hint: "A dialog/menu opened — re-read with get_interactive (default scope=auto scopes into it).",
+    };
+  }
+  return {
+    dialogOpened: false,
+    hint: "No dialog/menu appeared after the click — the control may act inline, or the click missed (re-scan get_interactive and retry the fresh index).",
+  };
 }
 
 /**

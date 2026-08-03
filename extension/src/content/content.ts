@@ -1,4 +1,4 @@
-import { ContentRequestSchema, handleContentRequest, waitMs } from "@combo-x/core";
+import { ContentRequestSchema, handleContentRequest, postClickState, waitMs } from "@combo-x/core";
 import { startElementPicker, stopElementPicker } from "./elementPicker";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -30,7 +30,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: true, data: { waitedMs: parsed.data.ms } });
       return;
     }
-    sendResponse(handleContentRequest(parsed.data, document));
+    const res = handleContentRequest(parsed.data, document);
+    // Clicks must not be silent no-ops: settle briefly, then report whether a
+    // dialog/menu actually opened (React flushes the mount within this window).
+    if ((parsed.data.op === "click_index" || parsed.data.op === "click") && res.ok) {
+      await waitMs(300);
+      sendResponse({
+        ...res,
+        data: { ...(res.data as Record<string, unknown>), ...postClickState(document) },
+      });
+      return;
+    }
+    sendResponse(res);
   })();
   return true;
 });

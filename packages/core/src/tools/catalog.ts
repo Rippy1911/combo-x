@@ -355,6 +355,7 @@ const TOOL_GROUP: Record<string, ToolGroup> = {
   scroll: "browser",
   wait: "browser",
   find_text: "browser",
+  list_form_fields: "browser",
   web_search: "browser",
   web_fetch: "browser",
   navigate: "browser",

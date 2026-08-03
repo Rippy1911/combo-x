@@ -92,6 +92,87 @@ describe("RepeatGuard", () => {
   });
 });
 
+/**
+ * Semantic stuck guard — the 2026-08-03 Base44 editor run made ~12 varied
+ * read-only calls with zero mutations; the identical-call guard never fired
+ * because args and results kept changing. Distinct args/results per call.
+ */
+describe("RepeatGuard stuck-loop guard", () => {
+  const read = (g: RepeatGuard, n: number, tool = "get_interactive") => {
+    for (let i = 0; i < n; i++) {
+      g.check(tool, { round: i });
+      g.record(tool, { round: i }, { ok: true, items: [i] });
+    }
+  };
+
+  it("warns on the 6th consecutive read-only call with varied args", () => {
+    const g = new RepeatGuard();
+    let last: ReturnType<RepeatGuard["record"]> = { kind: "ok" };
+    for (let i = 0; i < 6; i++) {
+      g.check("get_interactive", { round: i });
+      last = g.record("get_interactive", { round: i }, { ok: true, items: [i] });
+    }
+    expect(last.kind).toBe("warn");
+    if (last.kind === "warn") expect(last.note).toMatch(/read-only observations/);
+  });
+
+  it("a mutation resets the observation streak", () => {
+    const g = new RepeatGuard();
+    read(g, 5); // streak 5
+    g.check("click_index", { index: 3 });
+    g.record("click_index", { index: 3 }, { ok: true }); // reset
+    read(g, 5); // streak 5 again — still quiet
+    expect(g.check("get_page", {}).kind).toBe("ok");
+  });
+
+  it("blocks the 11th consecutive read-only call when no wait() was used", () => {
+    const g = new RepeatGuard();
+    read(g, 10);
+    const verdict = g.check("find_text", { text: "x" });
+    expect(verdict.kind).toBe("block");
+    if (verdict.kind === "block") {
+      expect(verdict.result.error).toBe("stuck_loop_blocked");
+      expect(String(verdict.result.hint)).toMatch(/list_form_fields|BLOCKED/);
+    }
+  });
+
+  it("the block resets the streak, so recovery reads (list_tabs) are allowed", () => {
+    // Field case 2026-08-03: the active tab changed mid-run; the agent's
+    // recovery move (list_tabs) is itself read-only and must not stay refused.
+    const g = new RepeatGuard();
+    read(g, 10);
+    expect(g.check("find_text", { text: "x" }).kind).toBe("block");
+    expect(g.check("list_tabs", {}).kind).toBe("ok");
+    const verdict = g.record("list_tabs", {}, { ok: true, tabs: [] });
+    expect(verdict.kind).toBe("ok");
+  });
+
+  it("wait() marks deliberate polling: warns but never blocks", () => {
+    const g = new RepeatGuard();
+    let warned = false;
+    for (let i = 0; i < 12; i++) {
+      g.check("wait", { ms: 1000 + i });
+      if (g.record("wait", { ms: 1000 + i }, { ok: true, data: { waitedMs: 1000 + i } }).kind === "warn") {
+        warned = true;
+      }
+      g.check("get_page", { round: i });
+      if (g.record("get_page", { round: i }, { ok: true, text: `state ${i}` }).kind === "warn") {
+        warned = true;
+      }
+    }
+    expect(warned).toBe(true);
+    expect(g.check("get_page", {}).kind).not.toBe("block");
+  });
+
+  it("identical-call blocking still works alongside the streak guard", () => {
+    const g = new RepeatGuard();
+    const same = { ok: true, url: "/app-list" };
+    g.record("navigate", NAV, same);
+    g.record("navigate", NAV, same);
+    expect(g.check("navigate", NAV).kind).toBe("block");
+  });
+});
+
 describe("annotateRedirect", () => {
   it("flags a silent redirect and names both URLs", () => {
     const out = annotateRedirect(

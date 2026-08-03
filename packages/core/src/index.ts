@@ -256,6 +256,7 @@ export {
 export {
   handleContentRequest,
   waitMs,
+  postClickState,
   buildPickedElementRef,
   resolvePickTarget,
   describePickHover,

@@ -26,6 +26,7 @@ export const TOOL_GROUPS = {
     "get_page",
     "get_links",
     "get_interactive",
+    "list_form_fields",
     "press_key",
     "click_index",
     "type_index",

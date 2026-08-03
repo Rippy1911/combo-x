@@ -11,6 +11,13 @@ describe("resolveVisionCapability", () => {
     expect(r.source).toBe("preset");
   });
 
+  it("kimi-k3-max resolves vision from the preset registry (no worker hop)", () => {
+    // Field case 2026-08-03: "orchestrator lacks vision (unknown)" on Kimi K3 Max.
+    const r = resolveVisionCapability("kimi-k3-max");
+    expect(r.orchestratorHasVision).toBe(true);
+    expect(r.source).toBe("preset");
+  });
+
   it("unknown model fails soft to non-vision", () => {
     const r = resolveVisionCapability("vendor/unknown-text-only");
     expect(r.orchestratorHasVision).toBe(false);
