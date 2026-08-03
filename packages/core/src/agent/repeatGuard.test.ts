@@ -139,46 +139,26 @@ describe("RepeatGuard stuck-loop guard (batch-aware)", () => {
     expect(g.check("get_page", {}).kind).toBe("ok");
   });
 
-  it("blocks the 9th observation-only turn when no wait() was used", () => {
+  it("never hard-blocks on observation streak (paging / list compile stays allowed)", () => {
+    // 2026-08-03: stuck_loop_blocked mid get_page offset paging felt random — removed.
     const g = new RepeatGuard();
-    for (let i = 0; i < 8; i++) {
-      g.check("get_interactive", { turn: i });
-      g.record("get_interactive", { turn: i }, { ok: true, items: [i] });
-      g.finalizeObservationBatch(["get_interactive"]);
+    for (let i = 0; i < 12; i++) {
+      g.check("get_page", { offset: i * 500 });
+      g.record("get_page", { offset: i * 500 }, { ok: true, text: `slice ${i}` });
+      g.finalizeObservationBatch(["get_page"]);
     }
-    const verdict = g.check("find_text", { text: "x" });
-    expect(verdict.kind).toBe("block");
-    if (verdict.kind === "block") {
-      expect(verdict.result.error).toBe("stuck_loop_blocked");
-      expect(String(verdict.result.hint)).toMatch(/list_form_fields|BLOCKED/);
-    }
+    expect(g.check("get_page", { offset: 6000 }).kind).toBe("ok");
   });
 
-  it("the block resets the streak, so recovery reads (list_tabs) are allowed", () => {
+  it("wait()-only batches do not inflate the ACT NOW streak", () => {
     const g = new RepeatGuard();
-    for (let i = 0; i < 8; i++) {
-      g.check("get_interactive", { turn: i });
-      g.record("get_interactive", { turn: i }, { ok: true, items: [i] });
-      g.finalizeObservationBatch(["get_interactive"]);
-    }
-    expect(g.check("find_text", { text: "x" }).kind).toBe("block");
-    expect(g.check("list_tabs", {}).kind).toBe("ok");
-    g.record("list_tabs", {}, { ok: true, tabs: [] });
-    expect(g.finalizeObservationBatch(["list_tabs"]).kind).toBe("ok");
-  });
-
-  it("wait() marks deliberate polling: warns but never blocks", () => {
-    const g = new RepeatGuard();
-    let warned = false;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 5; i++) {
       g.check("wait", { ms: 1000 + i });
-      g.record("wait", { ms: 1000 + i }, { ok: true, data: { waitedMs: 1000 + i } });
-      g.check("get_page", { round: i });
-      g.record("get_page", { round: i }, { ok: true, text: `state ${i}` });
-      if (g.finalizeObservationBatch(["wait", "get_page"]).kind === "warn") warned = true;
+      g.record("wait", { ms: 1000 + i }, { ok: true });
+      expect(g.finalizeObservationBatch(["wait"]).kind).toBe("ok");
     }
-    expect(warned).toBe(true);
-    expect(g.check("get_page", {}).kind).not.toBe("block");
+    // First real observation batch after waits still starts fresh
+    expect(obsBatch(g, ["get_page"]).kind).toBe("ok");
   });
 
   it("identical-call blocking still works alongside the streak guard", () => {

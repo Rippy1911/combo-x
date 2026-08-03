@@ -17,5 +17,6 @@ describe("DEFAULT_SYSTEM verify-before-claim (ns-agent discipline)", () => {
     expect(DEFAULT_SYSTEM).toMatch(/dialogOpened:false/);
     expect(DEFAULT_SYSTEM).toMatch(/VERIFY BEFORE DONE/);
     expect(DEFAULT_SYSTEM).toMatch(/Never invent page content/);
+    expect(DEFAULT_SYSTEM).not.toMatch(/stuck_loop_blocked/);
   });
 });

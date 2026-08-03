@@ -1,6 +1,7 @@
 import {
   AGENT_TOOLS,
   DEFAULT_SKIP_DIRS,
+  DEFAULT_WORKER_MODEL,
   grantAndIndex,
   ensureGithubRestConnector,
   uploadsRestTemplate,
@@ -1049,10 +1050,23 @@ export function SettingsPanel({
         onChange={(id) => {
           setModel(id);
           setCustomModel(id);
+          // Worker is NOT a browser executor — keep it locked to orch when it still
+          // looks like a leftover default so picking Flash doesn't leave Gemini on
+          // parse_data/approval hops.
+          const legacyDefaults = new Set([
+            DEFAULT_WORKER_MODEL,
+            "google/gemini-3.5-flash",
+            "google/gemini-2.5-flash",
+            model,
+          ]);
+          if (legacyDefaults.has(workerModel)) {
+            setWorkerModel(id);
+            setCustomWorkerModel(id);
+          }
         }}
       />
       <p className="hint wrap">{MODEL_PASTE_HINT}</p>
-      <label className="hint">Worker model</label>
+      <label className="hint">Worker model (parse_data / auto-approval only)</label>
       <ModelPicker
         value={workerModel}
         apiKey={apiKey}
@@ -1064,6 +1078,11 @@ export function SettingsPanel({
           setCustomWorkerModel(id);
         }}
       />
+      <p className="hint wrap">
+        The orchestrator runs every browser tool turn itself — there is no separate
+        “hand/executor” model for clicks. Set worker = orchestrator (e.g. both DeepSeek
+        V4 Flash) unless you want a cheaper parse-only hop.
+      </p>
       <label className="hint">GitHub token (vault: github_token or gh_combo_x)</label>
       <input
         type="password"

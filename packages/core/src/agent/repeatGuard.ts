@@ -142,16 +142,13 @@ export class RepeatGuard {
   private static readonly BLOCK_AT_REPEATS = 1;
 
   /**
-   * Semantic stuck guard: consecutive observation-only *batches* (one model
-   * turn of parallel reads = +1) without an intervening mutation. `wait` inside
-   * the streak marks deliberate polling — warned but never blocked.
-   *
-   * Warn fires at 3 observation-only turns (operators kill ~turn 5). Block at 8.
+   * Soft recon nudge: consecutive observation-only *batches* (one model turn of
+   * parallel reads = +1). Warn-only — never hard-block. Field 2026-08-03: a hard
+   * `stuck_loop_blocked` at 8 turns killed legitimate paging (get_page offsets /
+   * compiling a row list) and felt like a random refusal mid-task.
    */
   private observationBatches = 0;
-  private waitInStreak = false;
   private static readonly STUCK_WARN_AT = 3;
-  private static readonly STUCK_BLOCK_AT = 8;
 
   private key(name: string, args: Record<string, unknown>): string {
     return `${name}#${canonicalize(args)}`;
@@ -160,32 +157,11 @@ export class RepeatGuard {
   /**
    * Called before executing. Returns `block` once this exact call has produced
    * the same result twice — the tool is then not run at all.
-   * Also refuses when observation-only batches hit the hard ceiling.
+   * (No hard observation-streak refuse — see finalizeObservationBatch.)
    */
   check(name: string, args: Record<string, unknown>): RepeatVerdict {
     if (!OBSERVATION_TOOLS.has(name)) {
       this.observationBatches = 0;
-      this.waitInStreak = false;
-    } else if (this.observationBatches >= RepeatGuard.STUCK_BLOCK_AT && !this.waitInStreak) {
-      // The refusal IS the intervention — reset so recovery reads (list_tabs to
-      // find a lost tab, a scoped re-read) are not themselves refused next.
-      const observations = this.observationBatches;
-      this.observationBatches = 0;
-      this.waitInStreak = false;
-      return {
-        kind: "block",
-        repeats: observations,
-        result: {
-          ok: false,
-          error: "stuck_loop_blocked",
-          observations,
-          hint:
-            `Refused: ${observations} consecutive read-only turns with no click/type/navigation. ` +
-            `The page does not change by reading it again. Mutate (click_index/type_index), map the form with ` +
-            `list_form_fields, cut noise with within/excludeSelector, or report BLOCKED with what you tried. ` +
-            `Wrong tab? list_tabs then activate_tab or navigate back — this refusal reset the streak.`,
-        },
-      };
     }
     const entry = this.seen.get(this.key(name, args));
     if (!entry || entry.repeats < RepeatGuard.BLOCK_AT_REPEATS) return { kind: "ok" };
@@ -245,22 +221,20 @@ export class RepeatGuard {
     const allObservation = toolNames.every((n) => OBSERVATION_TOOLS.has(n));
     if (!allObservation) {
       this.observationBatches = 0;
-      this.waitInStreak = false;
       return { kind: "ok" };
     }
+    // wait()-only / wait+read batches are deliberate polling — don't nag.
+    if (toolNames.every((n) => n === "wait")) return { kind: "ok" };
     this.observationBatches += 1;
-    if (toolNames.some((n) => n === "wait")) this.waitInStreak = true;
     if (this.observationBatches >= RepeatGuard.STUCK_WARN_AT) {
       return {
         kind: "warn",
         repeats: this.observationBatches,
         note:
           `ACT NOW — ${this.observationBatches} read-only turns with zero clicks/types/navigation. ` +
-          `Batching more reads in the next turn still counts as recon. ` +
-          `Pick the most plausible control and click it (the result reports dialogOpened — a wrong click is cheap and ` +
-          `teaches more than another read), or map the form with list_form_fields, or scope with within:{text:"…"}. ` +
-          `Do NOT take another broad read. If nothing is clickable for your goal, tell the user exactly what is ` +
-          `blocking you instead of reading on. (Deliberately waiting? keep using wait() — that never blocks.)`,
+          `If you already have the list you need, stop reading and click/type/save. ` +
+          `If you are still paging (hasMore/nextOffset), that is fine — change offset/filter, don't repeat the same slice. ` +
+          `A wrong click_index is cheap (dialogOpened reports the effect).`,
       };
     }
     return { kind: "ok" };
