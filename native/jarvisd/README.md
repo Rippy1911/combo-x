@@ -25,8 +25,12 @@ Uninstall the manifest:
 
 ### macOS permissions
 
-1. **Accessibility** — System Settings → Privacy & Security → Accessibility. Enable `run-jarvisd.sh` (or the venv `python3`). Required for `ui_tree`, `click`, `type`, `key`, `focus`. Without it: `unavailable:accessibility`.
-2. **Screen Recording** — same pane → Screen Recording. Required for `screenshot`. Without it captures are empty/black → `unavailable:screen_recording`.
+TCC attributes these to the **responsible parent process**, not to `run-jarvisd.sh`. Chrome spawns the host, so grant them to **Google Chrome** (verified 2026-07-30: a freshly written wrapper, never listed in any pane, captured a screenshot because its parent already held Screen Recording).
+
+1. **Accessibility** — System Settings → Privacy & Security → Accessibility → enable **Google Chrome**. Required for `ui_tree`, `click`, `type`, `key`, `focus`. Without it: `unavailable:accessibility`.
+2. **Screen Recording** — same pane → Screen Recording → enable **Google Chrome**. Required for `screenshot`. Without it captures are empty/black → `unavailable:screen_recording`.
+
+When launching the daemon by hand instead of via Chrome, grant the terminal app you launch it from.
 
 After toggling permissions, quit Chrome fully and reopen so the host is relaunched.
 
