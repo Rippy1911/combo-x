@@ -34,9 +34,9 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     keyPlaceholder: "sk-or-v1-…",
     openRouterServerTools: true,
     hint: "Default — many models + built-in web search",
-    defaultOrchestratorModel: "x-ai/grok-4.5",
-    defaultWorkerModel: "deepseek/deepseek-v4-flash-0731",
-    defaultVisionModel: "x-ai/grok-4.5",
+    defaultOrchestratorModel: "openai/gpt-5.6-terra-pro",
+    defaultWorkerModel: "openai/gpt-5.6-terra-pro",
+    defaultVisionModel: "openai/gpt-5.6-terra-pro",
   },
   {
     id: "openai",
