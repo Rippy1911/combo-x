@@ -2,15 +2,14 @@
 import type { LlmProviderId } from "./llm/providers.js";
 import { resolveProvider } from "./llm/providers.js";
 
-export const DEFAULT_MODEL = "x-ai/grok-4.5";
+export const DEFAULT_MODEL = "openai/gpt-5.6-terra-pro";
 
 /**
- * Cheap worker for parse_data / auto-approval only — NOT a browser "executor".
+ * Worker for parse_data / auto-approval only — NOT a browser "executor".
  * The orchestrator runs every tool-calling turn itself; worker never clicks.
- * Default aligned with DeepSeek Flash (prompt-cache friendly) so Settings that
- * only change the orch model don't silently keep a second-provider hop.
+ * Aligned with estate OpenRouter default (Terra Pro).
  */
-export const DEFAULT_WORKER_MODEL = "deepseek/deepseek-v4-flash-0731";
+export const DEFAULT_WORKER_MODEL = "openai/gpt-5.6-terra-pro";
 
 /** Legacy bad default from Combo-X v0.1 — auto-migrate. */
 export const LEGACY_BAD_MODELS = new Set(["x-ai/grok-4.5-fast", "openrouter/x-ai/grok-4.5-fast"]);
@@ -26,14 +25,14 @@ export type ModelPreset = {
 };
 
 export const MODEL_PRESETS: ModelPreset[] = [
-  { id: "x-ai/grok-4.5", label: "Grok 4.5", hint: "default", vision: true, providers: ["openrouter"] },
-  { id: "x-ai/grok-4.3", label: "Grok 4.3", vision: true, providers: ["openrouter"] },
-  { id: "x-ai/grok-4.20", label: "Grok 4.20", vision: true, providers: ["openrouter"] },
-  { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5", vision: true, providers: ["openrouter"] },
-  { id: "anthropic/claude-fable-5", label: "Claude Fable 5", vision: true, providers: ["openrouter"] },
-  { id: "google/gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "cheap", vision: true, providers: ["openrouter"] },
-  { id: "openai/gpt-5.5", label: "GPT-5.5", vision: true, providers: ["openrouter"] },
-  { id: "openai/gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "cheap", vision: true, providers: ["openrouter"] },
+  {
+    id: "openai/gpt-5.6-terra-pro",
+    label: "GPT-5.6 Terra Pro",
+    hint: "default",
+    vision: true,
+    providers: ["openrouter"],
+  },
+  { id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra", vision: true, providers: ["openrouter"] },
   {
     id: "openai/gpt-5.6-luna",
     label: "GPT-5.6 Luna",
@@ -41,6 +40,14 @@ export const MODEL_PRESETS: ModelPreset[] = [
     vision: true,
     providers: ["openrouter"],
   },
+  { id: "x-ai/grok-4.5", label: "Grok 4.5", vision: true, providers: ["openrouter"] },
+  { id: "x-ai/grok-4.3", label: "Grok 4.3", vision: true, providers: ["openrouter"] },
+  { id: "x-ai/grok-4.20", label: "Grok 4.20", vision: true, providers: ["openrouter"] },
+  { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5", vision: true, providers: ["openrouter"] },
+  { id: "anthropic/claude-fable-5", label: "Claude Fable 5", vision: true, providers: ["openrouter"] },
+  { id: "google/gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "cheap", vision: true, providers: ["openrouter"] },
+  { id: "openai/gpt-5.5", label: "GPT-5.5", vision: true, providers: ["openrouter"] },
+  { id: "openai/gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "cheap", vision: true, providers: ["openrouter"] },
   // DeepSeek — automatic prefix caching makes long tool loops very cheap
   // (cache reads bill ~10× less), so these suit multi-step browser runs.
   {

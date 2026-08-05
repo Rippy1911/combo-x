@@ -9,8 +9,8 @@ import {
 
 describe("normalizeModelId provider-aware", () => {
   it("keeps openrouter defaults", () => {
-    expect(normalizeModelId(null, "openrouter")).toBe("x-ai/grok-4.5");
-    expect(normalizeModelId("x-ai/grok-4.5", "openrouter")).toBe("x-ai/grok-4.5");
+    expect(normalizeModelId(null, "openrouter")).toBe("openai/gpt-5.6-terra-pro");
+    expect(normalizeModelId("openai/gpt-5.6-terra-pro", "openrouter")).toBe("openai/gpt-5.6-terra-pro");
   });
 
   it("rewrites cloud id when switching to ollama", () => {
@@ -23,7 +23,7 @@ describe("normalizeModelId provider-aware", () => {
   });
 
   it("rewrites ollama tag when on openrouter", () => {
-    expect(normalizeModelId("qwen2.5:32b", "openrouter")).toBe("x-ai/grok-4.5");
+    expect(normalizeModelId("qwen2.5:32b", "openrouter")).toBe("openai/gpt-5.6-terra-pro");
   });
 
   it("moonshot bare ids stay", () => {
