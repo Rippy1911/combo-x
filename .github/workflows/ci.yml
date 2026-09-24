@@ -7,7 +7,9 @@ on:
 
 jobs:
   build-test:
-    runs-on: [self-hosted, linux, x64]
+    # GitHub-hosted: this repo is public, and pull_request jobs on a self-hosted
+    # runner would run fork code on the VM (the runner holds the Docker socket).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
