@@ -44,7 +44,7 @@ export const VISION_STORAGE_KEYS = {
 } as const;
 
 export const DEFAULT_VISION_SETTINGS: VisionSettings = {
-  visionWorkerModel: "google/gemini-3.5-flash",
+  visionWorkerModel: "openai/gpt-5.6-terra-pro",
   autoAttachScreenshots: true,
   critiqueImageDetail: "high",
   screenshotQuality: "high",

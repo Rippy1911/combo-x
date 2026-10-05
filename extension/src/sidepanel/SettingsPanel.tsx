@@ -1215,7 +1215,7 @@ export function SettingsPanel({
       <input
         type="text"
         value={visionSettings.visionModelOverride}
-        placeholder="e.g. openai/gpt-5.6-luna"
+        placeholder="e.g. openai/gpt-5.6-terra-pro"
         onChange={(e) =>
           setVisionSettings({
             ...visionSettings,
