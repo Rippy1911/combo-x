@@ -20,6 +20,8 @@ describe("llm providers", () => {
     expect(resolveProvider("nope").id).toBe("openrouter");
     expect(resolveProvider("ollama").baseUrl).toContain("11434");
     expect(resolveProvider("moonshot").baseUrl).toBe("https://api.moonshot.ai/v1");
+    expect(resolveProvider("demonroute").baseUrl).toBe("https://api.demonroute.com/v1");
+    expect(resolveProvider("demonroute").label).toBe("Demon Route");
   });
 
   it("ollama is local with qwen defaults", () => {
@@ -37,6 +39,7 @@ describe("llm providers", () => {
   it("uses distinct vault labels per provider", () => {
     expect(apiKeyVaultLabel("openrouter")).toBe(LLM_API_KEY_LABEL);
     expect(apiKeyVaultLabel("moonshot")).toBe("moonshot_api_key");
+    expect(apiKeyVaultLabel("demonroute")).toBe("demonroute_api_key");
     expect(apiKeyVaultLabel("openai")).toBe("openai_api_key");
     expect(baseUrlVaultLabel("moonshot")).toBe("llm_base_url_moonshot");
     expect(modelVaultLabel("ollama")).toBe("llm_model_ollama");
@@ -102,5 +105,14 @@ describe("llm providers", () => {
     expect(
       coerceProviderBaseUrl("moonshot", "https://api.moonshot.ai/v1/"),
     ).toBe("https://api.moonshot.ai/v1");
+    expect(baseUrlCompatibleWithProvider("https://api.demonroute.com/v1", "demonroute")).toBe(
+      true,
+    );
+    expect(baseUrlCompatibleWithProvider("https://openrouter.ai/api/v1", "demonroute")).toBe(
+      false,
+    );
+    expect(
+      coerceProviderBaseUrl("demonroute", "https://openrouter.ai/api/v1"),
+    ).toBe("https://api.demonroute.com/v1");
   });
 });
