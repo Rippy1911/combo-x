@@ -5,6 +5,7 @@ export type LlmProviderId =
   | "openai"
   | "ollama"
   | "moonshot"
+  | "demonroute"
   | "custom";
 
 export type LlmProviderPreset = {
@@ -59,6 +60,16 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     defaultVisionModel: "kimi-k3",
   },
   {
+    id: "demonroute",
+    label: "Demon Route",
+    baseUrl: "https://api.demonroute.com/v1",
+    keyPlaceholder: "sk-… (Demon Route API key)",
+    hint: "1,700+ uncensored / roleplay open-weight models — OpenAI-compat prepaid gateway",
+    defaultOrchestratorModel: "dphn/Dolphin-Mistral-24B-Venice-Edition",
+    defaultWorkerModel: "Orenguteng/Llama-3.1-8B-Lexi-Uncensored-V2",
+    defaultVisionModel: "huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated",
+  },
+  {
     id: "ollama",
     label: "Ollama (local)",
     baseUrl: "http://127.0.0.1:11434/v1",
@@ -95,6 +106,7 @@ const API_KEY_LABELS: Record<LlmProviderId, string> = {
   openrouter: LLM_API_KEY_LABEL,
   openai: "openai_api_key",
   moonshot: "moonshot_api_key",
+  demonroute: "demonroute_api_key",
   ollama: "ollama_api_key",
   custom: "custom_api_key",
 };
@@ -208,6 +220,7 @@ const KNOWN_CLOUD_LLM_HOSTS = new Set([
   "api.moonshot.ai",
   "api.moonshot.cn",
   "api.kimi.com",
+  "api.demonroute.com",
 ]);
 
 /**
@@ -240,6 +253,9 @@ export function baseUrlCompatibleWithProvider(
   }
   if (preset.id === "openrouter") {
     return host === "openrouter.ai" || host.endsWith(".openrouter.ai");
+  }
+  if (preset.id === "demonroute") {
+    return host === "api.demonroute.com" || host.endsWith(".demonroute.com");
   }
   if (preset.id === "openai") {
     return host === "api.openai.com" || host.endsWith(".openai.com");

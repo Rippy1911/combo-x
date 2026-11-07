@@ -15,6 +15,7 @@ for that send without wiping your OpenRouter key.
 | `openrouter` | `https://openrouter.ai/api/v1` | `openrouter_api_key` | Grok 4.5 / Gemini Flash | Optional server tools for web search. |
 | `openai` | `https://api.openai.com/v1` | `openai_api_key` | gpt-4.1 / mini | Direct OpenAI. |
 | `moonshot` | `https://api.moonshot.ai/v1` | `moonshot_api_key` | kimi-k3 / kimi-k2.6 | Kimi via Moonshot. |
+| `demonroute` | `https://api.demonroute.com/v1` | `demonroute_api_key` | Dolphin Venice 24B / Lexi 8B | Uncensored / roleplay open-weight gateway. |
 | `ollama` | `http://127.0.0.1:11434/v1` | `ollama_api_key` (optional) | qwen2.5:32b / :14b | Local; Bearer `local` if empty. |
 | `custom` | `http://127.0.0.1:1234/v1` | `custom_api_key` (optional) | local-model | LM Studio, vLLM, llama.cpp. |
 
